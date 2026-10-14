@@ -14,7 +14,11 @@ master brief has been delivered.
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
+- Verified implementation commit: `a97c516` (`quant: add ternary reference format`).
 - No upstream merge or local-modification migration was needed at start.
+- Publication: `NOT PUSHED`. The configured `origin` points to `MarsWise/openTPU`, but ownership,
+  authenticated account, and write permission could not be verified (`gh` is unavailable).
+  No draft PR was created.
 
 ## Subsystem status
 
