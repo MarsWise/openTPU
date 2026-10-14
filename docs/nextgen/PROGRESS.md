@@ -14,25 +14,24 @@ master brief has been delivered.
 - The upstream delta adds MiniCPM-V/VLM loading, ViT kernels, serving/offload and model tools;
   updates MoE/Qwen3 behavior; and makes the SW output register unconditional across targets.
   `opentpu/compiler.py` and `opentpu/llm/qwen3.py` overlap with local TMM edits, but their reviewed
-  upstream hunks are in separate areas. Integration is pending until the in-flight regression
-  finishes, so its source tree remains stable.
+  upstream hunks are in separate areas. The merge into this feature branch completed without
+  conflicts; the full combined-tree regression passed before creating the merge commit.
 - Starting local HEAD matched that SHA; starting worktree was clean. Recovery branch:
   `backup/pre-nextgen-5309a20`.
 - Configured origin: `https://github.com/MarsWise/openTPU.git`; authenticated account and write
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Current code checkpoint: `92f7e405b9b2018c85c4f420d5f333d798cc1a2b`
-  (`tools: ingest user-supplied FPGA reports`). Latest pushed normalization/docs checkpoint:
-  `23bef65011f9cc4a39b64b6f08ab3f8f47f95d82` (includes the PR status refresh).
+- Current code checkpoint: `1064210b14a8efa4c2ad451ff2974e862e77c680`
+  (`feat: add native packed ternary TMM`), with latest-upstream integration now verified.
+- Feature branch publication will be re-verified after the upstream merge commit is published.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
-- Branch push verified at the latest GitHub check: remote feature ref resolves to
-  `23bef65011f9cc4a39b64b6f08ab3f8f47f95d82`; remote `main` remains
-  `5309a20d28948fa910897e85a96f82db6ee5c1fd`. No force push.
+- Previous branch push verified at `1064210b14a8efa4c2ad451ff2974e862e77c680`; upstream `main`
+  remains untouched by this work. No force push.
 - Draft PR: created and verified as open/draft #1:
   `https://github.com/MarsWise/openTPU/pull/1`, targeting the fork's `main`.
-- No upstream merge or local-modification migration was needed at start; latest upstream
-  integration is now pending the review and regression above.
+- Latest upstream integration was performed only after reviewing the changed files and checking
+  worktree overlap. No local modifications were discarded; merge completed without conflicts.
 - `git push --dry-run` and non-forced feature-branch pushes succeeded using the configured origin.
   The PR API identifies the actor as `MarsWise`. The public repository metadata confirms the fork
   parent is `FeSens/openTPU`.
@@ -41,13 +40,15 @@ master brief has been delivered.
 
 | Subsystem | Status | Evidence / remaining work |
 |---|---|---|
-| Upstream provenance and baseline preservation | `REVIEWED; INTEGRATION PENDING` | Fetched `upstream/main` read-only at `e15b4a4`; reviewed the 51-commit/55-file summary, compiler/Qwen3 overlap, simulation and RTL-top changes. Full patch-level review remains incomplete; merge is deferred until the current regression finishes. |
+| Upstream provenance and baseline preservation | `INTEGRATED; REGRESSION VERIFIED` | Fetched `upstream/main` read-only at `e15b4a4`; reviewed the 51-commit/55-file summary and overlapping compiler/Qwen3 hunks. Merged into the existing feature branch with no conflicts; full suite passed (1,324 passed, 55 optional/environment skips, 1 expected failure). |
 | Ternary symbol storage and software reference | `REFERENCE VERIFIED` | Added low-pair-first 2-bit pack/unpack and an int64 packed +/−/skip reference matmul; `test_ternary.py` has 28 passing tests, and the combined ternary/ISA/compiler run passed 72. Not a checkpoint quantizer or hardware mode. |
 | Upstream architecture/provenance reports | `REFERENCE VERIFIED` | Added scoped source audit, merge disposition and feature matrix; inspected a 100-commit path-filtered history, remote branch listing and PRs #3–#7. No complete branch-by-branch audit. |
 | User report ingestion | `REFERENCE VERIFIED` | Added a standard-library parser for user-provided Vivado utilization/timing text and latency CSV; synthetic parser tests pass. It does not run or verify Vivado. |
-| Native ternary MXU / RTL / ISA / compiler / runtime | `RTL SIMULATION VERIFIED` | TMM opcode `0x23`, simulator execution, compiler lowering, MXU ternary stream/decode/PE arithmetic, profiles and footprints are implemented. The current `test_tmm_rtl` selection passed all 6 D=128 Verilator cases, bit-exact against the ISA simulator and including invalid-code rejection. The full suite was interrupted after an environment failure (`transformers` missing); the exact host test passed after installing that test dependency, and a full run remains pending. |
+| Native ternary MXU / RTL / ISA / compiler / runtime | `RTL SIMULATION VERIFIED` | TMM opcode `0x23`, simulator execution, compiler lowering, MXU ternary stream/decode/PE arithmetic, profiles and footprints are implemented. Six D=128 Verilator cases pass bit-exact against the ISA simulator, including invalid-code rejection. The full suite also passes (1,324 passed, 55 skips, 1 xfailed). |
 | Matrix Engine 2.0 / adaptive precision | `PLANNED` | Existing matrix engine and precision paths were inspected; no RTL changes or DSE results. |
-| YOLO/CNN, VLM, VLA, MoE changes, vLLM backend | `PLANNED` | No model/checkpoint was selected or run; no feature claims made. |
+| MiniCPM-V/VLM | `UPSTREAM INTEGRATED; LOCAL NUMERICAL VERIFY BLOCKED` | The upstream delta adds the MiniCPM-V loader, ViT kernels, image prefill and conversion tools. Its tests are skipped locally because PyTorch is unavailable; no local checkpoint or framework-reference run has been made. This is not a VLA implementation. |
+| MoE/offload/serving updates | `UPSTREAM INTEGRATED; FULL REGRESSION IN PROGRESS` | Integrated upstream pool/offload, Qwen3.5 and serving changes with their tests. No local model/checkpoint execution or physical FPGA validation is claimed. |
+| YOLO/CNN, VLA, vLLM backend | `PLANNED` | No implementation or model/checkpoint run for these features; no feature claims made. |
 | `--strict-fpga` operator fallback audit | `PLANNED` | No strict mode added or verified. |
 | Vivado / physical validation | `BLOCKED` | User explicitly owns all Vivado, bitstream, XDMA hardware, and board work. No such work was attempted. |
 
@@ -116,15 +117,19 @@ master brief has been delivered.
   lens and TMM test files: PASS. `git diff --check`: PASS.
 - `python3 -m pytest -q --noconftest tests/test_ternary.py tests/test_isa.py tests/test_compiler.py`:
   PASS, 72 tests.
-- `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl`: PASS, 5 bit-exact ISA-vs-RTL cases.
+- `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl`: PASS, 6 bit-exact ISA-vs-RTL cases.
   D=128, M=6 with MCOLS=4 (replay), KB=1/3/4/5/7, UNIT and RSC, ACC, and 25% randomized AXI
   stalls. The same simulations compare complete DRAM and TMEM state.
 - `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl_rejects_reserved_symbol`: PASS; RTL's
   assertion rejects code `11` in a consumed symbol.
 - `verilator --lint-only ... --top-module otpu_mxu -GD=128 -GMCOLS=4 -GROWS=8 -GLANES=8`:
   PASS, Verilator 5.046 (18 modules elaborated).
-- The broad openTPU regression suite is in progress. Resource estimation and framework/model
-  checkpoint comparisons remain pending.
+- `python3 -m pytest -q`: PASS, 1,324 passed, 55 skipped, 1 xfailed in 9646.84s. Skips were
+  optional PyTorch/Textual dependencies, unavailable LFM2 assets, slow tests, Chrome/Node/bsdtar
+  or Yosys simulation models, and the documented PAIR configuration constraint. This is the
+  regression on the merged feature worktree.
+- Standalone `otpu_mxu` Verilator lint passes; full-top Verilator elaboration/build passed in the
+  RTL simulation. Resource estimation and framework/model checkpoint comparisons remain pending.
 - No model inference, performance measurement, synthesis estimate, Vivado run, or hardware test.
 - No upstream baseline suite has been run in this task slice.
 
