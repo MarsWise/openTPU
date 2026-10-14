@@ -14,10 +14,11 @@ master brief has been delivered.
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Current implementation/audit checkpoint: `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`.
+- Current branch checkpoint before this report-ingestion increment:
+  `33d2cda` (progress ledger / PR update commit).
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
-- Branch push verified: remote feature ref resolves to
-  `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`; remote `main` remains
+- Branch push verified at the last checkpoint: remote feature ref resolves to
+  `33d2cda`; remote `main` remains
   `5309a20d28948fa910897e85a96f82db6ee5c1fd`. No force push.
 - Draft PR: created and verified as open/draft #1:
   `https://github.com/MarsWise/openTPU/pull/1`, targeting the fork's `main`.
@@ -33,6 +34,7 @@ master brief has been delivered.
 | Upstream provenance and baseline preservation | `REFERENCE VERIFIED` | Fetched `main` directly; fetched SHA equals starting HEAD; created recovery branch. Full 30/100-commit and merged-PR review remains incomplete. |
 | Ternary symbol storage and software reference | `REFERENCE VERIFIED` | Added low-pair-first 2-bit pack/unpack and an int64 packed +/−/skip reference matmul; the isolated pytest module passed 23 tests. Not a checkpoint quantizer or hardware mode. |
 | Upstream architecture/provenance reports | `REFERENCE VERIFIED` | Added scoped source audit, merge disposition and feature matrix; inspected a 100-commit path-filtered history, remote branch listing and PRs #3–#7. No complete branch-by-branch audit. |
+| User report ingestion | `REFERENCE VERIFIED` | Added a standard-library parser for user-provided Vivado utilization/timing text and latency CSV; synthetic parser tests pass. It does not run or verify Vivado. |
 | Native ternary MXU / RTL / ISA / compiler / runtime | `PLANNED` | No RTL datapath, instruction, lowering, runtime dispatch, or real-checkpoint validation in this slice. |
 | Matrix Engine 2.0 / adaptive precision | `PLANNED` | Existing matrix engine and precision paths were inspected; no RTL changes or DSE results. |
 | YOLO/CNN, VLM, VLA, MoE changes, vLLM backend | `PLANNED` | No model/checkpoint was selected or run; no feature claims made. |
@@ -51,6 +53,9 @@ master brief has been delivered.
   `RESOURCE_BUDGET.md`, `MODEL_COMPATIBILITY.md`, `OPERATOR_COVERAGE_MATRIX.md`,
   `HETEROGENEOUS_CORE_DSE.md`, `VLLM_INTEGRATION.md`, and `VERIFIED_RESULTS.csv` record audited
   facts, completed software tests, and explicit unimplemented/NOT RUN status.
+- `tools/nextgen/ingest_reports.py` parses supplied report snippets and latency CSV into a
+  provenance-labeled JSON record; `tests/test_nextgen_ingest.py` checks parsing and rejection
+  cases. It is not a substitute for Vivado or user report review.
 - No ISA encoding, RTL interface, board target, constraints, or resource profile changed.
 - Encoding: `00=0`, `01=+1`, `10=-1`, `11=reserved`; four low-pair-first symbols per byte;
   unused final-byte pairs are zero. Dot-product accumulation reference is signed int64.
@@ -63,6 +68,11 @@ master brief has been delivered.
   import:
   `python -m pytest -q --confcutdir=<temp-test-dir> <temp-test-dir>\test_ternary.py`
   Result: `23 passed in 0.10s`.
+- `python -m pytest -q --noconftest tests\test_ternary.py tests\test_nextgen_ingest.py`:
+  PASS, 28 tests. `--noconftest` avoids the suite's POSIX-only `fcntl` import; this run includes
+  both the packed ternary checks and the synthetic report-ingestion tests.
+- An attempt to install Icarus Verilog through winget failed with “No applicable installer”;
+  no HDL simulator is available, and no RTL was changed or claimed tested.
 - The tests cover pack/unpack counts 0-9, row layout, reserved-code/non-zero-tail rejection in
   decode and matmul, type/shape guards, scalar matmul comparison, and batched output shape.
   Matmul reference comparisons use deterministic seeds `0x7E2 + K` for K in 1, 3, 4, 5, 7, 8,
@@ -72,7 +82,7 @@ master brief has been delivered.
 - Branch push: PASS, only the feature branch. Verified remote feature ref and unchanged default
   branch via `git ls-remote`.
 - Draft PR: PASS, #1 is open, marked draft, targets `MarsWise/openTPU:main`, and its head is
-  `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`.
+  `33d2cda` before the pending report-ingestion increment is pushed.
 - `python -m pytest -q tests\test_ternary.py tests\test_quant.py`: BLOCKED at collection on
   Windows because `tests/conftest.py` imports `opentpu.rtlsim`, which imports POSIX-only `fcntl`.
   The initial attempts also identified missing pytest/NumPy; pytest 9.1.1 and NumPy 2.5.4 were

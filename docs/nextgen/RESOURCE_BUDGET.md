@@ -40,3 +40,22 @@ new build.
 
 No Vivado command was run for this work. No source/XDC changes are included. Do not program the
 FPGA as part of this software task.
+
+## Report ingestion
+
+After the user has run and reviewed their own builds, reports can be recorded with:
+
+```powershell
+python tools\nextgen\ingest_reports.py `
+  --utilization path\to\utilization.rpt `
+  --timing path\to\timing_summary.rpt `
+  --latency path\to\latency.csv `
+  --commit <source-sha> `
+  --part xc7k480tffg1156-2 `
+  --output path\to\results.json
+```
+
+The latency CSV schema is `workload,metric,value,unit`. The resulting JSON retains report paths,
+source SHA and part, and labels results as user-supplied; parsing does not authenticate reports
+or prove that a design was implemented successfully. Parser tests use synthetic report snippets,
+not actual Vivado output.
