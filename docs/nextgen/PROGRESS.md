@@ -27,15 +27,14 @@ master brief has been delivered.
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Published code checkpoint before this latest integration:
-  `055d4f84c57031932627b1f7b60d837fd664ced8` (upstream merge).
-- The current worktree contains the reviewed `702d6c9` upstream merge, pending its merge commit
-  and feature-branch publication.
+- Latest-upstream integration commit: `380ddd6ea46b8505cb0720336714dfeb1f96e84e`
+  (`Merge latest FeSens upstream updates`).
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
-- Previous branch push verified at `055d4f84c57031932627b1f7b60d837fd664ced8`; upstream `main`
-  remains untouched by this work. No force push.
-- Draft PR: created and verified as open/draft #1:
-  `https://github.com/MarsWise/openTPU/pull/1`, targeting the fork's `main`.
+- Feature branch push verified at `380ddd6ea46b8505cb0720336714dfeb1f96e84e`; fork `main`
+  remains at `5309a20d28948fa910897e85a96f82db6ee5c1fd`, and upstream `main` is read-only at
+  `702d6c98013f279af4b11e135c3d3e0529410021`. No force push.
+- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; GitHub reports its
+  head at `380ddd6ea46b8505cb0720336714dfeb1f96e84e`.
 - Both upstream integrations followed changed-file and overlap review. No local modifications were
   discarded; each merge completed without conflicts.
 - `git push --dry-run` and non-forced feature-branch pushes succeeded using the configured origin.
@@ -111,11 +110,11 @@ master brief has been delivered.
   17.
 - `python -m py_compile opentpu\quant.py tests\test_ternary.py`: PASS.
 - `git diff --check`: PASS.
-- Branch push: PASS, only the feature branch. Verified remote feature ref and unchanged default
-  branch via `git ls-remote`.
-- Draft PR: PASS, #1 is open, marked draft, targets `MarsWise/openTPU:main`, and its head is
-  `23bef65011f9cc4a39b64b6f08ab3f8f47f95d82`. The PR description was refreshed through GitHub's
-  REST API after adding report-ingestion tooling.
+- Branch push: PASS, only the feature branch. Verified remote feature ref and unchanged fork and
+  upstream default branches via `git ls-remote`.
+- Draft PR: PASS, #1 remains open/draft/unmerged, targets `MarsWise/openTPU:main`, and its head is
+  `380ddd6ea46b8505cb0720336714dfeb1f96e84e`. Its description still contains the original
+  pre-implementation status and should be refreshed separately.
 - `python -m pytest -q tests\test_ternary.py tests\test_quant.py`: BLOCKED at collection on
   Windows because `tests/conftest.py` imports `opentpu.rtlsim`, which imports POSIX-only `fcntl`.
   The initial attempts also identified missing pytest/NumPy; pytest 9.1.1 and NumPy 2.5.4 were
