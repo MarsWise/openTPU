@@ -25,7 +25,7 @@ master brief has been delivered.
 | Subsystem | Status | Evidence / remaining work |
 |---|---|---|
 | Upstream provenance and baseline preservation | `REFERENCE VERIFIED` | Fetched `main` directly; fetched SHA equals starting HEAD; created recovery branch. Full 30/100-commit and merged-PR review remains incomplete. |
-| Ternary symbol storage and software reference | `REFERENCE VERIFIED` | Added low-pair-first 2-bit pack/unpack and an int64 reference matmul; 22 focused direct assertions passed. Not a checkpoint quantizer or hardware mode. |
+| Ternary symbol storage and software reference | `REFERENCE VERIFIED` | Added low-pair-first 2-bit pack/unpack and an int64 packed +/−/skip reference matmul; the isolated pytest module passed 23 tests. Not a checkpoint quantizer or hardware mode. |
 | Native ternary MXU / RTL / ISA / compiler / runtime | `PLANNED` | No RTL datapath, instruction, lowering, runtime dispatch, or real-checkpoint validation in this slice. |
 | Matrix Engine 2.0 / adaptive precision | `PLANNED` | Existing matrix engine and precision paths were inspected; no RTL changes or DSE results. |
 | YOLO/CNN, VLM, VLA, MoE changes, vLLM backend | `PLANNED` | No model/checkpoint was selected or run; no feature claims made. |
@@ -34,7 +34,8 @@ master brief has been delivered.
 
 ## Changes and interfaces
 
-- `opentpu/quant.py`: generic ternary byte packing and exact software matmul reference.
+- `opentpu/quant.py`: generic ternary byte packing and an exact packed +/−/skip software matmul
+  reference (does not expand the weight matrix into int8).
 - `tests/test_ternary.py`: round-trip, padding, malformed symbol, signed boundary and scalar
   reference checks.
 - `docs/quant.md`: states encoding and explicitly disclaims MXU/checkpoint compatibility.
@@ -46,11 +47,15 @@ master brief has been delivered.
 
 ## Verification record
 
-- Python 3.12.10, NumPy 2.5.4, pytest 9.1.1. The test module's 22 assertions passed by direct
-  invocation with deterministic seeds `0x7E2 + K` for K in 1, 3, 4, 5, 7, 8, 17.
-- The direct check invoked all cases from `tests/test_ternary.py` without pytest collection:
-  pack/unpack counts 0-9, row layout, reserved/padding rejection, type/shape guards, scalar
-  matmul comparison and batched output shape.
+- Python 3.12.10, NumPy 2.5.4, pytest 9.1.1. The ternary module passed 23 tests under pytest
+  using a temporary copy outside the repository test tree to avoid `tests/conftest.py`'s POSIX
+  import:
+  `python -m pytest -q --confcutdir=<temp-test-dir> <temp-test-dir>\test_ternary.py`
+  Result: `23 passed in 0.10s`.
+- The tests cover pack/unpack counts 0-9, row layout, reserved-code/non-zero-tail rejection in
+  decode and matmul, type/shape guards, scalar matmul comparison, and batched output shape.
+  Matmul reference comparisons use deterministic seeds `0x7E2 + K` for K in 1, 3, 4, 5, 7, 8,
+  17.
 - `python -m py_compile opentpu\quant.py tests\test_ternary.py`: PASS.
 - `git diff --check`: PASS.
 - `python -m pytest -q tests\test_ternary.py tests\test_quant.py`: BLOCKED at collection on

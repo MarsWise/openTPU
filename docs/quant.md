@@ -43,7 +43,8 @@ the code does now; the sections after it are the survey and the 4-bit MXU before
 `opentpu.quant.pack_ternary` and `unpack_ternary` provide a validated low-pair-first storage
 reference for signed symbols `{-1, 0, +1}`: `00` is zero, `01` is positive one, `10` is negative
 one, and `11` is reserved. Four symbols occupy one byte; unused high pairs in the final byte must
-be zero. `ternary_matmul` is an exact int64 software reference for signed integer activations.
+be zero. `ternary_matmul` is an exact int64 software reference for signed integer activations; it
+accumulates directly from packed positive/negative/zero symbols without expanding a weight matrix.
 These helpers do not quantize floating-point weights, define BitNet/Tern2 checkpoint semantics,
 or add a ternary mode to the MXU, ISA, compiler, or runtime. No pretrained ternary checkpoint has
 been validated here.

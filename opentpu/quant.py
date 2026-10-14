@@ -340,15 +340,32 @@ def unpack_ternary(packed: np.ndarray, count: int) -> np.ndarray:
 
 
 def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.ndarray:
-    """Exact int64 reference matmul: activations [..., K] x packed weights [N, ceil(K/4)]."""
+    """Exact int64 +/−/skip reference matmul without expanding ternary weights.
+
+    Activations have shape [..., K]; packed weights have shape [N, ceil(K/4)].
+    """
     a = np.asarray(activations)
     if a.ndim < 1 or not np.issubdtype(a.dtype, np.signedinteger) or a.dtype.itemsize > 4:
         raise TypeError("activations must be a signed integer array of at most 32 bits")
     w = np.asarray(packed_weights)
     if w.ndim != 2:
         raise ValueError("packed_weights must have shape [N, ceil(K/4)]")
-    decoded = unpack_ternary(w, a.shape[-1])
-    return np.matmul(a.astype(np.int64), decoded.astype(np.int64).T)
+    count = a.shape[-1]
+    if w.shape[-1] != (count + 3) // 4:
+        raise ValueError("packed row length does not match activation width")
+
+    result = np.zeros((*a.shape[:-1], w.shape[0]), dtype=np.int64)
+    a64 = a.astype(np.int64)
+    for k in range(count):
+        codes = (w[:, k // 4] >> (2 * (k % 4))) & 0b11
+        if np.any(codes == TERNARY_INVALID):
+            raise ValueError("reserved ternary code 11")
+        activation = a64[..., k, None]
+        result += np.where(codes == TERNARY_POSITIVE, activation, 0)
+        result -= np.where(codes == TERNARY_NEGATIVE, activation, 0)
+    if count % 4 and np.any(w[:, -1] >> (2 * (count % 4))):
+        raise ValueError("non-zero ternary padding")
+    return result
 
 
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:

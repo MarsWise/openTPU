@@ -70,3 +70,11 @@ def test_ternary_matmul_keeps_leading_batch_dimensions_and_checks_shapes():
         ternary_matmul(np.array([1.0]), pack_ternary(weights))
     with pytest.raises(ValueError, match="packed_weights"):
         ternary_matmul(np.array([1], dtype=np.int8), pack_ternary(weights[0]))
+
+
+def test_ternary_matmul_rejects_reserved_codes_and_nonzero_padding():
+    activations = np.array([1], dtype=np.int8)
+    with pytest.raises(ValueError, match="reserved"):
+        ternary_matmul(activations, np.array([[0b11]], dtype=np.uint8))
+    with pytest.raises(ValueError, match="padding"):
+        ternary_matmul(activations, np.array([[0b0100]], dtype=np.uint8))
