@@ -294,8 +294,9 @@ def pack_ternary(weights: np.ndarray) -> np.ndarray:
     """Pack signed {-1, 0, +1} weights, four per byte, least-significant pair first.
 
     The symbol map is 00=0, 01=+1, 10=-1; 11 is reserved. The last byte's unused
-    pairs are zero. This is a storage/reference format only; it is not an MXU MM
-    weight format and does not identify a checkpoint's quantization semantics.
+    pairs are zero.     This generic row-packing format is also the payload encoding consumed by TMM when each
+    row is padded to the MXU's D-byte streaming stride. It does not identify a checkpoint's
+    quantization semantics.
     """
     w = np.asarray(weights)
     if w.ndim < 1:
@@ -313,6 +314,20 @@ def pack_ternary(weights: np.ndarray) -> np.ndarray:
         part = codes[..., lane::4]
         packed[..., :part.shape[-1]] |= part << (2 * lane)
     return packed
+
+
+def pack_ternary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
+    """Pack [N, K] ternary rows for TMM, padding each row to complete D-byte stream chunks."""
+    w = np.asarray(weights)
+    if w.ndim != 2:
+        raise ValueError("TMM weights must have shape [N, K]")
+    if D <= 0 or D % 4 or w.shape[1] == 0 or w.shape[1] % D:
+        raise ValueError(f"TMM needs K divisible by D={D} and D divisible by 4")
+    packed = pack_ternary(w)
+    stride = -(-packed.shape[1] // D) * D
+    rows = np.zeros((w.shape[0], stride), dtype=np.uint8)
+    rows[:, :packed.shape[1]] = packed
+    return rows
 
 
 def unpack_ternary(packed: np.ndarray, count: int) -> np.ndarray:

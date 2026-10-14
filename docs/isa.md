@@ -173,6 +173,7 @@ and ST's `n`, QACT's `w2` and `w3`, GATHER's `w3`).
 | 0x20 | MM | see below |
 | 0x21 | QACT | quantize TMEM rows into ACT RAM |
 | 0x22 | QST | quantize TMEM rows into DRAM bytes |
+| 0x23 | TMM | packed ternary MXU dot product |
 | 0x30 | VOP | vector op on a TMEM tile |
 | 0x40 | GATHER | all-gather over slices |
 
@@ -224,6 +225,46 @@ scans measured at most 7e-5 of the groups, docs/mx_mxu.md 3.3). The bounds keep 
 a group's `|c| < 2^19` (int8; 4-bit `< 2^16`), `B < 2^17`, at most `4 * 255` groups for int8.
 An MM's rows `j` read `Sa[j][ab]` only: its blocks `ab .. ab+KB-1` (and, with PAIR, row `j + M`'s)
 must hold the same `Sa`, as one QACT writes them (the ISA simulator raises otherwise).
+
+### TMM: packed ternary dot product
+
+`TMM` is a separate, version-safe MXU opcode; it does not repurpose MM's fully allocated `WF`
+field. Its address, shape, accumulation, row-max and `ASCALE` fields match MM, except `w4[31:24]`
+is reserved and zero. The activation operand is the same signed-int8 ACT RAM populated by QACT.
+Weights use four 2-bit symbols per byte, low pair first (`00=0`, `01=+1`, `10=-1`, `11=invalid`).
+Four consecutive D-element K blocks are packed into one D-byte DRAM chunk; the last partial
+chunk is zero padded. Thus each packed row occupies `ceil(KB/4)*D` payload bytes, `sa` and `rs`
+are D-byte aligned, and `rs` covers the payload and is D-byte aligned. `D` must be divisible by
+four. The scale row is exactly one fp32 `Sw[n]` at `ssa+n*srs` (`RSC`); alternatively `UNIT`
+implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `PAIR` and
+`WF` bits 5:4 are reserved and zero. `srs` is a multiple of four. TMM `ASCALE` has MM's
+`UNIT+ACC` requirements.
+
+The TMM MXU uses the existing QACT activation scales and offsets and the same fp32 epilogue as
+MM, with a fixed weight exponent `W=11` and multiplier `m=1`. This preserves the normal quantized
+activation scale while the weight coefficient remains exactly ternary:
+
+```
+for n in 0..N-1:
+  for j < M:
+    acc = 0
+    for k in 0..KB-1:
+      chunk = sa + n*rs + floor(k/4)*D
+      for g in 0..3:                         the D/4 activation elements sharing da[g]
+        c = sum_i ACT[j][(ab+k)*D + g*D/4 + i] *
+            ternary(chunk, (k mod 4)*D + g*D/4 + i)
+        sh = 11 - da[j][ab+k][g]
+        acc += (sh >= 0 ? 1 << sh : 0) * c
+    y = (i2f(acc) * Sw[n]) * (Sa[j][ab] * f32(2^-11))
+    if ASCALE: y = T[out+j*ors+n] * T[ssa+j] + y
+    elif ACC:  y = T[out+j*ors+n] + y
+    T[out+j*ors+n] = y
+```
+
+Code `11` in a consumed weight symbol is an error in the ISA simulator and a simulation assertion
+in RTL. Reserved symbols in padding beyond `KB` are not consumed. TMM defines a generic ternary
+ABI only; it does not claim compatibility with a particular BitNet/Tern2 checkpoint, whose
+quantization and scale metadata must be independently established.
 
 #### Weight formats
 

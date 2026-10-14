@@ -67,7 +67,7 @@ VMAX = 31                         # VPU instructions the mask names (the sequenc
 VMASK = (1 << VMAX) - 1           # the VPU mask: the last 31 VPU instructions
 DEFAULT = 0x0111_0111 | (VMASK << 32)  # a pc never reached: every unit's last, the VPU's 31
 UNIT = {I.LD: U_DMA, I.ST: U_DMA, I.DSTEP: U_DMA, I.STREAM: U_DMA, I.WAITW: U_DMA,
-        I.MM: U_MXU, I.QACT: U_Q, I.QST: U_Q, I.VOP: U_VPU,
+        I.MM: U_MXU, I.TMM: U_MXU, I.QACT: U_Q, I.QST: U_Q, I.VOP: U_VPU,
         I.BAR: U_COLL, I.GATHER: U_COLL, I.RLD: U_COLL}
 WUNIT = (U_DMA, U_MXU, U_Q, U_VPU, U_COLL, U_DMA, U_Q)
 DEPTH = tuple(VMAX if u == U_VPU else KMAX for u in range(NUNITS))   # history per unit
@@ -183,13 +183,17 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
             wr.append(_mk(SP_DRAM, w[0], (p0 + cols) << 2)); wr.append(_mk(SP_TMEM, w[5], rows))
             rd.append(_mk(SP_TMEM, w[1], cols << 1)); rd.append(_mk(SP_TMEM, w[2], rows))
             rd.append(_mk(SP_TMEM, w[4], c[6] + 1))
-    elif op == I.MM:
+    elif op in (I.MM, I.TMM):
         n, kb, k0, m = c[3] & 0xFFFF, (c[3] >> 16) & 0xFF, c[3] >> 24, (c[5] >> 16) & 0xFF
         if n and kb and m:
             p0, p1 = _p(n - 1, c[4]), _p(n - 1, c[6])
             p2, p3 = _p(m - 1, c[5] & 0xFFFF), _p(m, c[5] & 0xFFFF)
-            rd.append(_mk(SP_DRAM, w[0], p0 + kb * D))
-            if not fl & I.F_UNIT:
+            row_bytes = ((kb + 3) // 4) * D if op == I.TMM else kb * D
+            rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
+            if op == I.TMM:
+                if fl & I.F_RSC:
+                    rd.append(_mk(SP_DRAM, w[1], p1 + 4))
+            elif not fl & I.F_UNIT:
                 # a scale row's bytes up to block k0 + KB's (MX, docs/isa.md "Weight formats"):
                 # RSC Sw; int8x Sw and a byte a block; NVFP4 Sw, three reserved words and 8
                 # bytes a block; int4x / fp4x6 Sw, a reserved word and a word a block
@@ -389,7 +393,7 @@ class _Pass:
         km = self.kmin[pc]
         for j in range(NW):
             uj = WUNIT[j]
-            if (j >= NUNITS and op != I.MM) or uj == u or uj == U_VPU:
+            if (j >= NUNITS and op not in (I.MM, I.TMM)) or uj == u or uj == U_VPU:
                 continue
             for i, e in enumerate(st.H[uj]):
                 if i + 1 >= km[j]:
@@ -539,7 +543,7 @@ class _MemoPass(_Pass):
         fp = footprint(ins, st.R, self.D, self.S)
         lid, dfp = self.proj(fp)
         self.seen[pc] = True
-        mm = op == I.MM
+        mm = op in (I.MM, I.TMM)
         key = (lid, u, mm, st.HL)
         res = self.memo.get(key)
         if res is None:
@@ -793,7 +797,7 @@ class Checker:
                     f"{i + 1}-th last VPU instruction (pc {epc})")
         for j in range(NW):
             uj = WUNIT[j]
-            if (j >= NUNITS and ins.op != I.MM) or uj == u or uj == U_VPU:
+            if (j >= NUNITS and ins.op not in (I.MM, I.TMM)) or uj == u or uj == U_VPU:
                 continue
             for i, (e, epc) in enumerate(self.H[uj]):
                 if conflict(fp, e, dram_only=j >= NUNITS):

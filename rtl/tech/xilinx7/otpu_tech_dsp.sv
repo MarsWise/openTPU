@@ -21,11 +21,35 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic [7:0]         wlo,               // WREG: the weights from the next cycle on
   input  logic [7:0]         whi,
   input  logic               sel,               // the select from the next cycle on
+  input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
-  logic [47:0] pf;
+  logic [47:0] pf, pcd;
+  logic signed [8:0] tm;
+  logic signed [23:0] tp;
+  logic selr, ternary_r, ternary_m, ternary_p;
+  logic [7:0] br, wlr, whr;
+  wire [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
+  wire signed [7:0] tw = $signed(selr ? wh : wl);
+  wire signed [8:0] ta = $signed({br[7], br});
+  wire signed [8:0] tprod = (tw == 8'sd1) ? ta :
+                               (tw == -8'sd1) ? -ta : 9'sd0;
+  wire signed [23:0] tpn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(tm);
+  always_ff @(posedge clk) if (en) begin
+    br <= act;
+    selr <= sel;
+    wlr <= wlo;
+    whr <= whi;
+    ternary_r <= ternary;
+    tm <= tprod;
+    ternary_m <= ternary_r;
+    if (!LAST) begin
+      tp <= tpn;
+      ternary_p <= ternary_m;
+    end
+  end
   DSP48E1 #(
     .A_INPUT("DIRECT"), .B_INPUT("DIRECT"), .USE_DPORT("TRUE"), .USE_MULT("MULTIPLY"),
     .USE_SIMD("ONE48"), .AREG(WREG ? 1 : 0), .ACASCREG(WREG ? 1 : 0), .BREG(1), .BCASCREG(1),
@@ -46,9 +70,11 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     .RSTA(1'b0), .RSTB(1'b0), .RSTC(1'b0), .RSTD(1'b0), .RSTM(1'b0), .RSTP(1'b0),
     .RSTALLCARRYIN(1'b0), .RSTALUMODE(1'b0), .RSTCTRL(1'b0), .RSTINMODE(1'b0),
     .ACIN(30'd0), .BCIN(18'd0), .PCIN(pcin), .CARRYCASCIN(1'b0), .MULTSIGNIN(1'b0),
-    .ACOUT(), .BCOUT(), .PCOUT(pcout), .P(pf), .CARRYCASCOUT(), .MULTSIGNOUT(), .CARRYOUT(),
+    .ACOUT(), .BCOUT(), .PCOUT(pcd), .P(pf), .CARRYCASCOUT(), .MULTSIGNOUT(), .CARRYOUT(),
     .OVERFLOW(), .UNDERFLOW(), .PATTERNDETECT(), .PATTERNBDETECT());
-  assign p = pf[23:0];
+  assign p = LAST ? (ternary_m ? tpn : pf[23:0]) :
+                    (ternary_p ? tp : pf[23:0]);
+  assign pcout = LAST ? 48'd0 : (ternary_p ? 48'(tp) : pcd);
 endmodule
 
 

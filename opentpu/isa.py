@@ -7,14 +7,14 @@ import numpy as np
 
 NOP, HALT, LI, ADDI, LOOP, BAR, RLD, WAITW = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
 LD, ST, DSTEP, STREAM = 0x10, 0x11, 0x12, 0x13
-MM, QACT, QST = 0x20, 0x21, 0x22
+MM, QACT, QST, TMM = 0x20, 0x21, 0x22, 0x23
 VOP = 0x30
 GATHER = 0x40
 
 OPNAMES = {NOP: "NOP", HALT: "HALT", LI: "LI", ADDI: "ADDI", LOOP: "LOOP", BAR: "BAR", RLD: "RLD",
            WAITW: "WAITW",
            LD: "LD", ST: "ST", DSTEP: "DSTEP", STREAM: "STREAM", MM: "MM", QACT: "QACT",
-           QST: "QST", VOP: "VOP", GATHER: "GATHER"}
+           QST: "QST", TMM: "TMM", VOP: "VOP", GATHER: "GATHER"}
 
 # MM / QACT / QST flags
 F_UNIT, F_ACC, F_RMAX, F_ASCALE = 0x1, 0x2, 0x4, 0x8     # MM
@@ -413,6 +413,32 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
                  w=_w(sa, ssa, out, n | (kb << 16) | (k0 << 24), rs,
                       ors | (m << 16) | (ab << 24), srs),
                  comment=comment)
+
+
+def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
+        ascale=None, rsc=False, ra=0, rb=0, rc=0, comment=""):
+    """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
+
+    Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
+    fp32 scale (RSC); its row stride is `srs`. The MXU applies the normal QACT activation
+    scale/offset epilogue and the TMM's fixed 2^-11 weight exponent. `ascale` has MM's UNIT+ACC
+    requirements. The packed operand starts at `sa`; K must begin on a four-block boundary when
+    a compiler splits it into multiple TMM commands.
+    """
+    _check(0 < n < 65536 and 0 < kb < 256 and 0 < m < 256 and 0 <= ab < 256
+           and 0 <= ors < 65536,
+           f"TMM: n {n}, kb {kb}, m {m}, ab {ab}, ors {ors}")
+    _check(0 <= rs < (1 << 32) and 0 <= srs < (1 << 32), f"TMM: rs {rs}, srs {srs}")
+    _check(not rsc or not unit, "TMM: RSC is not used with UNIT")
+    _check(unit or rsc, "TMM: non-unit weights require row scales (RSC)")
+    if ascale is not None:
+        _check(unit and acc, "TMM: ASCALE needs UNIT and ACC")
+        ssa = ascale
+    fl = (F_UNIT if unit else 0) | (F_ACC if acc else 0) | (F_RMAX if rmax else 0) | \
+        (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0)
+    return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
+                 w=_w(sa, ssa, out, n | (kb << 16), rs,
+                      ors | (m << 16) | (ab << 24), srs), comment=comment)
 
 
 def qact(src, rows, ab, kb, srs, row=False, cscale=None, rscale=None, dup=False, ra=0,

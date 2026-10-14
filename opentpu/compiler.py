@@ -279,6 +279,7 @@ class QTensor:
     tiles: tuple | None = None
     k0: int = 0
     rsc: bool = False
+    ternary: bool = False
 
     @staticmethod
     def weight(data, scale, n: int, k: int, fmt: str, D: int, **kw) -> "QTensor":
@@ -288,6 +289,24 @@ class QTensor:
         from . import quant as Q
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), Q.row_bytes(k, fmt, D),
                        Q.scale_bytes(k, fmt, D), D, wf=Q.mxu_wf(fmt), **kw)
+
+    @staticmethod
+    def ternary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
+                       srs: int = 4) -> "QTensor":
+        """Descriptor for TMM's low-pair-first packed ternary rows and optional row scales."""
+        if n <= 0 or k <= 0 or k % D or D % 4:
+            raise CompileError(f"ternary weight shape ({n}, {k}) needs positive K divisible by "
+                               f"D={D} and D divisible by 4")
+        row_bytes = -(-k // 4)
+        stride = ((row_bytes + D - 1) // D) * D if rs is None else rs
+        if stride % D or stride < row_bytes:
+            raise CompileError(f"ternary weight row stride {stride} must cover {row_bytes} "
+                               f"bytes and be D={D}-byte aligned")
+        if scale is not None and (srs % 4 or srs < 4):
+            raise CompileError(f"ternary scale stride {srs} must be a multiple of 4 and >= 4")
+        return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
+                       (n, k), stride, 0 if scale is None else srs, D,
+                       wf=I.W8, rsc=scale is not None, ternary=True)
 
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
@@ -326,7 +345,9 @@ class QTensor:
             raise CompileError("QTensor column slices must be multiples of D")
         if self.tiles is not None:
             return self.padded_cols(r0, nr, c0, nc, nc)
-        if self.wf == I.W8:
+        if self.ternary:
+            data = self.data + r0 * self.rs + c0.div_exact(4 * self.D) * self.D
+        elif self.wf == I.W8:
             data = self.data + r0 * self.rs + c0
         else:                     # 4-bit rows stream whole D-byte chunks of two D-blocks
             data = self.data + r0 * self.rs + c0.div_exact(2 * self.D) * self.D
@@ -342,7 +363,7 @@ class QTensor:
             if not self.rsc:
                 k0 += c0.div_exact(self.D).static()
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
-                       rsc=self.rsc)
+                       rsc=self.rsc, ternary=self.ternary)
 
 
 VT_TILE = 256          # V^T cache tile (tokens): the attention block (qwen3.ATTN_BLOCK)
@@ -1794,6 +1815,8 @@ class Builder:
             raise CompileError("dot(rowmax=True) needs M <= MCOLS and an output tile from "
                                "ol.empty/zeros/full (they reserve the row-max area)")
         unit = w.scale is None
+        if w.ternary and (w.D != self.cfg.D or (not unit and not w.rsc)):
+            raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows
         # and an even first block
         al = 16 if w.wf == I.WNV else 8
@@ -1804,27 +1827,46 @@ class Builder:
         # one MM per QACT range of the operand (an MM's rows read one Sa: docs/isa.md "MM"),
         # added up in the output: the first as asked (overwrite, ACC or ASCALE), the rest ACC;
         # RMAX on the last, whose written values are the sums
-        bpb = self.cfg.D if w.wf == I.W8 else self.cfg.D // 2   # streamed bytes per block
+        bpb = self.cfg.D if w.wf == I.W8 else self.cfg.D // 2   # MM bytes per K block
         parts = st.ranges()
         for i, (k0, k1) in enumerate(parts):
-            if (k0 * bpb) % self.cfg.D:
+            if not w.ternary and (k0 * bpb) % self.cfg.D:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
+            if w.ternary and k0 % 4:
+                raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ternary "
+                                   f"ranges must start on a four-block boundary")
+            if w.ternary and k1 - k0 > 255:
+                raise CompileError(f"dot: TMM supports at most 255 K blocks per instruction, "
+                                   f"got {k1 - k0}")
             first, last = i == 0, i == len(parts) - 1
             kp = 0 if unit or w.rsc else w.k0 + k0
             ppair = pair and kp % 2 == 0
             m0 = 0
             for ab, mc in st.chunks:
-                ins = I.mm(sa + k0 * bpb, ssa, out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc,
-                           ab + k0, w.srs, unit=unit, acc=acc is not None or not first,
-                           rmax=rowmax and last, wf=w.wf, pair=ppair, k0=kp, rsc=w.rsc,
-                           ascale=acc_scale.base if acc_scale is not None and first else None,
-                           ra=ra, rb=rb,
-                           comment=f"mm {M}x{K} . {N}x{K}^T"
-                           + (f" part {k0}:{k1}" if len(parts) > 1 else "")
-                           + (" pair" if ppair else "") + (" +rowmax" if rowmax and last else "")
-                           + (" acc*=scale" if acc_scale is not None and first else ""))
+                if w.ternary:
+                    ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa,
+                                out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
+                                w.srs, unit=unit, acc=acc is not None or not first,
+                                rmax=rowmax and last,
+                                ascale=acc_scale.base if acc_scale is not None and first else None,
+                                ra=ra, rb=rb,
+                                comment=f"tmm {M}x{K} . {N}x{K}^T"
+                                + (f" part {k0}:{k1}" if len(parts) > 1 else "")
+                                + (" +rowmax" if rowmax and last else "")
+                                + (" acc*=scale" if acc_scale is not None and first else ""))
+                else:
+                    ins = I.mm(sa + k0 * bpb, ssa, out.base + m0 * ors, N, k1 - k0, w.rs, ors,
+                               mc, ab + k0, w.srs, unit=unit,
+                               acc=acc is not None or not first, rmax=rowmax and last,
+                               wf=w.wf, pair=ppair, k0=kp, rsc=w.rsc,
+                               ascale=acc_scale.base if acc_scale is not None and first else None,
+                               ra=ra, rb=rb,
+                               comment=f"mm {M}x{K} . {N}x{K}^T"
+                               + (f" part {k0}:{k1}" if len(parts) > 1 else "")
+                               + (" pair" if ppair else "") + (" +rowmax" if rowmax and last else "")
+                               + (" acc*=scale" if acc_scale is not None and first else ""))
                 self.emit(ins)
                 m0 += mc
         self.bump_version(out.buf)
@@ -1985,7 +2027,7 @@ def slow_drains(prog, cfg, lanes: int | None = None) -> list:
     lanes = lanes or cfg.MCOLS
     out = []
     for pc, ins in enumerate(prog):
-        if ins.op != I.MM:
+        if ins.op not in (I.MM, I.TMM):
             continue
         ors, M, KB = ins.w[5] & 0xFFFF, (ins.w[5] >> 16) & 0xFF, (ins.w[3] >> 16) & 0xFF
         adv = -(-KB // 2) if ins.flags & I.F_PAIR else KB

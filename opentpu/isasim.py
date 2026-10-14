@@ -242,6 +242,8 @@ class Slice:
             return self._stream(ins)
         if op == I.MM:
             return self._mm(ins)
+        if op == I.TMM:
+            return self._tmm(ins)
         if op == I.QACT:
             return self._qact(ins)
         if op == I.QST:
@@ -539,6 +541,86 @@ class Slice:
         if ins.flags & I.F_RMAX:                   # row max of the written values, in n order
             mx = F.chain_max(y)
             self.tput(out + M * ors + np.arange(M), mx)
+
+    def _tmm(self, ins: I.Instr) -> None:
+        """Ternary MXU: four packed D-element blocks per D-byte streamed weight chunk."""
+        cfg, w = self.cfg, ins.w
+        D = cfg.D
+        sa = (self.reg(ins.ra) + w[0]) & 0xFFFFFFFF
+        ssa = (self.reg(ins.rb) + w[1]) & 0xFFFFFFFF
+        out = (self.reg(ins.rc) + w[2]) & 0xFFFFFFFF
+        N, KB = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF
+        rs = w[4]
+        ors, M, ab = w[5] & 0xFFFF, (w[5] >> 16) & 0xFF, w[5] >> 24
+        srs = w[6]
+        unit, accf = bool(ins.flags & I.F_UNIT), bool(ins.flags & I.F_ACC)
+        rsc = bool(ins.flags & I.F_RSC)
+        if ins.flags & (I.F_PAIR | (3 << I.WF_SHIFT)):
+            raise SimError("TMM: PAIR and the MM weight-format field are reserved")
+        if not N or not KB:
+            raise SimError("TMM: N and KB must be at least 1")
+        if D % 4 or not (0 < M <= cfg.act_rows) or ab + KB > cfg.ACT_BLOCKS:
+            raise SimError("TMM: M, D or ACT RAM range out of bounds")
+        if M > cfg.MCOLS and ins.flags & (I.F_RMAX | I.F_ASCALE):
+            raise SimError("TMM: RMAX and ASCALE need M <= MCOLS")
+        if rsc == unit:
+            raise SimError("TMM: select exactly one of UNIT or RSC")
+        if ins.flags & I.F_ASCALE and not (unit and accf):
+            raise SimError("TMM: ASCALE needs UNIT and ACC")
+        row_bytes = ((KB + 3) // 4) * D
+        if sa % D or rs % D or rs < row_bytes or \
+                sa + (N - 1) * rs + row_bytes > cfg.DRAM_BYTES:
+            raise SimError("TMM: packed rows must be D-byte aligned and in range")
+        if not unit and (ssa % 4 or srs % 4 or srs < 4 or
+                         ssa + (N - 1) * srs + 4 > cfg.DRAM_BYTES):
+            raise SimError("TMM: row scales must be word-aligned and in range")
+        if ors < N:
+            raise SimError("TMM: output row stride is smaller than N")
+        idx = out + np.arange(M)[:, None] * ors + np.arange(N)[None, :]
+        self._tidx(idx)
+        if ins.flags & I.F_ASCALE:
+            self._tidx(out + np.arange(M))
+
+        sw = np.ones(N, dtype=np.float32)
+        if not unit:
+            sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(4)[None, :]
+            sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32)
+        act_scales = self.ascale[:M, ab:ab + KB]
+        if np.any(act_scales.view(np.uint32) != act_scales[:, :1].view(np.uint32)):
+            raise SimError("TMM: an ACT row's blocks hold different Sa (more than one QACT)")
+        act = self.act[:M, ab * D:(ab + KB) * D].reshape(M, KB, D)
+        da = self.adoff[:M, ab:ab + KB]
+        group = D // 4
+        acc = np.zeros((M, N), dtype=np.int64)
+        for k in range(KB):
+            codes = np.empty((N, D), dtype=np.uint8)
+            for lane in range(D):
+                byte = self.dram[sa + np.arange(N) * rs + (k // 4) * D +
+                                 (lane + (k % 4) * D) // 4]
+                codes[:, lane] = (byte >> (2 * ((lane + (k % 4) * D) % 4))) & 0b11
+            if np.any(codes == 0b11):
+                raise SimError("TMM: reserved ternary code 11")
+            weights = np.where(codes == 1, 1, np.where(codes == 2, -1, 0)).astype(np.int64)
+            for g in range(4):
+                sh = 11 - int(da[:, k, g].max())
+                if sh < 0:
+                    continue
+                lo, hi = g * group, (g + 1) * group
+                # QACT has one offset per D/4 group; hardware's two adjacent D/8
+                # ternary reductions share the same 2^(11-da) scale.
+                dots = act[:, k, lo:hi].astype(np.int64) @ weights[:, lo:hi].T
+                row_sh = 11 - da[:, k, g].astype(np.int64)
+                acc += np.where(row_sh[:, None] >= 0, dots << np.maximum(row_sh[:, None], 0), 0)
+        y = F.mul(F.mul(F.i2f(acc), sw[None, :]),
+                  F.mul(act_scales[:, 0, None], np.float32(2.0 ** -11)))
+        if ins.flags & I.F_ASCALE:
+            alpha = self.tget(ssa + np.arange(M))[:, None]
+            y = F.add(F.mul(self.tget(idx), alpha), y)
+        elif accf:
+            y = F.add(self.tget(idx), y)
+        self.tput(idx, y)
+        if ins.flags & I.F_RMAX:
+            self.tput(out + M * ors + np.arange(M), F.chain_max(y))
 
     # ---------------------------------------------------------------- quantizer
     def _quant_rows(self, src, rows, KB, srs, g, row_mode, cscale=None, rscale=None):

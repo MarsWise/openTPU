@@ -14,6 +14,7 @@ from opentpu.isasim import Machine, SimError, Slice
 from opentpu.kernels import attention_decode, attention_layer, mlp
 from opentpu.runtime import compile_kernel, run
 from opentpu import rtlsim
+from opentpu.quant import pack_ternary_mxu
 
 from conftest import assert_same_state, rel
 from test_kernels import attn_args, layer_args, mlp_args
@@ -55,6 +56,63 @@ def test_design_size_block_128_rtl(have_verilator):
                            block=128)
     ri, rr = both(attention_decode, Config(S=1, D=128, ACT_BLOCKS=16), **args)
     assert rel(rr.outputs["out"], want) < 0.03
+
+
+@pytest.mark.parametrize("KB,unit,acc", [
+    (1, False, False), (3, True, False), (4, False, True),
+    (5, True, True), (7, False, False),
+])
+def test_tmm_rtl(have_verilator, KB, unit, acc):
+    rng = np.random.default_rng(0x7E2 + KB)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16)
+    D, M, N = cfg.D, 6, 7
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    weight_at, scale_at, init_at, out_at = 0x20000, 0x30000, 0x40000, 2048
+    row_stride, out_stride = packed.shape[1], N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    initial = rng.standard_normal((M, out_stride), dtype=np.float32)
+    if acc:
+        img[init_at:init_at + initial.nbytes] = initial.view(np.uint8).reshape(-1)
+    if not unit:
+        scales = rng.uniform(0.05, 0.2, N).astype(np.float32)
+        img[scale_at:scale_at + scales.nbytes] = scales.view(np.uint8)
+
+    prog = [I.ld(DATA, 0, M * KB * D)]
+    if acc:
+        prog.append(I.ld(init_at, out_at, M * out_stride))
+    prog += [
+        I.qact(0, M, 0, KB, KB * D),
+        I.tmm(weight_at, 0 if unit else scale_at, out_at, N, KB, row_stride,
+              out_stride, M, 0, 4, unit=unit, acc=acc, rsc=not unit),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(
+        cfg, [prog], [img.copy()], axi=True, stall=25, seed=0x7E2 + KB,
+    )
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
+def test_tmm_rtl_rejects_reserved_symbol(have_verilator):
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_BLOCKS=16)
+    packed = pack_ternary_mxu(np.zeros((1, cfg.D), dtype=np.int8), cfg.D)
+    packed[0, 0] = 0b11
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + cfg.D * 4] = np.zeros(cfg.D, np.float32).view(np.uint8)
+    img[0x20000:0x20000 + cfg.D] = packed[0]
+    prog = [
+        I.ld(DATA, 0, cfg.D),
+        I.qact(0, 1, 0, 1, cfg.D),
+        I.tmm(0x20000, 0, 1024, 1, 1, cfg.D, 1, 1, 0, 0, unit=True),
+        I.halt(),
+    ]
+    with pytest.raises(RuntimeError, match="reserved TMM symbol"):
+        rtlsim.run(cfg, [prog], [img], axi=True, stall=20, seed=0x7E2)
 
 
 # ------------------------------------------------------------------------------------ fuzzing
