@@ -1,0 +1,2 @@
+commit,model,checkpoint_sha,precision,profile,measurement_class,metric,value,unit,command,seed,device_or_tool,result,notes
+4adb0d90137d7f3ac0f18e32f6702f604a73465b,ternary-reference,none,2-bit symbols + int64 accumulation,software-only,pytest,tests_passed,23,cases,"python -m pytest -q --confcutdir=<temp-test-dir> <temp-test-dir>\test_ternary.py",0,Python 3.12.10 / NumPy 2.5.4 / pytest 9.1.1,pass,"Temporary copy outside tests/ to avoid POSIX-only tests/conftest.py; no RTL/model inference"

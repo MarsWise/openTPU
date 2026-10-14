@@ -12,7 +12,8 @@
   fenggev56/asic-sw-reg: SW_REG (the SW port from a register) and the ASIC timing loop”.
 - A non-moving recovery ref was created as `backup/pre-nextgen-5309a20`.
 - The configured `origin` is `https://github.com/MarsWise/openTPU.git`. `gh` is not installed, so
-  the authenticated account and write permission for that remote could not be confirmed.
+  the authenticated account could not be queried. The public GitHub API identifies `MarsWise/openTPU`
+  as a fork, and an authenticated non-forced push of the dedicated feature branch succeeded.
 
 ## Verified features at the pinned starting SHA
 
@@ -30,3 +31,19 @@ The feature/test entries above record files inspected at the pinned SHA; “rece
 not inferred from historical README claims. The upstream branch listing was queried, but this
 slice did not classify remote branches or review 30/100 commits and merged PRs subsystem by
 subsystem. Those items remain audit work, not evidence of absence.
+
+## Recent-history and PR check (2026-10-14)
+
+`git log FETCH_HEAD -100 -- <ISA/compiler/quant/MXU/board/serve/MoE paths>` returned 100 commits.
+The newest matching entry was `66efb24` (2026-09-29), concerning the LiteDRAM build clock; the
+recent path inventory includes `boards/ypcb-00338/` constraints/build/DRAM integration and
+`opentpu/compiler.py`, `opentpu/isa.py`, `opentpu/isasim.py`, `opentpu/quant.py`, and
+`rtl/mxu/otpu_mxu.sv`. No `opentpu/serve/` or `opentpu/llm/moe.py` file appeared in the changed
+path inventory for that filtered 100-commit query; this is not a full semantic review of serving
+or MoE behavior.
+
+GitHub's branch listing was retrieved (many active feature branches); the branches were not each
+rebased or independently tested. Pull requests #3–#7 were listed. The detailed PR #7 record is the
+merged ASIC timing-loop / SW_REG change dated 2026-10-14; PRs #3–#6 cover Lens summary, `otpu-smi`,
+and ASIC/OpenLayout work. The branch starts at the result of that merge. This limited check does
+not replace a complete audit of every branch or commit in the 100-commit window.
