@@ -14,17 +14,17 @@ master brief has been delivered.
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Current implementation commit at the last checkpoint: `4adb0d90137d7f3ac0f18e32f6702f604a73465b`.
+- Current implementation/audit checkpoint: `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
 - Branch push verified: remote feature ref resolves to
-  `4adb0d90137d7f3ac0f18e32f6702f604a73465b`; remote `main` remains
+  `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`; remote `main` remains
   `5309a20d28948fa910897e85a96f82db6ee5c1fd`. No force push.
-- Draft PR: not created. GitHub browser opened the compare/PR URL but redirected to sign-in; no
-  authenticated PR-create API is available in the tools.
+- Draft PR: created and verified as open/draft #1:
+  `https://github.com/MarsWise/openTPU/pull/1`, targeting the fork's `main`.
 - No upstream merge or local-modification migration was needed at start.
-- `git push --dry-run` and the actual non-forced push succeeded using the configured origin. The
-  public fork owner matches the remote owner; the authenticated actor name was not separately
-  queried because `gh` is unavailable.
+- `git push --dry-run` and non-forced feature-branch pushes succeeded using the configured origin.
+  The PR API identifies the actor as `MarsWise`. The public repository metadata confirms the fork
+  parent is `FeSens/openTPU`.
 
 ## Subsystem status
 
@@ -71,8 +71,8 @@ master brief has been delivered.
 - `git diff --check`: PASS.
 - Branch push: PASS, only the feature branch. Verified remote feature ref and unchanged default
   branch via `git ls-remote`.
-- Draft PR: BLOCKED because browser session redirects to GitHub sign-in and no PR-creation API or
-  authenticated GitHub CLI is available in this environment.
+- Draft PR: PASS, #1 is open, marked draft, targets `MarsWise/openTPU:main`, and its head is
+  `4d01e5d5679d11d6fb844037c8ece5b26116bdb5`.
 - `python -m pytest -q tests\test_ternary.py tests\test_quant.py`: BLOCKED at collection on
   Windows because `tests/conftest.py` imports `opentpu.rtlsim`, which imports POSIX-only `fcntl`.
   The initial attempts also identified missing pytest/NumPy; pytest 9.1.1 and NumPy 2.5.4 were
