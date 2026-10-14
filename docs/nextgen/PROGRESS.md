@@ -14,8 +14,8 @@ master brief has been delivered.
   access are unverified because GitHub CLI (`gh`) is unavailable.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Current branch checkpoint before this report-ingestion increment:
-  `33d2cda` (progress ledger / PR update commit).
+- Current code checkpoint: `92f7e405b9b2018c85c4f420d5f333d798cc1a2b`
+  (`tools: ingest user-supplied FPGA reports`).
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
 - Branch push verified at the last checkpoint: remote feature ref resolves to
   `33d2cda`; remote `main` remains
@@ -71,6 +71,7 @@ master brief has been delivered.
 - `python -m pytest -q --noconftest tests\test_ternary.py tests\test_nextgen_ingest.py`:
   PASS, 28 tests. `--noconftest` avoids the suite's POSIX-only `fcntl` import; this run includes
   both the packed ternary checks and the synthetic report-ingestion tests.
+- The 28-test result was repeated after code commit `92f7e405b9b2018c85c4f420d5f333d798cc1a2b`.
 - An attempt to install Icarus Verilog through winget failed with “No applicable installer”;
   no HDL simulator is available, and no RTL was changed or claimed tested.
 - The tests cover pack/unpack counts 0-9, row layout, reserved-code/non-zero-tail rejection in
