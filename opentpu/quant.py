@@ -284,6 +284,73 @@ def pack4(codes: np.ndarray) -> np.ndarray:
     return (c[..., 0::2] | (c[..., 1::2] << 4)).astype(np.uint8)
 
 
+TERNARY_ZERO = 0b00
+TERNARY_POSITIVE = 0b01
+TERNARY_NEGATIVE = 0b10
+TERNARY_INVALID = 0b11
+
+
+def pack_ternary(weights: np.ndarray) -> np.ndarray:
+    """Pack signed {-1, 0, +1} weights, four per byte, least-significant pair first.
+
+    The symbol map is 00=0, 01=+1, 10=-1; 11 is reserved. The last byte's unused
+    pairs are zero. This is a storage/reference format only; it is not an MXU MM
+    weight format and does not identify a checkpoint's quantization semantics.
+    """
+    w = np.asarray(weights)
+    if w.ndim < 1:
+        raise ValueError("ternary weights must have at least one dimension")
+    if not np.issubdtype(w.dtype, np.integer) or np.issubdtype(w.dtype, np.bool_):
+        raise TypeError("ternary weights must have an integer dtype")
+    if np.any((w < -1) | (w > 1)):
+        raise ValueError("ternary weights must be in {-1, 0, +1}")
+
+    k = w.shape[-1]
+    packed = np.zeros((*w.shape[:-1], (k + 3) // 4), dtype=np.uint8)
+    codes = np.where(w == 1, TERNARY_POSITIVE,
+                     np.where(w == -1, TERNARY_NEGATIVE, TERNARY_ZERO)).astype(np.uint8)
+    for lane in range(4):
+        part = codes[..., lane::4]
+        packed[..., :part.shape[-1]] |= part << (2 * lane)
+    return packed
+
+
+def unpack_ternary(packed: np.ndarray, count: int) -> np.ndarray:
+    """Unpack low-pair-first ternary bytes to signed int8 values, validating symbols and tail."""
+    p = np.asarray(packed)
+    if p.dtype != np.uint8:
+        raise TypeError("packed ternary weights must have dtype uint8")
+    if p.ndim < 1:
+        raise ValueError("packed ternary weights must have at least one dimension")
+    if (not isinstance(count, (int, np.integer))
+            or isinstance(count, (bool, np.bool_)) or count < 0):
+        raise ValueError("count must be a non-negative integer")
+    if p.shape[-1] != (count + 3) // 4:
+        raise ValueError("packed row length does not match count")
+
+    lanes = np.stack([(p >> (2 * lane)) & 0b11 for lane in range(4)], axis=-1)
+    unpacked = lanes.reshape(*p.shape[:-1], 4 * p.shape[-1])
+    codes = unpacked[..., :count]
+    if np.any(codes == TERNARY_INVALID):
+        raise ValueError("reserved ternary code 11")
+    if count % 4 and np.any(unpacked[..., count:] != TERNARY_ZERO):
+        raise ValueError("non-zero ternary padding")
+    return np.where(codes == TERNARY_POSITIVE, 1,
+                    np.where(codes == TERNARY_NEGATIVE, -1, 0)).astype(np.int8)
+
+
+def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.ndarray:
+    """Exact int64 reference matmul: activations [..., K] x packed weights [N, ceil(K/4)]."""
+    a = np.asarray(activations)
+    if a.ndim < 1 or not np.issubdtype(a.dtype, np.signedinteger) or a.dtype.itemsize > 4:
+        raise TypeError("activations must be a signed integer array of at most 32 bits")
+    w = np.asarray(packed_weights)
+    if w.ndim != 2:
+        raise ValueError("packed_weights must have shape [N, ceil(K/4)]")
+    decoded = unpack_ternary(w, a.shape[-1])
+    return np.matmul(a.astype(np.int64), decoded.astype(np.int64).T)
+
+
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:
     """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks)."""
     return K if fmt == "int8" else -(-K // (2 * D)) * D
@@ -859,5 +926,3 @@ def import_nvfp4(codes: np.ndarray, e4m3_scales: np.ndarray, tensor_scale: float
     rows[:, :K // 2] = pack4(codes)
     return rows, pack_scales("nvfp4", sw.astype(np.float32),
                              e4=e4.reshape(N, K // D, NVG).astype(np.uint8))
-
-
