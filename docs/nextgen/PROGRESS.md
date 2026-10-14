@@ -15,10 +15,11 @@ master brief has been delivered.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
 - Current code checkpoint: `92f7e405b9b2018c85c4f420d5f333d798cc1a2b`
-  (`tools: ingest user-supplied FPGA reports`).
+  (`tools: ingest user-supplied FPGA reports`). Latest pushed normalization/docs checkpoint:
+  `87c2253b75f6c427638c4457a2168c769fc0cb24`.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
-- Branch push verified at the last checkpoint: remote feature ref resolves to
-  `33d2cda`; remote `main` remains
+- Branch push verified: remote feature ref resolves to
+  `87c2253b75f6c427638c4457a2168c769fc0cb24`; remote `main` remains
   `5309a20d28948fa910897e85a96f82db6ee5c1fd`. No force push.
 - Draft PR: created and verified as open/draft #1:
   `https://github.com/MarsWise/openTPU/pull/1`, targeting the fork's `main`.
@@ -83,7 +84,7 @@ master brief has been delivered.
 - Branch push: PASS, only the feature branch. Verified remote feature ref and unchanged default
   branch via `git ls-remote`.
 - Draft PR: PASS, #1 is open, marked draft, targets `MarsWise/openTPU:main`, and its head is
-  `33d2cda` before the pending report-ingestion increment is pushed.
+  `87c2253b75f6c427638c4457a2168c769fc0cb24`.
 - `python -m pytest -q tests\test_ternary.py tests\test_quant.py`: BLOCKED at collection on
   Windows because `tests/conftest.py` imports `opentpu.rtlsim`, which imports POSIX-only `fcntl`.
   The initial attempts also identified missing pytest/NumPy; pytest 9.1.1 and NumPy 2.5.4 were
