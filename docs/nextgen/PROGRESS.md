@@ -27,15 +27,16 @@ master brief has been delivered.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
 - Current reviewed upstream snapshot: `f237dab2f196855a59a083b1454786df8f01291f`; merge commit
-  `07eb6cd1` integrates it into the existing feature branch.
+  `07eb6cd1` integrates it into the existing feature branch. Published checkpoint commit:
+  `fb7602d83676f7b409a20eb884622b1f2f3c0437`.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
 - Previously published feature head was `e5f55ed51cdce637910ae6f7ae9b14832a7bbf97`; latest
-  integration commit `07eb6cd1` is ready for publication. Fork `main` remains at
+  checkpoint `fb7602d83676f7b409a20eb884622b1f2f3c0437` is now published. Fork `main` remains at
   `5309a20d28948fa910897e85a96f82db6ee5c1fd`. Latest upstream is fetched read-only at
   `f237dab2f196855a59a083b1454786df8f01291f`. No force push.
-- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; it must be updated
-  after publishing this merge. The currently published PR description predates TMM implementation
-  and is stale.
+- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; GitHub reports its head
+  at `fb7602d83676f7b409a20eb884622b1f2f3c0437`. The PR description predates TMM implementation
+  and is stale; GitHub CLI is unauthenticated in this environment, so only its branch head updated.
 - Both upstream integrations followed changed-file and overlap review. No local modifications were
   discarded; each merge completed without conflicts.
 - `git push --dry-run` and non-forced feature-branch pushes succeeded using the configured origin.
