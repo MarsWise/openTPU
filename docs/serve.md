@@ -25,12 +25,13 @@ r = c.chat.completions.create(model="Qwen3-0.6B", messages=[{"role": "user", "co
 
 | Route | |
 |---|---|
-| `POST /v1/chat/completions` | the chat template as otpu-chat renders it; `stream` (SSE), `n`, `max_tokens` / `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`, `seed`, `stop` (strings), `stop_token_ids`, `ignore_eos`, `stream_options.include_usage`, `chat_template_kwargs.enable_thinking`, `skip_special_tokens`; content as a string or text parts |
+| `POST /v1/chat/completions` | the chat template as otpu-chat renders it; `stream` (SSE), `n`, `max_tokens` / `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `repetition_penalty`, `seed`, `stop` (strings), `stop_token_ids`, `ignore_eos`, `stream_options.include_usage`, `chat_template_kwargs.enable_thinking`, `skip_special_tokens`; content as a string or text parts (and `image_url` parts and `max_slices` on a model with a vision side) |
 | `POST /v1/completions` | a prompt string or token ids, `echo`, the same sampling and stops |
 | `POST /generate` | SGLang's native call: `text` or `input_ids` (one, or a list), `sampling_params` (`max_new_tokens` (default 128), `temperature`, `top_p`, `top_k` (-1: all), `repetition_penalty`, `stop`, `stop_token_ids`, `ignore_eos`, `n`), `stream` (each event the whole text so far); `output_ids` and `meta_info` (prompt, completion and cached tokens, `finish_reason`, `e2e_latency`) |
 | `GET /v1/models` | the model, its context length (`max_model_len`) |
 | `GET /v1/stats` | the queue, throughput, the slots, the KV store and prefix cache, the steps' timing |
-| `GET /health`, `/health_generate`, `/get_model_info`, `/get_server_info` | |
+| `GET /health`, `/health_generate` | ok; a streamed MoE's 503 `warming` while its expert pool is read into the page cache (below) |
+| `GET /get_model_info`, `/get_server_info` | |
 | `POST /flush_cache` | forget every saved context and what idle slots hold |
 
 `usage.prompt_tokens_details.cached_tokens` counts the prompt tokens the server did not feed
@@ -38,8 +39,50 @@ r = c.chat.completions.create(model="Qwen3-0.6B", messages=[{"role": "user", "co
 checkpoint's generation_config.json, or its family's), and a request's fields override them. A
 top-k above 64 (or none) is 64, the most the card's sampler takes. `--reasoning-parser qwen3`
 moves a reply's `<think> ... </think>` to `reasoning_content`, also while it streams. `--api-key`
-(or `OTPU_API_KEY`) requires `Authorization: Bearer <key>`. Not supported: tools, images,
-logprobs, `suffix`; `presence_penalty` and `frequency_penalty` are ignored.
+(or `OTPU_API_KEY`) requires `Authorization: Bearer <key>`. Not supported: tools, logprobs,
+`suffix`, images on a model without a vision side; `presence_penalty` and `frequency_penalty`
+are ignored.
+
+### Images (MiniCPM-V)
+
+A model with a vision side (`minicpmv.Spec`, docs/minicpmv.md) takes images in
+`/v1/chat/completions`:
+
+- **Parts.** A message's content may hold `image_url` parts (`{"type": "image_url", "image_url":
+  {"url": ...}}`, or the Responses API's `input_image`) between its text parts, in any order.
+  The chat template renders each as `<|image_pad|>`, and the image's placeholder text (its
+  `<image_id>`, thumbnail and slices) takes its place, as otpu-chat and HF's processor do.
+- **URLs.** `data:` URLs (base64 PNG, JPEG, WebP) by default. `--image-fetch` also fetches
+  http(s) URLs (20 s, 32 MB). A server never opens one of its own files for a request.
+- **Slices.** A request's `max_slices` (1 .. 36) bounds an image's slices besides its thumbnail;
+  `--max-slices` is the server's default, else the processor's 9. It is the latency knob: each
+  crop is about 3.7 s of the card's vision tower at MCOLS 4 and 64 prompt tokens.
+- **Keys.** Every image's `<|image_pad|>` is one token id, so a context's key holds each image
+  token's stand-in instead (`minicpmv.keyed`: a negative int32, a hash of the image's content
+  key, the sha256 of its crops' sizes and patch rows, and the token's index). The device's
+  context, the prefix cache and the store compare keys: a request reuses a saved context past
+  an image only for the same image at the same slices. The worker feeds the token ids, picks
+  with them (the repetition penalty), and keeps the keys in the context.
+- **Feeding.** The images with tokens in the part to feed run through the card's tower first
+  (an image that started before the reused prefix, whole); then the prompt is prefilled with
+  its image rows (`Engine.prefill_layers(vis=...)`).
+- **RoPE rows.** At each switch the worker writes the request's M-RoPE rows into the RoPE table
+  (only those that differ; the table's own rows back for a text-only request). The model
+  decodes one sequence at a time (no batched slots), so the table is the running request's.
+
+`/v1/completions` and `/generate` take text and token ids only. An image request on a model
+without a vision side is refused (400).
+
+**A streamed MoE's expert pool** (`--pool`) serves the slots' misses from the host's page cache:
+~0.5 ms a miss, against 15-32 ms each from the card host's disks (docs/minicpmv.md 6, pooldisk:
+a turn 5-9x slower). The engine reads the whole pool into the page cache as it opens, and again,
+once the image is built, what the build's memory took back out (`moe.rewarm`): the card host's
+HDD reads an 18 GB pool in ~80 s, its SSD in ~37. Meanwhile `/health` answers 503
+`{"status": "warming", "progress": <the share read>}`, for at most `--warm-cap` seconds
+(default 300; 0: never); past that, or when the read failed or was stopped, it answers ok with
+`"warm": "incomplete"` and a note. It is advisory: requests are served during the read, their
+misses from the disk. The read's start, end, GB, MB/s and the pool's share in the page cache
+at its end are printed when it ends, and `/v1/stats` has them (`pool_warm`).
 
 ## The KV cache: pages, the store, the prefix cache
 
@@ -147,6 +190,33 @@ turns of `--quantum` tokens. Each switch saves the outgoing context's new pages 
 restores the incoming one. A request running alone runs to its end. The prompt is fed but its
 last token, which the card's decode loop feeds and picks from (when the loop takes the request's
 sampling; else the host picks the first token from the logits).
+
+**With the MTP drafter** (`--mtp`, opt-in: a streamed Qwen3.5-MoE from its -mtp pool,
+`--mtp-from` for MiniCPM-V 4.7, or a dense Qwen3.5; docs/mtp.md, docs/offload.md 15.6). Every
+request decodes on the card's MTP loop (`MTPDecoder.loop_card`), halted after the token in flight
+as plain decode's is. Only sampling the loop takes is served (greedy, top-k 1 .. 64, repetition
+penalty >= 1; else 400). What changes against plain decode:
+
+- The whole prompt goes through the decoder's prefill, which appends the MTP layer's K / V rows
+  with it. The first token is picked on the host from the last row's logits as the loop would
+  pick it (greedy: the argmax; sampled: the device sampler's arithmetic with the request's first
+  uniform). Its draft is left to the loop's first run.
+- A context's bytes hold the MTP layer's KV cache (kvio's pages: one more attention layer, the
+  35B's +1,048 bytes a position, +0.6 / 1.4 / 2.4% of a context of 300 / 1,000 / 2,000 tokens)
+  and the DeltaNet states of the decoder's committed slot, restored into slot 0.
+- The MTP layer's row at q takes the token at q + 1, which the context does not hold. A page's
+  key holds one token more, and an entry the token its last row took (`follow`). A context
+  saved for its request to come back to keeps the draft after its next token. A draft still
+  pending (a reply that ended right after its prompt) is run before the context is saved.
+- The part of a prompt before the reply's start (`at`) is saved with the residual row before it
+  (`held`; the streamed MoE's decoder holds it). A prompt that goes on there with another token
+  (a chat's next turn) restores that context, and its prefill first appends the MTP layer's row
+  at `at` - 1 again from the held row (`MTPDecoder.refill`), bit for bit a fresh decoder's. A
+  dense model's decoder holds no row, so its part ends a token earlier, at a token both turns
+  share. A context restored without its row only drafts worse there: the verify keeps the
+  tokens plain decode's.
+- `/v1/stats` adds `mtp_iters`, `mtp_accepted` and `refills`, and both workers report
+  `restore_s` and `save_s` (the context switches' host time).
 
 ## Measured on the card
 
@@ -264,3 +334,12 @@ All on the ISA simulator with tiny models.
   requests packed into a block of slots.
 - `test_serve_api.py`: the HTTP API end to end with concurrent clients, 64 connections at
   once, SGLang's `/generate`.
+- `test_serve_mtp.py`: `--mtp` on the tiny streamed MoE with its MTP layer: requests in turns
+  equal plain decode's, each switch back the same MTP context (the MTP layer's KV cache, the
+  state, the draft), a pending draft run before the save; a prompt from a held reply start
+  appends the MTP layer's row again, bit for bit a fresh decoder's (without the held row, it
+  differs there and the tokens do not); a loop halted on the device mid-run continues (the
+  host's stop word written at a WAITW while the ISA simulator runs it); a dense Qwen3.5.
+- `test_minicpmv.py`: the worker with images (requests in turns equal their fresh runs, a
+  context reused past an image only for the same image, a text-only request after them), the
+  API's image_url parts (placeholders, keys, refusals).

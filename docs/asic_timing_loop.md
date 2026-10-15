@@ -132,8 +132,14 @@ rest.
 arbiters see `sw_rdy_i = !sw_v || sw_rdy`: one write per cycle still goes out, and the
 quantizer's grant is withheld exactly when the port cannot take a write); a write held there counts
 as one the DRAM has not taken (`wr_idle_i = wr_idle && !sw_v`), so a QST, a HALT CHAIN and a
-WAITW timeout end only once the DRAM has it; only the loader's reset clears it. A target turns it
-on with `[uarch] SW_REG = true` (on in `nangate45-small`; `OTPU_SW_REG=1` in simulation).
+WAITW timeout end only once the DRAM has it; only the loader's reset clears it. This iteration
+ran it as a parameter (`SW_REG`: a target's `[uarch] SW_REG = true`, on in `nangate45-small`
+only; `OTPU_SW_REG=1` in simulation). It is now unconditional: every target builds it (the card's
+FPGA build too, where the quantizer -> the DRAM adapter's SW gather registers had been near
+critical: -0.260 ns in an r2 candidate, -0.092 ns in an r2.1 one, and r2.1's E3 build's worst
+endpoint at +0.007 ns), every simulation runs it, and
+the parameter is gone. `sw_req` is the register's valid bit, so outside the block every write is
+taken once `wr_idle && !sw_req` (`otpu_board`'s STATUS WR_IDLE and run start read that).
 
 Verified with it on: `OTPU_TARGET=nangate45-small OTPU_UARCH=board pytest tests/test_rtl.py`, 131
 passed and the 2 known failures of main (`test_additive_mask_block_rtl`: the ISA simulator's
@@ -165,6 +171,13 @@ per-unit clock gating instead of the stall enable on thousands of flip-flops.
 - **The virtual I/O clock.** A propagated core clock with an ideal virtual clock for the ports
   charges every port path the clock tree's insertion delay (~0.95 ns here). Report both views (the
   SDC as is, and the virtual clock given the tree's latency) and compare iterations in the same view.
+  The flow now gives the virtual clock that latency after CTS (`asic/nangate45/io_latency.tcl`,
+  ORFS `POST_CTS_TCL`: a source latency equal to the registers' median clock arrival, kept by the
+  later stages' SDC), so the ports' slacks are latency-neutral from CTS on and the 20% budget
+  before it is as it was. On r2's card (1.95 ns of insertion delay, global-route parasitics) the
+  ports' worst went from -2.19 ns (port B's write data) as the SDC was to -0.25 ns, the outputs'
+  TNS from -2180 to -31 ns, and no input path fails either way; with the TMEM in the corner port
+  B's write data went from -2.47 to -0.52 ns and its ready input (`b_rdy`) from +0.13 to -0.16.
 - **The regression must simulate the change.** openTPU's tests simulate `tb_top` / `otpu_top`, not
   `otpu_asic_top`; a change only in the ASIC top is never tested. Put it behind a parameter of the
   shared module and turn it on through the target.

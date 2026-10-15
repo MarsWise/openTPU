@@ -38,6 +38,7 @@ from . import rtlsim
 
 UNITS = ["DMA", "MXU", "QUANT", "VPU", "COLL"]
 OPNAMES = {I.LD: "LD", I.ST: "ST", I.DSTEP: "DSTEP", I.STREAM: "STREAM", I.MM: "MM",
+           I.TMM: "TMM",
            I.QACT: "QACT", I.QST: "QST", I.VOP: "VOP", I.GATHER: "GATHER", I.BAR: "BAR",
            I.RLD: "RLD", I.WAITW: "WAITW"}
 VFUNCS = {I.V_ADD: "add", I.V_SUB: "sub", I.V_RSUB: "rsub", I.V_MUL: "mul", I.V_MAX: "max",
@@ -124,6 +125,12 @@ def _describe(ins: I.Instr, cfg) -> tuple[str, str, int, int, int]:
         zero = ins.flags & I.F_SZERO
         return ("STREAM", f"{rows}x{cols}{' zero' if zero else ''}",
                 -(-rows * cols // I.DSTEP_LANES), n if zero else 2 * n, 0)
+    if op == I.TMM:
+        N, KB, M = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF, (w[5] >> 16) & 0xFF
+        acc = " +acc" if ins.flags & I.F_ACC else ""
+        scales = 0 if ins.flags & I.F_UNIT else N * -(-KB // 4)
+        return ("TMM", f"{M}x{KB * D} . {N}x{KB * D}^T ternary{acc}",
+                N * KB, N * -(-KB // 4), scales)
     if op == I.MM:
         N, KB, M = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF, (w[5] >> 16) & 0xFF
         acc = " +acc" if ins.flags & I.F_ACC else ""
@@ -185,7 +192,7 @@ class Profile:
             # port A delivers one scale word per MXU cycle, a PAIR MM's 8-byte scale pair at once
             ac = sum(r.porta // 2 if r.detail.endswith((" pair", " pair +acc")) else r.porta
                      for r in rs)
-            m = sum(r.work for r in rs if r.op == I.MM)
+            m = sum(r.work for r in rs if r.op in (I.MM, I.TMM))
             per.append({"portb": b, "porta": a, "porta_cycles": ac, "mxu": m,
                         "bound": max(ac, b, m)})
         bound = max(p["bound"] for p in per) if per else 0
@@ -227,7 +234,7 @@ class Profile:
         """Useful multiply-accumulates: every MM does M x N x KB*D."""
         tot = 0
         for r in self.recs:
-            if r.op == I.MM:
+            if r.op in (I.MM, I.TMM):
                 ins = self.programs[r.slice][r.pc]
                 N, KB, M = ins.w[3] & 0xFFFF, (ins.w[3] >> 16) & 0xFF, (ins.w[5] >> 16) & 0xFF
                 tot += M * N * KB * self.cfg.D
@@ -238,7 +245,8 @@ class Profile:
         MM, and gaps in between -- each gap blamed on the instruction that finished last before
         the MM was released (its dependency)."""
         rs = self.slice_recs(s)
-        mms = sorted((r for r in rs if r.op == I.MM and r.end >= 0), key=lambda r: r.start)
+        mms = sorted((r for r in rs if r.op in (I.MM, I.TMM) and r.end >= 0),
+                     key=lambda r: r.start)
         if not mms:
             return {"prologue": self.cycles, "epilogue": 0, "gaps": [], "blame": {}}
         def rel(r):
@@ -250,7 +258,8 @@ class Profile:
             busy_to = max(busy_to, prev.end)
             g = rel(m) - busy_to
             if g > 4:
-                cands = [r for r in rs if r.op != I.MM and 0 <= r.end <= rel(m) + 1]
+                cands = [r for r in rs if r.op not in (I.MM, I.TMM) and
+                         0 <= r.end <= rel(m) + 1]
                 who = max(cands, key=lambda r: r.end) if cands else None
                 gaps.append((busy_to, rel(m), who.idx if who else -1))
                 key = (who.name, who.pc) if who else ("?", -1)
@@ -325,7 +334,7 @@ def parse(trace: str, cfg, programs, name: str = "") -> Profile:
             ins = programs[s][pc]
             nm, det, work, pb, pa = _describe(ins, cfg)
             unit = {I.LD: 0, I.ST: 0, I.DSTEP: 0, I.STREAM: 0, I.WAITW: 0, I.MM: 1, I.QACT: 2,
-                    I.QST: 2, I.VOP: 3}.get(op, 4)
+                    I.TMM: 1, I.QST: 2, I.VOP: 3}.get(op, 4)
             r = Rec(s, counts[s], pc, op, unit, c, name=nm, detail=det, comment=ins.comment,
                     work=work, portb=pb, porta=pa)
             counts[s] += 1

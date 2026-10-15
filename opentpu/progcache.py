@@ -53,7 +53,8 @@ RUNTIME_ENV = ("OTPU_PROG_CACHE", "OTPU_PROG_CACHE_GB", "OTPU_IMAGE_CACHE", "OTP
                "OTPU_IMG_CACHE", "OTPU_IMG_CACHE_GB", "OTPU_IMG_CACHE_FREE_GB", "OTPU_BUILD_JOBS",
                "OTPU_QUIET", "OTPU_PREBUILD_CFG", "OTPU_PREBUILD_MIN_GB",
                "OTPU_PREBUILD_QUIET_WAIT", "OTPU_LOCK_HELD", "OTPU_LOCK_PID", "OTPU_LOCK_WAIT",
-               "OTPU_RUN_DIR", "OTPU_STOP_RUN", "OTPU_SIM_TMP", "OTPU_PARENT")
+               "OTPU_RUN_DIR", "OTPU_STOP_RUN", "OTPU_SIM_TMP", "OTPU_PARENT",
+               "OTPU_VISION_WARM")
 # the host modules the compiler, kernels and models import: opentpu/host/offload.py's LINE, TAG,
 # RUN, Layout and RowLayout place the mailboxes, slots and tags the programs address
 HOST_KEYED = ("host/offload.py",)
@@ -178,6 +179,15 @@ def _parts(progs):
     return (list(progs), True) if isinstance(progs, tuple) else ([progs], False)
 
 
+def _seen(parts) -> list:
+    """The (RunVar, c) the programs' addresses add (Program.run_seen), every slice's, once."""
+    out = []
+    for part in parts:
+        for p in ([part] if isinstance(part, np.ndarray) else part):
+            out += [x for x in getattr(p, "run_seen", ()) if x not in out]
+    return out
+
+
 def _store(d: Path, f: Path, v) -> None:
     progs, ra = v
     parts, split = _parts(progs)
@@ -193,7 +203,8 @@ def _store(d: Path, f: Path, v) -> None:
                                            np.uint32)
     meta = {"split": split, "kinds": kinds, "S": [len(p) if k == "i" else 1
                                                   for p, k in zip(parts, kinds)],
-            "ra": None if ra is None else [[v_.name, int(c), v_.bound] for v_, c in ra]}
+            "ra": None if ra is None else [[v_.name, int(c), v_.bound] for v_, c in ra],
+            "seen": [[v_.name, int(c), v_.bound] for v_, c in _seen(parts)]}
     f.parent.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(f.parent).free - sum(a.nbytes for a in arrs.values()) < FREE_FLOOR:
         return
@@ -215,14 +226,16 @@ def _load(f: Path):
                               for w in ws])
             ra = None if meta["ra"] is None else [(RunVar(r[0], *r[2:]), r[1])
                                                   for r in meta["ra"]]
+            seen = [(RunVar(r[0], *r[2:]), r[1]) for r in meta.get("seen", ())]
         os.utime(f)                     # recently used (the eviction order)
     except FileNotFoundError:
         return None
     except Exception:                   # a damaged entry: compile again
         f.unlink(missing_ok=True)
         return None
-    # each slice's program with its arguments and their bounds (opentpu.waits bounds them)
-    parts = [[Program(p, ra or ()) for p in part] for part in parts]
+    # each slice's program with its arguments and their bounds (opentpu.waits bounds them), and
+    # the run-time values its addresses add (Program.run_seen: the run words it reads)
+    parts = [[Program(p, ra or (), seen) for p in part] for part in parts]
     progs = tuple(parts) if meta["split"] else parts[0]
     return progs, ra
 

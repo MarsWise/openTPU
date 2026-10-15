@@ -189,7 +189,7 @@ module otpu_seq
         s.dw = 1'b1; s.d[0] = r32(f.wr[0]); s.d[1] = r32(f.wr[2]);
         t0 = f.wr[1]; w0 = 1'b1; t1 = f.rd[0]; t2 = f.rd[1]; t3 = f.rd[2]; t4 = f.rd[3];
       end
-      OP_MM: begin
+      OP_MM, OP_TMM: begin
         s.d[0] = r32(f.rd[0]); s.d[1] = r32(f.rd[1]);
         t0 = f.wr[0]; w0 = 1'b1; h = f.wr[1]; t2 = f.rd[3];
         a = f.rd[2];
@@ -947,7 +947,8 @@ module otpu_seq
             for (int j = 0; j < NWT; j++)
               if (wunit(j) == ui && ui != int'(c_unit) && ui != U_VPU &&
                   ((j < NUNITS) ? conflict(c_ref, sfp_ref[i]) :
-                   c_cmd.op == OP_MM && conflict_dram(c_ref, sfp_ref[i]))) begin
+                   (c_cmd.op == OP_MM || c_cmd.op == OP_TMM) &&
+                   conflict_dram(c_ref, sfp_ref[i]))) begin
                 logic [3:0] k;
                 logic [CW-1:0] df;
                 k = c_sync[4 * j +: 4];
@@ -1194,7 +1195,7 @@ module otpu_seq
       OP_ST: return 1;
       OP_DSTEP, OP_STREAM: return 2;
       OP_WAITW: return 3;
-      OP_MM: return 4;
+      OP_MM, OP_TMM: return 4;
       OP_QACT: return 5;
       OP_QST: return 6;
       OP_VOP: return is_reduce(f) ? 8 : (f_cc(f) != CC_NONE) ? 9 : 7;
@@ -1283,7 +1284,8 @@ module otpu_seq
           kd = (u == U_DMA) ? wc_k[c_pc % NPC][5] : (u == U_Q) ? wc_k[c_pc % NPC][6] : 0;
           if (u == int'(c_unit) && u != U_VPU) begin k = 0; kd = 0; end   // started first
           wc_dep[i] = k != 0 && y >= k - 1;
-          wc_depd[i] = (c_cmd.op == OP_MM) ? (kd != 0 && y >= kd - 1) : wc_dep[i];
+          wc_depd[i] = (c_cmd.op == OP_MM || c_cmd.op == OP_TMM) ?
+                        (kd != 0 && y >= kd - 1) : wc_dep[i];
           if (u == U_VPU && (hz_wcvx == 1 || (hz_wcvx == 2 && c_unit == U_VPU) ||
                              (hz_wcvx == 3 && c_unit != U_VPU))) begin
             logic [1:0] cf;

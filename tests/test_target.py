@@ -93,8 +93,8 @@ def test_arch_hash_is_stable_and_sensitive():
     # production's CFG_HASH (ACT_ROWS 4, the previous numerics), what a host of the previous
     # numerics computes for it: it refuses MX builds (T.NUMERICS)
     assert f"{_hash_without_numerics(four):08x}" == "e170f967"
-    # the ASIC reference keeps the card's arch but for its ACT RAM rows (MCOLS)
-    assert T.arch_hash(four) == T.arch_hash(T.config("nangate45")), "same arch, same programs"
+    # the ASIC's card point is the card's arch (release r2's m4) with 8 ACT RAM rows (docs/asic.md)
+    assert T.arch_hash(dataclasses.replace(card, ACT_ROWS=8)) == T.arch_hash(T.config("nangate45"))
     for f in dataclasses.fields(Config):
         v = getattr(card, f.name)
         other = dataclasses.replace(card, **{f.name: (not v) if isinstance(v, bool) else v * 2
@@ -389,26 +389,28 @@ def test_tech_families_define_the_same_cells():
         assert iface(ROOT / f"rtl/tech/{fam}/otpu_tech_dsp.sv") == ref, fam
 
 
+# the DRAM's handshakes and read data that otpu_slice's units, loader and arbiters see only through
+# the SW port's, port A's and port B's registers (sw_rdy_i, wr_idle_i, a_rdy_i, b_rdy_i, rd_idle_i,
+# b_rvalid_i, ...)
+_RAW = r"\b(sw_rdy|wr_idle|a_rdy|b_rdy|rd_idle|b_rvalid|b_rtag|b_rdata)\b"
+
+
 def _slice_sw_uses(txt: str) -> list:
-    """otpu_slice's reads of the DRAM's raw sw_rdy / wr_idle (comments out), as (line, text),
-    outside its port list and the SW port's register block (if (SW_REG) begin : g_swr ... else
-    ... end); a unit's port of that name (.wr_idle(x)) is not one, its implicit connection
-    (.wr_idle,) is."""
+    """otpu_slice's reads of the DRAM's raw handshakes and read data (_RAW; comments out), as
+    (line, text), outside its port list and the registers: the SW port's (from its input, wire
+    sw_req_c, to the end of its block, end : sw_reg), port B's (from assign b_rdy_i to end :
+    pb_reg) and port A's (from assign a_rdy_i to end : pa_reg); a unit's port of that name
+    (.wr_idle(x)) is not one, its implicit connection (.wr_idle,) is."""
     code = re.sub(r"//.*", "", txt)
     head = re.search(r"module\s+otpu_slice\b.*?#\(.*?\)\s*\((.*?)\)\s*;", code, re.S)
-    start = code.index("if (SW_REG) begin : g_swr")
-    depth, pos, end = 0, start, None
-    for m in re.finditer(r"\b(begin|end)\b", code[start:]):
-        depth += 1 if m.group(1) == "begin" else -1
-        if depth == 0:
-            pos = start + m.end()
-            if not re.match(r"\s*else\b", code[pos:]):
-                end = pos
-                break
-    assert head and end, "otpu_slice: no port list or no SW register block"
+    regs = [re.search(r"\bwire\s+sw_req_c\b.*?\bend\s*:\s*sw_reg\b", code, re.S),
+            re.search(r"\bassign\s+b_rdy_i\b.*?\bend\s*:\s*pb_reg\b", code, re.S),
+            re.search(r"\bassign\s+a_rdy_i\b.*?\bend\s*:\s*pa_reg\b", code, re.S)]
+    assert head and all(regs), "otpu_slice: no port list or no SW / port B / port A register block"
     out = []
-    for m in re.finditer(r"\b(sw_rdy|wr_idle)\b", code):
-        if head.start(1) <= m.start() < head.end(1) or start <= m.start() < end:
+    for m in re.finditer(_RAW, code):
+        if head.start(1) <= m.start() < head.end(1) or \
+                any(r.start() <= m.start() < r.end() for r in regs):
             continue
         if code[m.start() - 1] == "." and re.match(r"\s*\(", code[m.end():]):
             continue                            # (a unit's port of that name: .wr_idle(wr_idle_i))
@@ -418,11 +420,14 @@ def _slice_sw_uses(txt: str) -> list:
 
 
 def test_the_slice_reads_dram_writes_through_the_sw_register():
-    """With SW_REG a QST write can sit a cycle in the SW port's register, in neither the
-    quantizer nor the DRAM: the slice's units and arbiters see the port as sw_rdy_i and wr_idle_i
-    (the register's), never the DRAM's sw_rdy / wr_idle, which only the register block reads. A
-    raw wr_idle would end a QST, a HALT CHAIN or a WAITW timeout before the DRAM has the write on
-    the ASIC targets only (SW_REG 0: the two are the same), where no FPGA test sees it."""
+    """A QST write can sit a cycle in the SW port's register, a port B request in port B's output
+    register and its read data in port B's input register, an MXU scale read in port A's output
+    register (every target's), in neither the units nor the DRAM: the slice's units, loader and
+    arbiters see the ports as sw_rdy_i / wr_idle_i / a_rdy_i / b_rdy_i / rd_idle_i / b_rvalid_i /
+    b_rtag_i / b_rdata_i (the registers'), never the DRAM's raw handshakes or data, which only the
+    registers read. A raw wr_idle would end a QST, an ST, a HALT CHAIN or a WAITW timeout before
+    the DRAM has the write; a raw rd_idle would start the loader with a read still on its way; a
+    raw a_rdy or b_rdy would let a unit's request pass a held one."""
     txt = (ROOT / "rtl/top/otpu_slice.sv").read_text()
     assert _slice_sw_uses(txt) == []
     # the check sees one: the quantizer's grant on the raw ready
@@ -430,9 +435,78 @@ def test_the_slice_reads_dram_writes_through_the_sw_register():
                       "if (g == G_Q && q_awant && !sw_rdy) aok[g] = 1'b0;")
     assert bad != txt and [t for _, t in _slice_sw_uses(bad)] == \
         ["if (g == G_Q && q_awant && !sw_rdy) aok[g] = 1'b0;"]
-    # and a unit connected to the raw one implicitly (.wr_idle, as before SW_REG)
+    # and a unit connected to the raw one implicitly (.wr_idle, as before the register)
     bad = txt.replace(".a_want(q_awant), .wr_idle(wr_idle_i),", ".a_want(q_awant), .wr_idle,")
     assert bad != txt and [t for _, t in _slice_sw_uses(bad)] == [".a_want(q_awant), .wr_idle,"]
+    # port B: the MXU's grant on the raw ready, the loader's start on the raw read idle, and the
+    # MXU's read data connected implicitly; port A: the MXU's grant on the raw ready
+    for a, b in (("assign mxu_bgnt = !dma_breq && b_rdy_i;", "assign mxu_bgnt = !dma_breq && b_rdy;"),
+                 ("assign mxu_agnt = a_rdy_i;", "assign mxu_agnt = a_rdy;"),
+                 ("else if (!ld_go) ld_go <= rd_idle_i;", "else if (!ld_go) ld_go <= rd_idle;"),
+                 (".b_rdata(b_rdata_i),\n", ".b_rdata,\n")):
+        assert txt.count(a) == 1, a
+        bad = txt.replace(a, b)
+        assert [t for _, t in _slice_sw_uses(bad)] == [b.strip()], b
+
+
+def test_the_board_counts_the_port_registers_as_requests_pending():
+    """otpu_board's STATUS WR_IDLE and go_ok see a slice's writes all taken (q_wr_idle) once its
+    adapter has none pending and neither its SW register nor its port B output register holds one
+    (sw_req, b_req && b_we: the registers' valid bits), and its reads all back (q_rd_idle) once
+    the adapter has none, neither port A's output register (a_req: reads only) nor port B's holds
+    one (b_req && !b_we) and port B's input register no data (m_rv: a b_rvalid the cycle before);
+    the adapter's wr_idle and rd_idle (m_wr_idle, m_rd_idle) go to the slice alone, for slice 0 and
+    the others. sim/verilator/tb_board.sv checks the same in every board simulation."""
+    code = re.sub(r"//.*", "", (ROOT / "rtl/shell/otpu_board.sv").read_text())
+    assert re.findall(r"\.wr_idle\(([^)]*)\)", code) == ["m_wr_idle"] * 4
+    assert re.findall(r"\.rd_idle\(([^)]*)\)", code) == ["m_rd_idle"] * 4
+    assert re.findall(r"assign\s+q_wr_idle\[(\w+)\]\s*=\s*([^;]*);", code) == \
+        [(k, "m_wr_idle && !sw_req && !(b_req && b_we)") for k in ("0", "s")]
+    assert re.findall(r"assign\s+q_rd_idle\[(\w+)\]\s*=\s*([^;]*);", code) == \
+        [(k, "m_rd_idle && !a_req && !(b_req && !b_we) && !m_rv") for k in ("0", "s")]
+    assert re.findall(r"m_rv\s*<=\s*([^;]*);", code) == \
+        [f"!x_srst[{k}] && b_rvalid" for k in ("0", "s")]
+
+
+def _lane_loops(code: str) -> dict:
+    """The generate loops over lanes of a source (comments out): {label: body}, the body from
+    "for (genvar l ...) begin : label" to its matching end."""
+    out = {}
+    for m in re.finditer(r"for\s*\(\s*genvar\s+l\b[^)]*\)\s*begin\s*:\s*(\w+)", code):
+        depth = 1
+        for t in re.finditer(r"\b(begin|end)\b", code[m.end():]):
+            depth += 1 if t.group(1) == "begin" else -1
+            if depth == 0:
+                out[m.group(1)] = code[m.end():m.end() + t.start()]
+                break
+    return out
+
+
+def test_the_vpu_lanes_take_ss_act_from_their_copies():
+    """ss_act (the stream engine's grant: stream mode) selects every lane's RDOT term and the
+    tail's VOP-mode operands; as one flip-flop it reached some 2,700 endpoints (the ASIC card
+    point's worst register path, through 190 buffers; only Vivado's max_fanout replicated it).
+    The lanes read copies instead, three a lane (otpu_vpu g_sar: sa_r, cm_u, cm_q, loaded with
+    ss_act's next value, each its own kept instance: identical flip-flops would merge): no lane
+    loop of otpu_vpu reads ss_act, otpu_se_tail has no one-bit mode, and every copy is kept."""
+    vpu = re.sub(r"//.*", "", (ROOT / "rtl/vpu/otpu_vpu.sv").read_text())
+    tail = re.sub(r"//.*", "", (ROOT / "rtl/vpu/otpu_se_tail.sv").read_text())
+
+    def raw(code):
+        return {n: re.findall(r"\bss_act\b", b) for n, b in _lane_loops(code).items()
+                if re.search(r"\bss_act\b", b)}
+    loops = _lane_loops(vpu)
+    assert {"g_red", "g_slane", "g_sar"} <= set(loops) and raw(vpu) == {}
+    assert len(re.findall(r'\(\*\s*keep_hierarchy\s*=\s*"yes"\s*\*\)\s*otpu_delay\b',
+                          loops["g_sar"])) == 3
+    assert re.search(r"\.cm_u\s*,\s*\.cm_q\b", vpu)
+    tl = _lane_loops(tail)
+    assert not re.search(r"\b(cm|uc)\b", tail)
+    assert "cm_u[l]" in tl["g_u"] and "cm_q[l]" in tl["g_lq"]
+    # the check sees one: a lane's term on ss_act again
+    a = "assign rsa[l] = (SE && sa_r[l])"
+    assert vpu.count(a) == 1
+    assert raw(vpu.replace(a, "assign rsa[l] = (SE && ss_act)")) == {"g_red": ["ss_act"]}
 
 
 def test_config_summary_names_the_target(no_env):

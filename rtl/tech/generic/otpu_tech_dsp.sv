@@ -16,26 +16,36 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic [7:0]         wlo,               // WREG: the weights from the next cycle on
   input  logic [7:0]         whi,
   input  logic               sel,               // the select from the next cycle on
+  input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
   logic [7:0] br, wlr, whr;
-  logic       selr;
+  logic       selr, ternary_r, ternary_m;
   logic signed [15:0] m;
+  logic signed [8:0] tm;
   wire  signed [23:0] pn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(m);
+  wire  signed [23:0] tpn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(tm);
   wire  [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
+  wire  signed [7:0] tw = $signed(selr ? wh : wl);
+  wire  signed [8:0] ta = $signed({br[7], br});
+  wire  signed [8:0] tprod = (tw == 8'sd1) ? ta :
+                               (tw == -8'sd1) ? -ta : 9'sd0;
   always_ff @(posedge clk) if (en) begin
     br <= act;
     selr <= sel;
     wlr <= wlo;
     whr <= whi;
     m <= 16'(int'($signed(br)) * int'($signed(selr ? wh : wl)));
+    ternary_r <= ternary;
+    tm <= tprod;
+    ternary_m <= ternary_r;
   end
   if (LAST) begin : g_comb
-    assign p = pn;
+    assign p = ternary_m ? tpn : pn;
   end else begin : g_preg
-    always_ff @(posedge clk) if (en) p <= pn;
+    always_ff @(posedge clk) if (en) p <= ternary_m ? tpn : pn;
   end
   assign pcout = LAST ? 48'd0 : 48'(p);              // (a chain's last cascades nowhere)
 endmodule

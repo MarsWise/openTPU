@@ -25,15 +25,15 @@ def _cos(a, b):
     return (a * b).sum(-1) / np.linalg.norm(a, axis=-1) / np.linalg.norm(b, axis=-1)
 
 
-def _tiny(nk=8):
+def _tiny(nk=8, nv=8):
     """nk DeltaNet key heads (8: one per value head; 4: a pair shares its q and k, as the
-    35B's)."""
+    35B's), nv value heads (16: a real model's register pressure in the device programs)."""
     torch.manual_seed(0)
     hc = transformers.Qwen3_5MoeTextConfig(
         hidden_size=256, num_hidden_layers=len(KINDS), num_attention_heads=8,
         num_key_value_heads=2, head_dim=256, vocab_size=1000,
         layer_types=["full_attention" if k == "attn" else "linear_attention" for k in KINDS],
-        linear_num_key_heads=nk, linear_num_value_heads=8, linear_key_head_dim=128,
+        linear_num_key_heads=nk, linear_num_value_heads=nv, linear_key_head_dim=128,
         linear_value_head_dim=128, linear_conv_kernel_dim=4, tie_word_embeddings=True,
         max_position_embeddings=4096, rms_norm_eps=1e-6, num_experts=E,
         num_experts_per_tok=K, moe_intermediate_size=F, shared_expert_intermediate_size=F,
@@ -47,7 +47,7 @@ def _tiny(nk=8):
             elif "experts" in n or "gate" in n:
                 p.copy_(0.05 * torch.randn_like(p))
     W = {k: v.float().numpy() for k, v in m.state_dict().items()}
-    spec = Spec(256, KINDS, 8, 2, 256, 64, 8, 128, 128, F, 1000, lin_kheads=nk,
+    spec = Spec(256, KINDS, 8, 2, 256, 64, nv, 128, 128, F, 1000, lin_kheads=nk,
                 moe=MoESpec(E=E, k=K, ffn=F, rule="softmax", shared=F))
     return m, W, spec
 
@@ -83,8 +83,9 @@ def test_hints_are_off_by_default(tiny, tmp_path):
 
 
 def _engine(spec, W, experts=None, **kw):
-    cfg = device_config(spec, 256, S=1, experts=experts, **kw)
-    return Engine(spec, W, cap=256, cfg=cfg, experts=experts, **kw)
+    from opentpu.llm.qwen3 import PREFILL_ROWS
+    cfg = device_config(spec, 256, S=1, rows=PREFILL_ROWS, experts=experts, **kw)   # (the
+    return Engine(spec, W, cap=256, cfg=cfg, experts=experts, **kw)     # Engine's rows)
 
 
 def test_reference_matches_hf(tiny):
@@ -265,10 +266,10 @@ def test_moe_on_board_model(tiny, have_verilator):
     hold at their first read. Per-position programs, then the resident decode, then the card's
     generate loop (the DeltaNet layers, the routed experts and the gated shared expert): the ISA
     simulator's logits and tokens bit for bit."""
+    from conftest import sim_board_config
     from opentpu.host.board import Board, BoardBackend, SimTransport
-    from opentpu.isasim import board_config
     _, W, spec = tiny
-    cfg = board_config(DRAM_BYTES=1 << 26)
+    cfg = sim_board_config(DRAM_BYTES=1 << 26)
     tr = SimTransport(ch_bytes=cfg.DRAM_BYTES // 2, stall=20, seed=5)
     assert Board(tr).info()["caps"].get("waitw"), "the board model has no WAITW (CAPS bit31)"
     isa = Engine(spec, W, cap=256, cfg=cfg, rows=1, resident=True)
@@ -350,6 +351,37 @@ def test_layer_major_prefill_is_bit_exact(tiny, wformat, R, b, real, embed_runs,
         assert np.array_equal(ga.view(np.uint32), gb.view(np.uint32))
         t = int(np.argmax(ga))
 
+
+
+@pytest.mark.parametrize("expert_major", [False, True])
+def test_formats_by_layer_range_stream_bit_exact(tiny, expert_major, monkeypatch):
+    """Formats by layer range on the streamed MoE, as MiniCPM-V's mix on the card
+    (streamed.FORMATS, docs/minicpmv.md 5.1: the first DeltaNet layers and the shared expert
+    int8, the other layers nvfp4, fp4 experts): each layer's projections in its range's format,
+    and the layer-major prefill (expert-major and not) gives token by token's logits, then its
+    decode steps', bit for bit, on build B's PAIR, DSTEP and STREAM with 6 slots a layer."""
+    from opentpu.llm import qwen35 as Q35
+    monkeypatch.setattr(Q35, "PREFILL_CHUNK", 24)
+    monkeypatch.delenv("OTPU_FORMATS", raising=False)
+    spec, W = _untied(tiny)
+    spec = replace(spec, formats="delta@0-2=int8,attn=nvfp4,delta=nvfp4,mlp=int8")
+    kw = dict(MCOLS=4, PAIR=True, DSTEP=True, STREAM=True)
+    cfg = device_config(spec, 256, rows=1, lookup=True, S=1, experts=6, wformat="fp4", **kw)
+    a, ref = (Engine(spec, W, cap=256, cfg=cfg, rows=1, resident=True, experts=6,
+                     wformat="fp4", **x)
+              for x in ({"layer_major": 2, "expert_major": expert_major}, {}))
+    assert a.image.lf[0] == ("int8", "nvfp4", "int8", "int8")
+    assert a.image.lf[3] == ("nvfp4", "nvfp4", "int8", "int8")
+    assert a.image.fmt.wformat == "fp4"
+    toks = [int(t) for t in np.random.default_rng(13).integers(0, 1000, 40)]
+    la, lb = a.prefill(toks), ref.prefill(toks)
+    assert a.server.misses > 0
+    assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+    t = int(np.argmax(la))
+    for _ in range(2):
+        ga, gb = a.step(t), ref.step(t)
+        assert np.array_equal(ga.view(np.uint32), gb.view(np.uint32))
+        t = int(np.argmax(ga))
 
 
 @pytest.mark.parametrize("ready,hint", [(True, False), (False, False), (True, True)])
@@ -1101,7 +1133,8 @@ def test_expert_major_prefill_is_bit_exact(tiny, R, skew, wformat, b, C, monkeyp
     pass's rows one MM's). C: the passes' entries (Engine.em_pass; None: the configuration's,
     docs/offload.md 13.18: 4 with b's MCOLS 4 and PAIR, a short pass of 2; 8 for int8 at the
     default MCOLS 8): each row's math the same, only grouped otherwise, so every C equals token
-    by token's."""
+    by token's. Today's runs of R rows (tile_runs False; the tiles, Qwen3.5-MoE's default:
+    tests/test_em_tile.py)."""
     from opentpu.llm import qwen35 as Q35
     from opentpu.llm.moe import em_pass_rows, em_record, em_slots
     monkeypatch.setattr(Q35, "PREFILL_CHUNK", 24)
@@ -1115,7 +1148,7 @@ def test_expert_major_prefill_is_bit_exact(tiny, R, skew, wformat, b, C, monkeyp
     cfg = device_config(spec, 256, rows=1, lookup=True, S=1, experts=6, wformat=wformat, **kw)
     a, ref = (Engine(spec, W, cap=256, cfg=cfg, rows=1, resident=True, experts=6,
                      wformat=wformat, **kw)
-              for kw in ({"layer_major": R, "expert_major": True}, {}))
+              for kw in ({"layer_major": R, "expert_major": True, "tile_runs": False}, {}))
     assert em_pass_rows(cfg, wformat) == (4 if b else 8)
     a.em_pass = C
     sc = _scratch(a.server, monkeypatch)

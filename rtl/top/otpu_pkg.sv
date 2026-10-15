@@ -6,7 +6,7 @@ package otpu_pkg;
                          OP_LD = 8'h10,
                          OP_ST = 8'h11,
                          OP_DSTEP = 8'h12, OP_STREAM = 8'h13, OP_MM = 8'h20, OP_QACT = 8'h21,
-                         OP_QST = 8'h22,
+                         OP_QST = 8'h22, OP_TMM = 8'h23,
                          OP_VOP = 8'h30, OP_GATHER = 8'h40;
 
   localparam logic [7:0] V_ADD = 0, V_SUB = 1, V_RSUB = 2, V_MUL = 3, V_MAX = 4, V_MIN = 5,
@@ -87,7 +87,7 @@ package otpu_pkg;
   function automatic int unit_of(input logic [7:0] op);
     case (op)
       OP_LD, OP_ST, OP_DSTEP, OP_STREAM, OP_WAITW: return U_DMA;
-      OP_MM:             return U_MXU;
+      OP_MM, OP_TMM:     return U_MXU;
       OP_QACT, OP_QST:   return U_Q;
       OP_VOP:            return U_VPU;
       OP_BAR, OP_GATHER, OP_RLD: return U_COLL;   // RLD: read locally (otpu_slice)
@@ -198,7 +198,7 @@ package otpu_pkg;
     logic [31:0] rows, n, kb, m;
     o = '0;
     case (c.op)
-      OP_MM: begin
+      OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); m = 32'(c.w6[23:16]);
         o.a[0] = 24'(n - 1); o.w[0] = c.w5;
         o.a[1] = 24'(n - 1); o.w[1] = c.w7;
@@ -298,14 +298,17 @@ package otpu_pkg;
           f.rd[2] = mk(SP_TMEM, c.w5, c.w7 + 1);
         end
       end
-      OP_MM: begin
+      OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); kb = 32'(c.w4[23:16]); m = 32'(c.w6[23:16]);
         if (n != 0 && kb != 0 && m != 0) begin
-          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 + kb * D);
+          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
+                       ((c.op == OP_TMM) ? (((kb + 32'd3) >> 2) * D) : kb * D));
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
-          if (!c.flags[0])
+          if (c.op == OP_TMM) begin
+            if (c.flags[7]) f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + 32'd4);
+          end else if (!c.flags[0])
             f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[7] ? 32'd4 :
                          (c.flags[5:4] == 2'd0) ? 32'd4 + 32'(c.w4[31:24]) + kb :
                          (c.flags[5:4] == 2'd3) ? 32'd24 + ((32'(c.w4[31:24]) + kb) << 3) :
@@ -414,6 +417,8 @@ package otpu_pkg;
     logic                    mac;       // the MXU consumed a weight chunk
     logic                    starve;    // the MXU had chunks to consume but none had arrived
     logic                    deny;      // a unit with TMEM requests was not granted
+    logic                    bwait;     // a unit's port B request waited for the port
+    logic                    dwait;     // a unit's DRAM request (port B, port A, QST) waited
     logic                    u_mxu;     // MXU instruction ended: starve, bp, frz, deny
     logic [3:0][31:0]        u_mxu_v;   // [0] starve ... [3] deny
     logic                    u_q;       // QACT ended: frz
