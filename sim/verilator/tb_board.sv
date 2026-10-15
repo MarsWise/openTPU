@@ -174,17 +174,64 @@ module tb_board;
   longint cyc = 0;
   always @(posedge clk) cyc <= cyc + 1;
 
-  // A write in a slice's SW port register (otpu_slice) is in neither its units nor its adapter:
-  // the control block (STATUS WR_IDLE, go_ok) must not see the slice's writes all taken then
+  // A request in a slice's SW, port A or port B output register, or read data in its port B
+  // input register (otpu_slice), is in neither its units nor its adapter: the control block (STATUS
+  // WR_IDLE, go_ok) must not see the slice's writes all taken, or its reads all back, then, nor
+  // the slice's loader its reads all back (rd_idle_i, its start)
   for (genvar s = 0; s < S; s++) begin : g_swchk
+    logic sw_v, a_v, b_v, b_w, b_rv, wi, ri, li;
     if (s == 0) begin : g_0
-      always @(posedge clk)
-        if (!rst && dut.q_wr_idle[0] && dut.u_slice.sw_v)
-          $fatal(1, "tb_board: slice 0 write idle with a write in its SW register");
+      assign sw_v = dut.u_slice.sw_v;
+      assign a_v = dut.u_slice.a_req;
+      assign b_v = dut.u_slice.b_req; assign b_w = dut.u_slice.b_we;
+      assign b_rv = dut.u_slice.b_rvalid_i;
+      assign li = dut.u_slice.rd_idle_i;
     end else begin : g_s
-      always @(posedge clk)
-        if (!rst && dut.q_wr_idle[s] && dut.g_slice[s].u_slice.sw_v)
+      assign sw_v = dut.g_slice[s].u_slice.sw_v;
+      assign a_v = dut.g_slice[s].u_slice.a_req;
+      assign b_v = dut.g_slice[s].u_slice.b_req; assign b_w = dut.g_slice[s].u_slice.b_we;
+      assign b_rv = dut.g_slice[s].u_slice.b_rvalid_i;
+      assign li = dut.g_slice[s].u_slice.rd_idle_i;
+    end
+    assign wi = dut.q_wr_idle[s];
+    assign ri = dut.q_rd_idle[s];
+    always @(posedge clk)
+      if (!rst) begin
+        if (wi && sw_v)
           $fatal(1, "tb_board: slice %0d write idle with a write in its SW register", s);
+        if (wi && b_v && b_w)
+          $fatal(1, "tb_board: slice %0d write idle with a write in its port B register", s);
+        if (ri && a_v)
+          $fatal(1, "tb_board: slice %0d read idle with a read in its port A register", s);
+        if (ri && b_v && !b_w)
+          $fatal(1, "tb_board: slice %0d read idle with a read in its port B register", s);
+        if (ri && b_rv)
+          $fatal(1, "tb_board: slice %0d read idle with read data in its port B input register", s);
+        if (li && ((b_v && !b_w) || b_rv))
+          $fatal(1, "tb_board: slice %0d's loader sees its reads back with one in port B's registers", s);
+        if (li && a_v)
+          $fatal(1, "tb_board: slice %0d's loader sees its reads back with one in port A's register", s);
+      end
+  end
+
+  // port A's held beats (otpu_native_dram: the reused beat al_v, the runs pv) do not outlive a
+  // flush (a_flush: a run's reset, a program load, a WAITW's word holding, where the host may have
+  // written): the cycle after one, none is held (a read taken in it is decided with the old
+  // state, its beat dropped with the rest)
+  for (genvar s = 0; s < S; s++) begin : g_pachk
+    logic fl, fl_q, al_v;
+    logic [1:0] pv;
+    if (s == 0) begin : g_0
+      assign fl = dut.x_rst[0] || dut.x_ld_start[0] || dut.a_inval;
+      assign al_v = dut.u_mem.al_v; assign pv = dut.u_mem.pv;
+    end else begin : g_s
+      assign fl = dut.x_rst[s] || dut.x_ld_start[s] || dut.g_slice[s].a_inval;
+      assign al_v = dut.g_slice[s].u_mem.al_v; assign pv = dut.g_slice[s].u_mem.pv;
+    end
+    always @(posedge clk) begin
+      if (!rst && fl_q && (al_v || pv != '0))
+        $fatal(1, "tb_board: slice %0d's port A beats outlived a flush", s);
+      fl_q <= !rst && fl;
     end
   end
 

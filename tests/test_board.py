@@ -285,6 +285,49 @@ def test_op_check_on_board_model(have_verilator, group, name, prog):
     assert ok, msg
 
 
+def test_mm_sw_line_alone_on_board_model(have_verilator):
+    """An MM that starts a program (a HALT CHAIN's: the loader waited for every read, and ACT RAM
+    and TMEM are kept) and whose first scale row has its Sw alone in a 32-byte line (the rows 28
+    bytes into one): its first port A read, that line, goes out with nothing else in flight, so
+    for a cycle the slice's only read is the one in its port A register. tb_board stops if the
+    board's read idle or the slice's loader start misses it (otpu_slice); bit for bit against
+    the ISA simulator (the demo's scale rows, moved there)."""
+    from opentpu import isa as I
+    from opentpu.host.checks import DATA, OUT, SC, W8
+    from opentpu.host.opchecks import CHAIN_AT
+    M, res, at, ssa = CFG.MCOLS, 8192, CHAIN_AT + 0x1000, SC + 0x100 + 28
+    mm = [I.mm(W8, ssa, res, 16, 2, 256, 16, M, 0, 8), I.st(OUT, res, 16 * M), I.halt()]
+    w = np.asarray(I.assemble(mm), np.uint32)
+    if CFG.SEQ_WC:
+        from opentpu import waits as W
+        w = W.loadable(w, W.entries(w, CFG.D, CFG.S, prog=mm), CFG.D)
+    img = diag_image(CFG)
+    img[ssa:ssa + 16 * 8] = img[SC:SC + 16 * 8]
+    img[at:at + 4 * len(w)] = w.view(np.uint8)
+    prog = [I.ld(DATA, 0, 4096), I.qact(0, M, 0, 2, 256), I.li(1, at), I.li(2, len(mm)),
+            I.halt(chain=True, ra=1, rb=2)]
+    ok, msg, _ = run_demo(Board(SimTransport(ch_bytes=CFG.DRAM_BYTES // 2)), CFG, prog, img)
+    assert ok, msg
+
+
+def test_porta_beats_dropped_at_a_waitw_on_board_model(have_verilator):
+    """An MM, then a WAITW whose word holds at once (ordered after the MM by the word it writes
+    into the MM's output): its end drops port A's held beats (otpu_native_dram a_flush; the
+    MM's scale reads leave the reused beat and a run behind). tb_board stops if a beat outlives
+    the flush; bit for bit against the ISA simulator."""
+    from opentpu import isa as I
+    from opentpu.host.checks import DATA, OUT, SC, W8
+    from opentpu.host.opchecks import CHAIN_AT
+    M, res, flag = CFG.MCOLS, 8192, CHAIN_AT + 0x2000
+    img = diag_image(CFG)
+    img[flag:flag + 4] = np.array([1], "<u4").view(np.uint8)
+    prog = [I.ld(DATA, 0, 4096), I.qact(0, M, 0, 2, 256),
+            I.mm(W8, SC, res, 16, 2, 256, 16, M, 0, 8),
+            I.waitw(flag, res + 16 * M - 1, 1, I.C_EQ), I.st(OUT, res, 16 * M), I.halt()]
+    ok, msg, _ = run_demo(Board(SimTransport(ch_bytes=CFG.DRAM_BYTES // 2)), CFG, prog, img)
+    assert ok, msg
+
+
 def test_waitw_host_check_on_board_model(have_verilator):
     """qual.sh's WAITW phase (checks.waitw_host, waitw_timeout) through the host driver: the board
     model runs a script, so the host's data and flag are there before the start (the writes

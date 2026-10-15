@@ -2,6 +2,7 @@
 through OpenROAD-flow-scripts, for PPA numbers.
 
     python3 tools/asic/flow.py prep POINT       # macros, the macro map, the ORFS design
+    python3 tools/asic/flow.py config POINT     # the ORFS design (config.mk, SDC) only, again
     python3 tools/asic/flow.py run POINT        # ORFS: native (ORFS_HOME), else Docker
     python3 tools/asic/flow.py report POINT     # area, timing, power -> report.json
     python3 tools/asic/flow.py all POINT        # the three
@@ -72,16 +73,26 @@ def yosys() -> str:
     return "yosys"
 
 # The design points: a target (its arch / uarch: otpu_asic_top's parameters; its core_mhz: the
-# clock the SDC asks for), the floorplan's utilisation, and a variant's source edits (rewrite:
-# file -> [(old, new)], applied to copies in src/). lm3la6: otpu_fpipe's multiplier and adder one
-# and two stages deeper (LM 3, LA 6: the localparams of the VPU, the stream engine and the
-# quantizer), for the critical-path study.
+# clock the SDC asks for), the floorplan's utilisation and global placement's density margin
+# (addon: PLACE_DENSITY_LB_ADDON, 0.10 unless stated), the macros a script places before the
+# macro placer (macros: asic/nangate45/<file>, ORFS's MACRO_PLACEMENT_TCL), and a variant's
+# source edits (rewrite: file -> [(old, new)], applied to copies in src/). lm3la6: otpu_fpipe's
+# multiplier and adder one and two stages deeper (LM 3, LA 6: the localparams of the VPU, the
+# stream engine and the quantizer), for the critical-path study.
 _DEEP = {f: [("localparam int LM = 2, LA = 4;", "localparam int LM = 3, LA = 6;")]
          for f in ("vpu/otpu_vpu.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
                    "vpu/otpu_quant.sv")}
 POINTS = {
     "small": dict(target="nangate45-small", util=35),
-    "card": dict(target="nangate45", util=35),
+    # the card: release r2's arch at ACT_ROWS 8 on a smaller die than the previous card point's
+    # 35% (30.6 mm2, most of it empty), with the lower placement density that cleared that run's
+    # congestion estimate and the MXU's macros by its columns (docs/asic.md: at 45% the macro
+    # placer's corner block of ACT RAM left global placement at a congestion of 2.61, these 1.10),
+    # the TMEM's by its readers 100 um right of them (tmem_gap, mxu_macros.tcl's TMEM_GAP_UM: the
+    # macro placer's corner put the TMEM's reads 3-5 mm from their units and its clock late; 2.94 ns
+    # -> 2.59 on the global route), and global routing's metal4 and up at 7% (fastroute)
+    "card": dict(target="nangate45", util=45, addon=0.02, macros="mxu_macros.tcl", tmem_gap=100,
+                 fastroute="fastroute.tcl"),
     "small-lm3la6": dict(target="nangate45-small", util=35, rewrite=_DEEP),
     "card-lm3la6": dict(target="nangate45", util=35, rewrite=_DEEP),
 }
@@ -92,15 +103,27 @@ ASIC_TOP = "asic/otpu_asic_top.sv"
 
 
 def params(point: str) -> dict:
-    """otpu_asic_top's parameters for the point's target."""
+    """otpu_asic_top's parameters for the point's target: the sizes and uarch, and the optional
+    ones where the target states them (MXU_E; TMEM_IMPL 3's knobs; SEQ_WC on; COLL_GATHER, the
+    collective unit without GATHER as the card builds it). RPB 0 is every read lane
+    (NRP x LANES, as opentpu.target.rtl_params)."""
     t = T.load(POINTS[point]["target"])
     a, u = t.arch, t.uarch
-    return dict(D=a["D"], MCOLS=a["MCOLS"], ACT_BLOCKS=a["ACT_BLOCKS"], ACT_ROWS=t.act_rows,
-                TMEM_WORDS=a["TMEM_WORDS"], IMEM_WORDS=a["IMEM_WORDS"],
-                FIFO_DEPTH=u["FIFO_DEPTH"], LANES=a["LANES"], WIN=u["WIN"],
-                MXU_IMPL=u["MXU_IMPL"], MXU_CL=u["MXU_CL"], VPU_CL=u["VPU_CL"],
-                ULANES=u["ULANES"], HAS_DSTEP=int(a["DSTEP"]), TMEM_IMPL=u["TMEM_IMPL"],
-                RPB=u["RPB"], WPB=u["WPB"])
+    p = dict(D=a["D"], MCOLS=a["MCOLS"], ACT_BLOCKS=a["ACT_BLOCKS"], ACT_ROWS=t.act_rows,
+             TMEM_WORDS=a["TMEM_WORDS"], IMEM_WORDS=a["IMEM_WORDS"],
+             FIFO_DEPTH=u["FIFO_DEPTH"], LANES=a["LANES"], WIN=u["WIN"],
+             MXU_IMPL=u["MXU_IMPL"], MXU_CL=u["MXU_CL"], VPU_CL=u["VPU_CL"],
+             ULANES=u["ULANES"], HAS_DSTEP=int(a["DSTEP"]), TMEM_IMPL=u["TMEM_IMPL"],
+             RPB=u["RPB"] or T.NRP * a["LANES"], WPB=u["WPB"])
+    if u.get("MXU_E"):
+        p["MXU_E"] = u["MXU_E"]
+    if u["TMEM_IMPL"] == 3:
+        p.update({k: int(u[k]) for k in T.TMEM3_KEYS if k in u})
+    if a["SEQ_WC"]:
+        p["SEQ_WC"] = 1
+    if "COLL_GATHER" in u:
+        p["COLL_GATHER"] = int(u["COLL_GATHER"])
+    return p
 
 
 def clock_ns(point: str) -> float:
@@ -132,7 +155,10 @@ def probe(point: str) -> list[fakeram.Macro]:
         "  input logic [W-1:0] wd, wm, output logic [W-1:0] rd);\nendmodule\n"
         "(* blackbox *)\nmodule otpu_sram_1rw #(parameter int W = 1, parameter int N = 2) (\n"
         "  input logic clk, en, we, input logic [$clog2(N)-1:0] a,\n"
-        "  input logic [W-1:0] wd, wm, output logic [W-1:0] rd);\nendmodule\n")
+        "  input logic [W-1:0] wd, wm, output logic [W-1:0] rd);\nendmodule\n"
+        "(* blackbox *)\nmodule otpu_sram_1rw1r #(parameter int W = 1, parameter int N = 2) (\n"
+        "  input logic clk, ena, wea, enb, input logic [$clog2(N)-1:0] aa, ab,\n"
+        "  input logic [W-1:0] wd, wm, output logic [W-1:0] rda, rdb);\nendmodule\n")
     gp = " ".join(f"-G {k}={v}" for k, v in params(point).items())
     files = " ".join(str(f) for f in sources(point) + [stub])
     dump = o / "src" / "probe_cells.txt"
@@ -146,7 +172,7 @@ def probe(point: str) -> list[fakeram.Macro]:
         raise RuntimeError(f"yosys probe failed:\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
     tiles: dict[tuple, int] = {}
     for cell in re.split(r"\n\s*cell ", dump.read_text())[1:]:
-        kind = "1r1w" if cell.startswith("\\otpu_sram_1r1w") else "1rw"
+        kind = re.match(r"\\otpu_sram_(\w+)", cell).group(1)
         w = int(re.search(r"parameter \\W (\d+)", cell).group(1))
         n = int(re.search(r"parameter \\N (\d+)", cell).group(1))
         tiles[(kind, n, w)] = tiles.get((kind, n, w), 0) + 1
@@ -160,13 +186,20 @@ def sram_map(macros: list[fakeram.Macro]) -> str:
     """The leaves: one generate branch per macro size."""
     out = ["// Generated by tools/asic/flow.py: the leaves of rtl/tech/asic/otpu_tech_ram.sv on this",
            "// design's macros (tools/asic/fakeram.py).", ""]
-    for kind in ("1r1w", "1rw"):
+    for kind in ("1r1w", "1rw", "1rw1r"):
         ms = [m for m in macros if m.kind == kind]
+        if kind == "1rw1r" and not ms:      # (the third kind: only a design with one has it)
+            continue
         if kind == "1r1w":
             out += ["module otpu_sram_1r1w #(parameter int W = 1, parameter int N = 2) (",
                     "  input  logic clk, re, we,",
                     "  input  logic [$clog2(N)-1:0] ra, wa,",
                     "  input  logic [W-1:0] wd, wm,", "  output logic [W-1:0] rd);"]
+        elif kind == "1rw1r":
+            out += ["module otpu_sram_1rw1r #(parameter int W = 1, parameter int N = 2) (",
+                    "  input  logic clk, ena, wea, enb,",
+                    "  input  logic [$clog2(N)-1:0] aa, ab,",
+                    "  input  logic [W-1:0] wd, wm,", "  output logic [W-1:0] rda, rdb);"]
         else:
             out += ["module otpu_sram_1rw #(parameter int W = 1, parameter int N = 2) (",
                     "  input  logic clk, en, we,", "  input  logic [$clog2(N)-1:0] a,",
@@ -177,6 +210,10 @@ def sram_map(macros: list[fakeram.Macro]) -> str:
             if kind == "1r1w":
                 out.append(f"    {m.name} u_m (.clk, .re_in(re), .r_addr_in(ra), .we_in(we), "
                            ".w_addr_in(wa), .wd_in(wd), .w_mask_in(wm), .rd_out(rd));")
+            elif kind == "1rw1r":
+                out.append(f"    {m.name} u_m (.clk, .ce_in(ena), .we_in(wea), .addr_in(aa), "
+                           ".wd_in(wd), .w_mask_in(wm), .rd_out(rda), .ce1_in(enb), "
+                           ".addr1_in(ab), .rd1_out(rdb));")
             else:
                 out.append(f"    {m.name} u_m (.clk, .ce_in(en), .we_in(we), .addr_in(a), "
                            ".wd_in(wd), .w_mask_in(wm), .rd_out(rd));")
@@ -197,7 +234,9 @@ def sdc(point: str) -> str:
 # the ideal virtual clock against the propagated core clock (~1.2 ns of insertion delay) makes
 # the input paths hold violations (nangate45-small: 2188 endpoints, up to 0.69 ns: port
 # A's read data into the MXU FIFOs' macros; 12 K hold buffers), which is the integrator's
-# boundary, not the block's.
+# boundary, not the block's. After CTS vclk takes the core clock's insertion delay as its source
+# latency (asic/nangate45/io_latency.tcl, ORFS POST_CTS_TCL), so the ports' slacks are
+# latency-neutral; before it both clocks are ideal.
 current_design otpu_asic_top
 set clk_period {p}
 create_clock -name core_clock -period $clk_period [get_ports clk]
@@ -217,6 +256,12 @@ def config_mk(point: str, macros: list[fakeram.Macro]) -> str:
     lefs = " ".join(str(o / "macros" / f"{m.name}.lef") for m in macros)
     libs = " ".join(str(o / "macros" / f"{m.name}.lib") for m in macros)
     tops = " ".join(f"{k} {v}" for k, v in params(point).items())
+    mpt = (f"export MACRO_PLACEMENT_TCL = {ROOT / 'asic' / 'nangate45' / P['macros']}\n"
+           if P.get("macros") else "")
+    if P.get("tmem_gap"):
+        mpt += f"export TMEM_GAP_UM = {P['tmem_gap']}\n"
+    if P.get("fastroute"):
+        mpt += f"export FASTROUTE_TCL = {ROOT / 'asic' / 'nangate45' / P['fastroute']}\n"
     return f"""# Generated by tools/asic/flow.py: openTPU's ASIC block, design point {point}
 export DESIGN_NAME = otpu_asic_top
 export DESIGN_NICKNAME = otpu_{point}
@@ -231,19 +276,32 @@ export ADDITIONAL_LIBS = {libs}
 export CORE_UTILIZATION = {P['util']}
 export CORE_ASPECT_RATIO = 1
 export CORE_MARGIN = 5
-export PLACE_DENSITY_LB_ADDON = 0.10
-export MACRO_PLACE_HALO = 10 10
+export PLACE_DENSITY_LB_ADDON = {P.get('addon', 0.10)}
+{mpt}export MACRO_PLACE_HALO = 10 10
 # channels between macros at least the standard-cell grid's metal4 strap pitch (56 um), so the
 # rails in every channel reach a strap (pdngen: "Unable to repair all channels" at 44.8)
 export RTLMP_MIN_CHANNEL_SIZE = 60 60
 # and no row narrower than that pitch (a pocket boxed in by macros: its rails would float)
 export TAPCELL_TCL = {ROOT / 'asic' / 'nangate45' / 'tapcell.tcl'}
+# after CTS the ports' virtual clock takes the core clock's insertion delay (latency-neutral ports)
+export POST_CTS_TCL = {ROOT / 'asic' / 'nangate45' / 'io_latency.tcl'}
 export TNS_END_PERCENT = 100
 export LEC_CHECK = 0
 # the small RAMs left to flip-flops (the dispatch window, the MXU's drain rows, LUT RAMs: the
 # largest 8 Kbit at the card's point); the large ones are macros
 export SYNTH_MEMORY_MAX_BITS = 16384
 """
+
+
+def config(point: str) -> None:
+    """config.mk and constraint.sdc again from prep's tiles (src/tiles.json), touching no
+    source: a floorplan or placement setting changed, the synthesis kept."""
+    o = out_dir(point)
+    ts = json.loads((o / "src" / "tiles.json").read_text())
+    macros = sorted({fakeram.Macro(x["kind"], x["words"], x["bits"]) for x in ts},
+                    key=lambda m: (m.kind, m.depth, m.width))
+    (o / "constraint.sdc").write_text(sdc(point))
+    (o / "config.mk").write_text(config_mk(point, macros))
 
 
 def prep(point: str) -> list[fakeram.Macro]:
@@ -378,7 +436,7 @@ def report(point: str) -> dict:
 
 
 def main(argv: list[str]) -> None:
-    if not argv or argv[0] not in ("prep", "run", "report", "all", "points"):
+    if not argv or argv[0] not in ("prep", "config", "run", "report", "all", "points"):
         print(__doc__)
         sys.exit(2)
     if argv[0] == "points":
@@ -391,6 +449,8 @@ def main(argv: list[str]) -> None:
     cpus = int(os.environ["ORFS_CPUS"]) if os.environ.get("ORFS_CPUS") else None
     if argv[0] in ("prep", "all"):
         prep(point)
+    if argv[0] == "config":
+        config(point)
     if argv[0] in ("run", "all"):
         rc = run(point, cpus, os.environ.get("ORFS_TARGET", "finish"))
         print(f"ORFS exit {rc}: {out_dir(point) / 'run.log'}")

@@ -1,6 +1,7 @@
 """tools/asic/flow.py and paths.py without OpenROAD: the design points come from the targets and
 name only otpu_asic_top's parameters; the constraints; native ORFS or Docker, and prep's yosys; the
 paths' units, stages and kinds."""
+import dataclasses
 import os
 import re
 import subprocess
@@ -29,8 +30,21 @@ def test_points_are_the_asic_targets():
         prm = flow.params(p)
         assert set(prm) <= names, set(prm) - names
         assert prm["D"] == t.arch["D"] and prm["TMEM_WORDS"] == t.arch["TMEM_WORDS"]
-        assert (prm["TMEM_IMPL"], prm["RPB"], prm["WPB"]) == (1, 1, 1)
         assert abs(flow.clock_ns(p) * t.platform["core_mhz"] - 1000) < 0.01
+    # the small point keeps the banked TMEM (its reference results); the card's is r2's one copy
+    # in its ASIC form (two-port macros at the core clock, no pump) with the card's
+    # configuration but 8 ACT RAM rows: WAITC, MX E 4, the BAR-only collective unit
+    small = flow.params("small")
+    assert (small["TMEM_IMPL"], small["RPB"], small["WPB"]) == (1, 1, 1)
+    assert not {"SEQ_WC", "COLL_GATHER", "MXU_E"} & set(small)
+    card = flow.params("card")
+    assert T.arch_hash(T.config("nangate45")) == \
+        T.arch_hash(dataclasses.replace(T.config("ypcb-00338"), ACT_ROWS=8))
+    assert {k: card[k] for k in ("MCOLS", "ACT_ROWS", "MXU_E", "SEQ_WC", "TMEM_IMPL", "TMEM_NSB",
+                                 "TMEM_RPL", "TMEM_TDP", "TMEM_GST", "TMEM_PMP", "RPB",
+                                 "COLL_GATHER")} == \
+        dict(MCOLS=4, ACT_ROWS=8, MXU_E=4, SEQ_WC=1, TMEM_IMPL=3, TMEM_NSB=2, TMEM_RPL=1,
+             TMEM_TDP=1, TMEM_GST=1, TMEM_PMP=0, RPB=64, COLL_GATHER=0)
 
 
 def test_sources_are_the_targets_and_the_top():
@@ -42,6 +56,45 @@ def test_sources_are_the_targets_and_the_top():
     assert s[-1].endswith("rtl/asic/otpu_asic_top.sv")
     v = [str(f) for f in flow.sources("small-lm3la6")]
     assert any(f.endswith("build/asic/small-lm3la6/src/otpu_vpu.sv") for f in v)
+
+
+def test_sram_map_has_the_two_port_leaf():
+    """The leaves: a 1RW1R macro size gets its own module (otpu_sram_1rw1r, port 0 a read or a
+    write, port 1 a read); a design without one has none."""
+    import fakeram
+    ms = [fakeram.Macro("1r1w", 128, 32), fakeram.Macro("1rw1r", 4096, 32)]
+    v = flow.sram_map(ms)
+    assert "module otpu_sram_1rw1r" in v and "fakeram45_1rw1r_4096x32 u_m (.clk, .ce_in(ena)" in v
+    assert ".ce1_in(enb), .addr1_in(ab), .rd1_out(rdb)" in v
+    assert "module otpu_sram_1rw1r" not in flow.sram_map(ms[:1])
+
+
+def test_card_places_the_mxu_macros_by_column():
+    """The card's ORFS design places the MXU's macros with asic/nangate45/mxu_macros.tcl (the
+    macro placer the rest); the small point leaves them all to the macro placer."""
+    card = flow.config_mk("card", [])
+    m = re.search(r"^export MACRO_PLACEMENT_TCL = (\S+)$", card, re.M)
+    assert m and Path(m.group(1)).name == "mxu_macros.tcl" and Path(m.group(1)).exists()
+    small = flow.config_mk("small", [])
+    assert "MACRO_PLACEMENT_TCL" not in small
+    # the TMEM's macros by their readers (mxu_macros.tcl reads TMEM_GAP_UM), global routing's
+    # metal4 and up at 7%: the card's only
+    assert re.search(r"^export TMEM_GAP_UM = 100$", card, re.M)
+    assert "TMEM_GAP_UM" in Path(m.group(1)).read_text()
+    m = re.search(r"^export FASTROUTE_TCL = (\S+)$", card, re.M)
+    assert m and Path(m.group(1)).exists() and "metal4-" in Path(m.group(1)).read_text()
+    assert "TMEM_GAP_UM" not in small and "FASTROUTE_TCL" not in small
+
+
+def test_ports_are_latency_neutral_after_cts():
+    """Every point's ports take the core clock's insertion delay on vclk after CTS (a source
+    latency, which holds whatever a later stage propagates); the SDC itself keeps both ideal."""
+    for p in ("small", "card"):
+        m = re.search(r"^export POST_CTS_TCL = (\S+)$", flow.config_mk(p, []), re.M)
+        assert m and Path(m.group(1)).name == "io_latency.tcl"
+        tcl = Path(m.group(1)).read_text()
+        assert "set_clock_latency -source" in tcl and "[get_clocks vclk]" in tcl
+        assert "set_clock_latency" not in flow.sdc(p)
 
 
 def test_sdc_asks_the_targets_clock():
