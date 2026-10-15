@@ -5,36 +5,37 @@ master brief has been delivered.
 
 ## Repository and provenance
 
-- Upstream: `FeSens/openTPU`, default branch `main`, checked 2026-10-14.
+- Upstream: `FeSens/openTPU`, default branch `main`, checked 2026-10-15.
 - Verified upstream/base SHA: `5309a20d28948fa910897e85a96f82db6ee5c1fd`
   (commit date 2026-10-13 23:15:11 -03:00).
-- Latest read-only `FeSens/openTPU:main` fetched 2026-10-14 as
-  `702d6c98013f279af4b11e135c3d3e0529410021`, 56 commits beyond the recorded base. The first
-  integration point was `e15b4a44234661df7e14176b90669ead4d579fbe` (51 commits, 55 files,
-  +7467/-243). The five newer commits change 10 files (+240/-16), adding generation-program
-  cache warming, cache-key correction, read-latency documentation/test coverage, and cache-drop
-  fixes in qualification scripts. No upstream files or refs were written.
-- The first upstream delta added MiniCPM-V/VLM loading, ViT kernels, serving/offload and model
-  tools; updated MoE/Qwen3 behavior; and made the SW output register unconditional across
-  targets. `opentpu/compiler.py` and `opentpu/llm/qwen3.py` overlapped with local TMM edits, but
-  reviewed hunks were separate. The newest delta overlaps local branch history in host/serving and
-  qualification paths; its exact changes were inspected before merging. Both integrations merge
-  without conflicts. The full regression passed on the first integrated snapshot (055d4f8); the
-  newest upstream tests are gated by unavailable PyTorch and were not run.
+- Latest read-only `FeSens/openTPU:main` fetched 2026-10-15 as
+  `f237dab2f196855a59a083b1454786df8f01291f`. Since integration point `702d6c9`, the upstream
+  range contains 100 commits and changes 124 files (+12,184/-2,505). Major additions include the
+  r2/r2.1/r2.2 board/RTL and timing work, host-to-card DMA batching and contention tests, ASIC
+  Nangate45 flow, tiled prefill/compiler counters, MoE/MTP serving, and DeltaNet analysis tools.
+  Upstream commits and hardware/co-simulation results are source claims, not independently
+  reproduced board results here.
+- Merged that upstream snapshot into this feature branch. Conflicts in `rtl/mxu/otpu_mxu.sv` and
+  `tests/test_rtl.py` were resolved by retaining both local TMM initialization/tests and upstream
+  `mx_gq`/arbiter coverage. Latest compiler/ISA/ternary tests pass (75); targeted RTL/TMM cases
+  pass (6). The broad prefill/tiled selection was gated/skipped because PyTorch is unavailable.
+  The full suite has not been rerun after this 100-commit upstream update.
 - Starting local HEAD matched that SHA; starting worktree was clean. Recovery branch:
   `backup/pre-nextgen-5309a20`.
-- Configured origin: `https://github.com/MarsWise/openTPU.git`; authenticated account and write
-  access are unverified because GitHub CLI (`gh`) is unavailable.
+- Configured origin: `https://github.com/MarsWise/openTPU.git`; GitHub CLI is available. Verify
+  authentication and the published ref after pushing the checkpoint.
 - Worktree: `C:\myOpenTPU\openTPU.worktrees\pasted-text-processing`.
 - Integration branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`.
-- Latest-upstream integration commit: `380ddd6ea46b8505cb0720336714dfeb1f96e84e`
-  (`Merge latest FeSens upstream updates`).
+- Current reviewed upstream snapshot: `f237dab2f196855a59a083b1454786df8f01291f`; merge commit
+  `07eb6cd1` integrates it into the existing feature branch.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
-- Feature branch push verified at `380ddd6ea46b8505cb0720336714dfeb1f96e84e`; fork `main`
-  remains at `5309a20d28948fa910897e85a96f82db6ee5c1fd`, and upstream `main` is read-only at
-  `702d6c98013f279af4b11e135c3d3e0529410021`. No force push.
-- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; GitHub reports its
-  head at `380ddd6ea46b8505cb0720336714dfeb1f96e84e`.
+- Previously published feature head was `e5f55ed51cdce637910ae6f7ae9b14832a7bbf97`; latest
+  integration commit `07eb6cd1` is ready for publication. Fork `main` remains at
+  `5309a20d28948fa910897e85a96f82db6ee5c1fd`. Latest upstream is fetched read-only at
+  `f237dab2f196855a59a083b1454786df8f01291f`. No force push.
+- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; it must be updated
+  after publishing this merge. The currently published PR description predates TMM implementation
+  and is stale.
 - Both upstream integrations followed changed-file and overlap review. No local modifications were
   discarded; each merge completed without conflicts.
 - `git push --dry-run` and non-forced feature-branch pushes succeeded using the configured origin.
@@ -45,14 +46,14 @@ master brief has been delivered.
 
 | Subsystem | Status | Evidence / remaining work |
 |---|---|---|
-| Upstream provenance and baseline preservation | `INTEGRATED; LATEST TESTS PARTLY BLOCKED` | Fetched read-only upstream at `702d6c9`; reviewed all five newly arrived commits and 10 changed files. Both integrations merged without conflicts. Full suite passed on the `e15b4a4` integration (1,324 passed, 55 skips, 1 xfailed); the newest cache-warm/selfcal test modules skip because PyTorch is unavailable. |
+| Upstream provenance and baseline preservation | `INTEGRATED; TARGETED REGRESSIONS PASS` | Fetched upstream read-only at `f237dab`; merged 100 commits/124 files since `702d6c9`. Targeted compiler/ISA/ternary (75), RTL (6), and ASIC/target/memory/qualification/script tests (97 passed, 2 skipped) pass. PyTorch-gated prefill/tiled selection skipped. Full suite last passed at earlier `055d4f8` (1,324 passed, 55 skipped, 1 xfailed); it has not been rerun on this update. |
 | Ternary symbol storage and software reference | `REFERENCE VERIFIED` | Added low-pair-first 2-bit pack/unpack and an int64 packed +/−/skip reference matmul; `test_ternary.py` has 28 passing tests, and the combined ternary/ISA/compiler run passed 72. Not a checkpoint quantizer or hardware mode. |
 | Upstream architecture/provenance reports | `REFERENCE VERIFIED` | Added scoped source audit, merge disposition and feature matrix; inspected a 100-commit path-filtered history, remote branch listing and PRs #3–#7. No complete branch-by-branch audit. |
 | User report ingestion | `REFERENCE VERIFIED` | Added a standard-library parser for user-provided Vivado utilization/timing text and latency CSV; synthetic parser tests pass. It does not run or verify Vivado. |
 | Native ternary MXU / RTL / ISA / compiler / runtime | `RTL SIMULATION VERIFIED` | TMM opcode `0x23`, simulator execution, compiler lowering, MXU ternary stream/decode/PE arithmetic, profiles and footprints are implemented. Six D=128 Verilator cases pass bit-exact against the ISA simulator, including invalid-code rejection. The full suite also passes (1,324 passed, 55 skips, 1 xfailed). |
 | Matrix Engine 2.0 / adaptive precision | `PLANNED` | Existing matrix engine and precision paths were inspected; no RTL changes or DSE results. |
 | MiniCPM-V/VLM | `UPSTREAM INTEGRATED; LOCAL NUMERICAL VERIFY BLOCKED` | The upstream delta adds the MiniCPM-V loader, ViT kernels, image prefill and conversion tools. Its tests are skipped locally because PyTorch is unavailable; no local checkpoint or framework-reference run has been made. This is not a VLA implementation. |
-| MoE/offload/serving updates | `UPSTREAM INTEGRATED; LATEST TESTS BLOCKED` | Integrated upstream pool/offload, Qwen3.5, serving, generation cache-warming and cache-drop changes. Latest targeted pytest files are skipped by the PyTorch import gate; syntax checks pass. No local model/checkpoint execution or physical FPGA validation is claimed. |
+| MoE/offload/serving updates | `UPSTREAM INTEGRATED; MODEL TESTS NOT YET VERIFIED` | Integrated latest upstream MoE/MTP, tiled-prefill and serving changes. PyTorch-gated test selection skipped; no local model/checkpoint execution or physical FPGA validation is claimed. |
 | YOLO/CNN, VLA, vLLM backend | `PLANNED` | No implementation or model/checkpoint run for these features; no feature claims made. |
 | `--strict-fpga` operator fallback audit | `PLANNED` | No strict mode added or verified. |
 | Vivado / physical validation | `BLOCKED` | User explicitly owns all Vivado, bitstream, XDMA hardware, and board work. No such work was attempted. |
@@ -123,23 +124,29 @@ master brief has been delivered.
   lens and TMM test files: PASS. `git diff --check`: PASS.
 - `python3 -m pytest -q --noconftest tests/test_ternary.py tests/test_isa.py tests/test_compiler.py`:
   PASS, 72 tests.
-- `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl`: PASS, 6 bit-exact ISA-vs-RTL cases.
+- `python3 -m pytest -q tests/test_rtl.py -k "tmm_rtl or ldc_host_writes or one_copy_replays_make_progress or one_copy_tmem_of_128k_words"`: PASS, 6 selected cases, 177 deselected. Includes the six TMM cases and available selected RTL checks; the RTL test module is PyTorch-gated in this environment.
+- `python3 -m pytest -q --noconftest tests/test_ternary.py tests/test_isa.py tests/test_compiler.py`: PASS, 75 tests on the merged tree.
+- `python3 -m pytest -q tests/test_prefill.py tests/test_tiled.py tests/test_em_tile.py`: PyTorch-gated selection skipped (8 skips; no tests ran).
+- `python3 -m pytest -q tests/test_asic_flow.py tests/test_target.py tests/test_fakeram.py tests/test_tech_ram.py tests/test_qual_refs.py tests/test_qual_sh.py tests/test_session_scripts.py`: PASS, 97 passed, 2 skipped (missing LFM2 checkpoint).
   D=128, M=6 with MCOLS=4 (replay), KB=1/3/4/5/7, UNIT and RSC, ACC, and 25% randomized AXI
   stalls. The same simulations compare complete DRAM and TMEM state.
 - `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl_rejects_reserved_symbol`: PASS; RTL's
   assertion rejects code `11` in a consumed symbol.
 - `verilator --lint-only ... --top-module otpu_mxu -GD=128 -GMCOLS=4 -GROWS=8 -GLANES=8`:
   PASS, Verilator 5.046 (18 modules elaborated).
-- `python3 -m pytest -q`: PASS, 1,324 passed, 55 skipped, 1 xfailed in 9646.84s. Skips were
+- `python3 -m pytest -q`: PASS at earlier snapshot `055d4f8`, 1,324 passed, 55 skipped, 1 xfailed in 9646.84s. Skips were
   optional PyTorch/Textual dependencies, unavailable LFM2 assets, slow tests, Chrome/Node/bsdtar
   or Yosys simulation models, and the documented PAIR configuration constraint. This is the
   regression on the first integrated snapshot (`055d4f8`), before the five newer upstream commits.
 - Standalone `otpu_mxu` Verilator lint passes; full-top Verilator elaboration/build passed in the
   RTL simulation. Resource estimation and framework/model checkpoint comparisons remain pending.
-- The five newer upstream commits' `tests/test_progcache.py` and `tests/test_selfcal.py` selections
-  were collected under WSL but skipped at module import because PyTorch is unavailable; no test
-  from those gated modules ran. Python `py_compile` on the changed Python files, `bash -n` on both
-  changed scripts, and Git whitespace checks pass for this delta.
+- Python `py_compile` passed for all 75 changed Python files. Whole-tree `compileall` is blocked by
+  a syntax error in unchanged `tools/tourney/gen_components.py` (outside this merge).
+- Installing PyTorch was blocked because Ubuntu's `python3-venv`/`ensurepip` is absent; did not
+  bypass the system package policy. The latest broad regression and PyTorch-gated model tests
+  remain unverified.
+- No Vivado, synthesis/resource estimate, physical board run, or checkpoint-backed BitNet/Tern2,
+  YOLO, VLA or vLLM validation has been performed.
 - No model inference, performance measurement, synthesis estimate, Vivado run, or hardware test.
 - No upstream baseline suite has been run in this task slice.
 
