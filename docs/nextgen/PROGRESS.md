@@ -158,6 +158,14 @@ PASS (19 modules elaborated).
 - `python3 -m pytest -q tests/test_asic_flow.py tests/test_target.py tests/test_fakeram.py tests/test_tech_ram.py tests/test_qual_refs.py tests/test_qual_sh.py tests/test_session_scripts.py`: PASS, 97 passed, 2 skipped (missing LFM2 checkpoint).
   D=128, M=6 with MCOLS=4 (replay), KB=1/3/4/5/7, UNIT and RSC, ACC, and 25% randomized AXI
   stalls. The same simulations compare complete DRAM and TMEM state.
+- A fresh run of that same selected suite in `verilator/verilator:latest`, with the Windows
+  worktree bind-mounted into Linux, produced 77 passed, 2 skipped, and 20 failures. All 20
+  failures are in `tests/test_qual_sh.py`: the mounted `tools/qual/qual.sh` has CRLF line endings,
+  which bash rejects (`$'\r': invalid option` / parse errors); subsequent assertions then fail
+  because `checks.txt` was never created. Re-running the other selected tests without
+  `test_qual_sh.py` passed (77 passed, 2 skipped). This is a checkout/container line-ending
+  incompatibility, not evidence of a qualification-script behavioral regression; the earlier
+  97-pass result is retained as historical evidence. No source line endings were modified.
 - `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl_rejects_reserved_symbol`: PASS; RTL's
   assertion rejects code `11` in a consumed symbol.
 - `verilator --lint-only ... --top-module otpu_mxu -GD=128 -GMCOLS=4 -GROWS=8 -GLANES=8`:
