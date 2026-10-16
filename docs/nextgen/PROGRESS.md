@@ -37,12 +37,14 @@ delivered.
 - Fork: `https://github.com/MarsWise/openTPU` (GitHub API confirms it is a fork of FeSens/openTPU).
 - Previous feature checkpoints were `e5f55ed51cdce637910ae6f7ae9b14832a7bbf97` and
   `fb7602d83676f7b409a20eb884622b1f2f3c0437`; `668dcff5295043a2618e558fe72c44a183ebd56d` is
-  now published. Fork `main` remains at
+  the last published feature head verified in this session. Local verified commits
+  `1d496cfe`, `3f89d4e3`, and `1902cb17` are not yet pushed: GitHub rejected HTTPS publication
+  because no valid Git username/token is configured. Fork `main` remains at
   `5309a20d28948fa910897e85a96f82db6ee5c1fd`. Latest upstream is fetched read-only at
   `f237dab2f196855a59a083b1454786df8f01291f`. No force push.
-- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; GitHub reports its head
-  at `668dcff5295043a2618e558fe72c44a183ebd56d`. Its description predates TMM implementation and
-  is stale; it has not been edited.
+- Draft PR: #1 remains open, draft, unmerged, targeting the fork's `main`; GitHub still reports its
+  head at `668dcff5295043a2618e558fe72c44a183ebd56d`. Its description predates TMM implementation
+  and is stale; it has not been edited.
 - Both upstream integrations followed changed-file and overlap review. The first two merges were
   conflict-free; the `f237dab2` merge required semantic conflict resolution in the MXU and RTL
   tests. No local modifications were discarded.
@@ -65,7 +67,7 @@ delivered.
 | YOLO/CNN, VLA, vLLM backend | `PLANNED` | No implementation or model/checkpoint run for these features; no feature claims made. |
 | `--strict-fpga` operator fallback audit | `PLANNED` | No strict mode added or verified. |
 | Read-only JTAG discovery | `VERIFIED` | Vivado 2024.2.2 enumerated Digilent `210299A88B38`, device `xc7k480t_0`, part `xc7k480t`, IDCODE `001000110111010010010011`; no reset/program command was issued. |
-| Linux PCIe host discovery | `BLOCKED` | TCP/22 is reachable, but the SSH host key is not in known_hosts. Fingerprints are recorded in `HARDWARE_CONNECTIVITY.md`; no password was sent and no remote diagnostics ran. |
+| Linux PCIe host discovery | `BLOCKED` | User confirmed the ED25519 fingerprint and it was saved in a session-private known_hosts file. Public-key-only SSH was denied; no password was sent and no remote diagnostics ran. |
 | Vivado implementation / PCIe DMA / physical inference | `NOT RUN` | No synthesis, implementation, bitstream programming, PCIe reset, BAR write, DMA, or board inference was performed. |
 
 ## Changes and interfaces

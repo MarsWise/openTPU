@@ -27,14 +27,16 @@ Target supplied by the user: `nvx@192.168.0.156`.
 
 - TCP port 22 is reachable from the Windows host.
 - SSH host-key lookup had no matching existing `known_hosts` entry.
-- Read-only key scan returned:
+- Read-only key scan returned the following keys; the user confirmed the ED25519 fingerprint:
   - ED25519: `SHA256:gtUqtw9OJFkgCfuX0iNNJH3RAMzGmiC7KGOE4x9EDg0`
   - RSA: `SHA256:YMJ6xSOEbEfk7hERz9xqJHj5kjQUjbNXaFov2FBcUVQ`
   - ECDSA: `SHA256:Ms/pqdh+q+5TIVRxPXPXB2368zlHpQv00zCp/JX5x84`
-- No SSH authentication or remote commands were attempted because the host identity could not
-  be matched to a previously trusted key. Do not send the supplied password until the user
-  confirms the expected host-key fingerprint or installs the correct host key through a trusted
-  channel.
+- The confirmed ED25519 key was added to a session-private `known_hosts` file and verified with
+  `ssh-keygen`. A key-only, `BatchMode=yes` connection attempt returned
+  `Permission denied (publickey,password)`.
+- No password was sent and no remote command ran. The current command tool cannot provide a
+  secure interactive password prompt; use key-based SSH authentication or have the user run the
+  read-only diagnostics and share their output.
 - PCIe endpoint/BDF, vendor/device ID, driver/module, negotiated link, BARs, AER, XDMA nodes and
   Linux runtime readiness: **NOT INSPECTED**.
 
@@ -44,7 +46,8 @@ Target supplied by the user: `nvx@192.168.0.156`.
 |---|---|
 | Windows USB-JTAG target/device enumeration | **VERIFIED READ-ONLY** |
 | Linux host/network reachability (SSH TCP port) | **PORT REACHABLE** |
-| Trusted SSH server identity and login | **BLOCKED: fingerprint confirmation required** |
+| Trusted SSH server identity | **VERIFIED: user-confirmed ED25519 fingerprint** |
+| SSH login | **BLOCKED: configured public-key authentication denied; password prompt unavailable** |
 | PCIe endpoint enumeration and driver binding | **NOT RUN** |
 | XDMA device readiness / DMA functionality | **NOT RUN** |
 | openTPU runtime execution / AI inference | **NOT RUN** |
