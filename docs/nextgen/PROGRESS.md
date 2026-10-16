@@ -66,9 +66,9 @@ delivered.
 | MoE/offload/serving updates | `UPSTREAM INTEGRATED; MODEL TESTS NOT YET VERIFIED` | Integrated latest upstream MoE/MTP, tiled-prefill and serving changes. PyTorch-gated test selection skipped; no local model/checkpoint execution or physical FPGA validation is claimed. |
 | YOLO/CNN, VLA, vLLM backend | `PLANNED` | No implementation or model/checkpoint run for these features; no feature claims made. |
 | `--strict-fpga` operator fallback audit | `PLANNED` | No strict mode added or verified. |
-| Read-only JTAG discovery | `VERIFIED` | Vivado 2024.2.2 enumerated Digilent `210299A88B38`, device `xc7k480t_0`, part `xc7k480t`, IDCODE `001000110111010010010011`; no reset/program command was issued. |
-| Linux PCIe host discovery | `BLOCKED` | User confirmed the ED25519 fingerprint and it was saved in a session-private known_hosts file. Public-key-only SSH was denied; no password was sent and no remote diagnostics ran. |
-| Vivado implementation / PCIe DMA / physical inference | `NOT RUN` | No synthesis, implementation, bitstream programming, PCIe reset, BAR write, DMA, or board inference was performed. |
+| Read-only JTAG discovery | `VERIFIED; IDCODE FORMAT DISCREPANCY` | Fresh Vivado 2024.2.2 query enumerated Digilent `210299A88B38`, device `xc7k480t_0`, part `xc7k480t`; IDCODE returned `00100011011101010001000010010011`, differing from the earlier recorded string. No reset/program command was issued; details are in `HARDWARE_CONNECTIVITY.md`. |
+| Linux PCIe host discovery | `BLOCKED` | User-confirmed host fingerprint is pinned, but the configured ED25519 authentication identity is denied; no password was sent and no remote command ran. |
+| Vivado implementation / PCIe DMA / physical inference | `NOT RUN` | No verified `.bit`/`.mcs` image was found. No synthesis, implementation, programming, reset, PCIe operation, BAR write, DMA, or board inference was performed. |
 
 ## Changes and interfaces
 
@@ -166,6 +166,18 @@ PASS (19 modules elaborated).
   `test_qual_sh.py` passed (77 passed, 2 skipped). This is a checkout/container line-ending
   incompatibility, not evidence of a qualification-script behavioral regression; the earlier
   97-pass result is retained as historical evidence. No source line endings were modified.
+- Commit `4654b7c8` makes the test fixture normalize CRLF to LF in its scratch copy of
+  `tools/qual/qual.sh`; the production script is unchanged. Re-running the complete selected
+  system regression after this test-only fix passed: **97 passed, 2 skipped** (missing LFM2
+  checkpoint) in 148.72 seconds, including all 20 shell-harness cases.
+- Repeated read-only Vivado discovery on 2026-10-16 confirmed the same Digilent target and
+  `xc7k480t` part. Vivado returned a 32-bit IDCODE string different from the earlier recorded
+  value; the discrepancy is documented, not interpreted as bitstream identity. The temporary
+  `hw_server` was stopped after discovery. No programming image was found in the feature
+  worktree or standard user build directory, so no programming/reset was attempted.
+- Read-only Linux PCIe diagnostics remain blocked: Windows offered its configured ED25519 key
+  (fingerprint `SHA256:Nqth0L6ArgQ5zX0hW5hKgEKWoAz+84wGP5wzPcoKkMg`) and the host rejected it.
+  No remote command ran.
 - `python3 -m pytest -q tests/test_rtl.py -k test_tmm_rtl_rejects_reserved_symbol`: PASS; RTL's
   assertion rejects code `11` in a consumed symbol.
 - `verilator --lint-only ... --top-module otpu_mxu -GD=128 -GMCOLS=4 -GROWS=8 -GLANES=8`:
