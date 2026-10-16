@@ -3,6 +3,7 @@ import pytest
 
 from opentpu import isa as I
 from opentpu.compiler import Builder, QTensor
+from opentpu import fp32 as F
 from opentpu.fp32 import i2f, mul as fmul
 from opentpu.isasim import Config, Machine, SimError
 from opentpu.quant import pack_ternary, pack_ternary_mxu, ternary_matmul, unpack_ternary
@@ -144,6 +145,55 @@ def test_tmm_rejects_reserved_weight_symbols():
                              I.halt()]], [dram])
     with pytest.raises(SimError, match="reserved ternary code"):
         machine.run()
+
+
+def test_tmm_ascale_and_rmax_use_final_output_values():
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=2, TMEM_WORDS=256, DRAM_BYTES=4096,
+                 LANES=4)
+    M, N, D, out, ors, alpha_at, weight_at = 3, 4, cfg.D, 64, 6, 24, 128
+    packed = pack_ternary_mxu(np.zeros((N, D), dtype=np.int8), D)
+    dram = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
+    dram[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    ins = I.tmm(weight_at, alpha_at, out, N, 1, D, ors, M, 0, 4,
+                unit=True, acc=True, rmax=True, ascale=alpha_at)
+    machine = Machine(cfg, [[ins, I.halt()]], [dram])
+    sl = machine.slices[0]
+
+    old = np.array([[-2.0, -2.0, -3.0, -4.0],
+                    [-1.0, -3.0, 0.0, 2.0],
+                    [0.0, -0.0, 0.0, -0.0]], dtype=np.float32)
+    alpha = np.array([2.0, -1.0, -3.0], dtype=np.float32)
+    rows = out + np.arange(M)[:, None] * ors
+    sl.tput(rows + np.arange(N)[None, :], old)
+    sl.tput(alpha_at + np.arange(M), alpha)
+    sl.act[:M, :D] = 0
+    sl.ascale[:M, 0] = 1.0
+    sl.adoff[:M, 0] = 0
+
+    machine.run()
+
+    expected = F.add(F.mul(old, alpha[:, None]), np.zeros_like(old))
+    got = sl.tget(rows + np.arange(N)[None, :])
+    maxima = sl.tget(out + M * ors + np.arange(M))
+    assert np.array_equal(got.view(np.uint32), expected.view(np.uint32))
+    assert np.array_equal(maxima.view(np.uint32), F.chain_max(expected).view(np.uint32))
+    assert maxima[0] == -4.0
+    assert maxima[1] == 3.0
+    assert maxima[2] == 0.0
+
+
+@pytest.mark.parametrize("unit,acc", [(False, True), (True, False)])
+def test_tmm_ascale_requires_unit_and_acc(unit, acc):
+    with pytest.raises(ValueError, match="ASCALE needs UNIT and ACC"):
+        I.tmm(0, 0, 0, 1, 1, 8, 1, 1, 0, 4, unit=unit, acc=acc,
+              ascale=16, rsc=not unit)
+
+
+def test_tmm_isa_accepts_maximum_kb_and_rejects_overflow():
+    ins = I.tmm(0, 0, 0, 1, 255, 8, 1, 1, 0, 4, unit=True)
+    assert (ins.w[3] >> 16) & 0xFF == 255
+    with pytest.raises(ValueError, match="kb 256"):
+        I.tmm(0, 0, 0, 1, 256, 8, 1, 1, 0, 4, unit=True)
 
 
 def test_compiler_dot_lowers_ternary_weight_descriptor_to_tmm():

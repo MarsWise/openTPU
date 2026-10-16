@@ -99,6 +99,37 @@ def test_tmm_rtl(have_verilator, KB, unit, acc):
     assert np.array_equal(tmems[0], ref.slices[0].tmem)
 
 
+def test_tmm_rtl_ascale_rmax_final_values(have_verilator):
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=4, ACT_BLOCKS=2)
+    M, N, D, ors = 3, 4, cfg.D, 6
+    out_at, alpha_at = 2048, 2100
+    weight_at, init_at, alpha_dram = 0x20000, 0x40000, 0x50000
+    old = np.array([[-2.0, -2.0, -3.0, -4.0],
+                    [-1.0, -3.0, 0.0, 2.0],
+                    [0.0, -0.0, 0.0, -0.0]], dtype=np.float32)
+    alpha = np.array([2.0, -1.0, -3.0], dtype=np.float32)
+    packed = pack_ternary_mxu(np.zeros((N, D), dtype=np.int8), D)
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    values = np.zeros((M, D), dtype=np.float32)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    img[init_at:init_at + old.nbytes] = old.reshape(-1).view(np.uint8)
+    img[alpha_dram:alpha_dram + alpha.nbytes] = alpha.view(np.uint8)
+    prog = [
+        I.ld(DATA, 0, M * D),
+        I.ld(init_at, out_at, M * ors),
+        I.ld(alpha_dram, alpha_at, M),
+        I.qact(0, M, 0, 1, D),
+        I.tmm(weight_at, alpha_at, out_at, N, 1, D, ors, M, 0, 4,
+              unit=True, acc=True, rmax=True, ascale=alpha_at),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25, seed=0xA5CA1E)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
 def test_tmm_rtl_rejects_reserved_symbol(have_verilator):
     cfg = Config(S=1, D=128, MCOLS=4, ACT_BLOCKS=16)
     packed = pack_ternary_mxu(np.zeros((1, cfg.D), dtype=np.int8), cfg.D)
