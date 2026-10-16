@@ -26,6 +26,7 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic               sel,               // the select from the next cycle on
   input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
+  input  logic signed [23:0] tpcin,             // ternary feedback, kept off the DSP cascade
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
@@ -39,7 +40,7 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   wire signed [8:0] ta = $signed({br[7], br});
   wire signed [8:0] tprod = (tw == 8'sd1) ? ta :
                                (tw == -8'sd1) ? -ta : 9'sd0;
-  wire signed [23:0] tpn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(tm);
+  wire signed [23:0] tpn = (FIRST ? 24'sd0 : tpcin) + 24'(tm);
   always_ff @(posedge clk) if (en) begin
     br <= act;
     selr <= sel;
@@ -78,7 +79,7 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     .OVERFLOW(), .UNDERFLOW(), .PATTERNDETECT(), .PATTERNBDETECT(), .XOROUT());
   assign p = LAST ? (ternary_m ? tpn : pf[23:0]) :
                     (ternary_p ? tp : pf[23:0]);
-  assign pcout = LAST ? 48'd0 : (ternary_p ? 48'(tp) : pcd);
+  assign pcout = LAST ? 48'd0 : pcd;
 endmodule
 
 

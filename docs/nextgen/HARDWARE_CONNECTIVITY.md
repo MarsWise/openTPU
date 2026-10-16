@@ -1,7 +1,8 @@
 # Hardware connectivity discovery
 
-This document records read-only discovery only. No FPGA reset, programming, bitstream load,
-PCIe rescan, BAR write, DMA transfer, driver operation or benchmark was performed.
+This document records read-only hardware discovery and offline implementation artifacts. No FPGA
+reset, programming, bitstream load, PCIe rescan, BAR write, DMA transfer, driver operation or
+benchmark was performed.
 
 ## Windows JTAG host
 
@@ -39,11 +40,39 @@ Treat the current value as the exact fresh Vivado output; the discrepancy is unr
 not evidence of a loaded bitstream identity or a board change. `hw_server` was started for this
 query and stopped afterward.
 
-No `.bit` or `.mcs` programming image was found in the feature worktree or the standard
-`C:\Users\user\otpu-build` location. The `.dide\hdl\systemverilog.bin` file is not a verified
-FPGA programming image and was left untouched. The user authorized programming/reset only
-after verifying the exact image; no image was available to verify, so neither operation was
-attempted.
+### YPCB-00338 m4 implementation image
+
+A complete synthesis and implementation was run on 2026-10-17 with Vivado 2024.2.2 (64-bit,
+SW Build 6060944), targeting `xc7k480tffg1156-2`, m4 (D=128, MCOLS=4, ACT_ROWS=16, 64K-word
+TMEM, MXU_E=4, TMEM_IMPL=3, DDR3-1066, PCIe Gen2 x8, core clock 133.33 MHz). The board
+documentation recommends Vivado 2026.1; these results are specific to 2024.2.2.
+
+| Artifact/result | Verified value |
+|---|---|
+| Bitstream | `build/vivado-m4-20261017-r2/project/otpu.bit`, 13,769,562 bytes |
+| Bitstream SHA-256 | `7CE56D7EAE5F97648D3E3E5183C9CEC921F666D2D569C9F4268F243C580E572` |
+| BPI x16 MCS | `build/vivado-m4-20261017-r2/project/otpu.mcs`, 38,730,134 bytes |
+| MCS SHA-256 | `419193D809C1D4E0704ABFD825FABBE454F14F8C781C189B138DD65A880E012C` |
+| Routed timing | WNS +0.004 ns, WHS +0.012 ns; no failing setup/hold endpoints |
+| DRC | No error-severity violations; warnings/advisories remain; no `DSP_PCOUT_may_only_drive_PCIN` |
+| Methodology | 12 TIMING-54 Critical Warnings: scoped `Max Delay Datapath Only` constraints between clocks. The existing CDC Tcl documents why these crossings are bounded rather than cut; review the warning before loading the image. |
+| Utilization | 194,733 LUTs (65.22%), 170,912 FFs (28.62%), 295 BRAM tiles (30.89%), 734 DSP48E1 (38.23%) |
+
+The first implementation attempt failed placement with 100 `DSP_PCOUT_may_only_drive_PCIN` errors.
+The DSP PE was changed so raw `PCOUT` only feeds the DSP cascade, while ternary accumulation uses
+a separate registered-sum input. The rebuilt image routed, passed the final DRC report without
+errors, met its declared timing constraints by a very small margin, and was written successfully.
+The methodology report also has 12 TIMING-54 Critical Warnings for the intentional scoped
+CDC max-delay constraints in `constraints/otpu_top_native.tcl` and `constraints/otpu_mem_ch.tcl`.
+The constraints keep synchronizer/data crossings timed rather than masking them with broad false
+paths; Vivado warns that scoped inter-clock constraints may affect paths beyond their intended
+scope. The warnings have not been suppressed or waived and should be reviewed before programming.
+The outputs are build artifacts, not source-controlled files.
+
+Neither image has been programmed or flashed; no FPGA reset was issued. This verifies the build
+against the specified part in Vivado, not the loaded image identity or operation on the physical
+board. The earlier JTAG IDCODE discrepancy remains unresolved. The `.dide\hdl\systemverilog.bin`
+file is not a verified programming image and was left untouched.
 
 ## Linux PCIe host
 
@@ -71,6 +100,7 @@ Target supplied by the user: `nvx@192.168.0.156`.
 | Milestone | Status |
 |---|---|
 | Windows USB-JTAG target/device enumeration | **VERIFIED READ-ONLY** (repeated 2026-10-16; IDCODE discrepancy noted) |
+| Vivado m4 synthesis, routed implementation and image generation | **VERIFIED** (2026-10-17; Vivado 2024.2.2; hashes above; not programmed) |
 | Linux host/network reachability (SSH TCP port) | **PORT REACHABLE** |
 | Trusted SSH server identity | **VERIFIED: user-confirmed ED25519 fingerprint** |
 | SSH login | **BLOCKED: configured public-key authentication denied; password prompt unavailable** |

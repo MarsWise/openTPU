@@ -1,5 +1,5 @@
 // The MXU's arithmetic cells (rtl/tech/<family>/otpu_tech_dsp.sv) under random stimulus: every
-// cycle prints each otpu_pe variant's p and pcout (low 24 bits: all the chain uses) and the
+// cycle prints each otpu_pe variant's p and raw DSP pcout (low 24 bits: all the chain uses) and the
 // accumulators of otpu_mxce at one and two chains a group. Built once with rtl/tech/generic and
 // once with a vendor family (and its DSP model); tests/test_tech.py compares the two traces.
 module tb_tech_dsp;
@@ -8,6 +8,8 @@ module tb_tech_dsp;
   logic [7:0] act, wlo, whi;
   logic sel;
   logic [47:0] pcin;
+  logic signed [23:0] tpcin;
+  logic ternary;
   logic [7:0][23:0] a, d;
   logic [7:0][16:0] bm;
   logic first;
@@ -18,7 +20,7 @@ module tb_tech_dsp;
   logic signed [7:0][23:0] po;
   for (genvar v = 0; v < 8; v++) begin : g_pe
     otpu_pe #(.FIRST(v[0]), .LAST(v[1]), .WREG(v[2])) u (
-      .clk, .en, .act, .wlo, .whi, .sel, .pcin, .pcout(pco[v]), .p(po[v]));
+      .clk, .en, .act, .wlo, .whi, .sel, .ternary, .pcin, .tpcin, .pcout(pco[v]), .p(po[v]));
   end
   logic [47:0] acc1, acc2;
   otpu_mxce #(.CPG(1)) u_ce1 (.clk, .a, .d, .bm, .first, .acc(acc1));
@@ -37,6 +39,8 @@ module tb_tech_dsp;
       en = (cyc < 16) ? 1'b1 : ($random(seed) % 8 != 0);
       act = $random(seed); wlo = $random(seed); whi = $random(seed); sel = $random(seed);
       pcin = rnd48();
+      tpcin = rnd48();
+      ternary = $random(seed);
       // chain ends within the MXU's range (|sum| < 2^19), B < 2^17, a row every 1-8 blocks
       for (int g = 0; g < 8; g++) begin
         a[g] = 24'($signed($random(seed)) % (1 << 19));

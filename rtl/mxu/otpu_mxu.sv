@@ -776,6 +776,7 @@ module otpu_mxu
         .clk, .en(1'b1), .act(as_k[j][i]), .wlo(wc[JW][i][7:0]), .whi(wc[JW][i][15:8]),
         .sel(c_hi[j]), .ternary(ternary_k),
         .pcin((i % CLS == 0) ? 48'd0 : pc[j][(i % CLS == 0) ? i : i - 1]), .pcout(pc[j][i]),
+        .tpcin((i % CLS == 0) ? 24'sd0 : preg[j][(i % CLS == 0) ? i : i - 1]),
         .p(preg[j][i]));
 `ifndef SYNTHESIS
       // the DSP's select register is hi0[j] (both are c_hi[j], loaded every cycle)

@@ -2,7 +2,7 @@
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published
 `668dcff5295043a2618e558fe72c44a183ebd56d`; this status document records follow-up discovery and
-documentation through 2026-10-16. This is not a claim that the complete master brief has been
+documentation through 2026-10-17. This is not a claim that the complete master brief has been
 delivered.
 
 ## Repository and provenance
@@ -68,7 +68,8 @@ delivered.
 | `--strict-fpga` operator fallback audit | `PLANNED` | No strict mode added or verified. |
 | Read-only JTAG discovery | `VERIFIED; IDCODE FORMAT DISCREPANCY` | Fresh Vivado 2024.2.2 query enumerated Digilent `210299A88B38`, device `xc7k480t_0`, part `xc7k480t`; IDCODE returned `00100011011101010001000010010011`, differing from the earlier recorded string. No reset/program command was issued; details are in `HARDWARE_CONNECTIVITY.md`. |
 | Linux PCIe host discovery | `BLOCKED` | User-confirmed host fingerprint is pinned, but the configured ED25519 authentication identity is denied; no password was sent and no remote command ran. |
-| Vivado implementation / PCIe DMA / physical inference | `NOT RUN` | No verified `.bit`/`.mcs` image was found. No synthesis, implementation, programming, reset, PCIe operation, BAR write, DMA, or board inference was performed. |
+| YPCB-00338 m4 synthesis/implementation | `BITSTREAM BUILT; TIMING MET; METHODOLOGY WARNINGS; NOT PROGRAMMED` | Vivado 2024.2.2, part `xc7k480tffg1156-2`; routed `.bit`/`.mcs` were generated in `build/vivado-m4-20261017-r2/project`. WNS +0.004 ns, WHS +0.012 ns; 0 failing timing endpoints. DRC has warnings/advisories but no errors; the previous `DSP_PCOUT_may_only_drive_PCIN` failures are gone. Methodology reports 12 TIMING-54 Critical Warnings on scoped CDC max-delay constraints; review before loading. The board was not programmed or reset. |
+| Linux PCIe / DMA / physical inference | `BLOCKED / NOT RUN` | PCIe host login is still unavailable. No PCIe rescan, BAR access, DMA, runtime execution or board inference was performed. |
 
 ## Changes and interfaces
 
@@ -80,6 +81,10 @@ delivered.
   footprints/dependencies, four-block chunk streaming and ternary decode.
 - `rtl/tech/{generic,xilinx7,xilinxus}/otpu_tech_dsp.sv`: added signed zero/add/sub PE arithmetic;
   existing multiplier logic remains present, so no DSP savings are claimed.
+- The DSP PE cascade now exposes raw DSP `PCOUT` only to the next `PCIN`; ternary accumulation uses
+  a separate registered-sum input. The Vivado build previously failed placement with 100
+  `DSP_PCOUT_may_only_drive_PCIN` violations; this change removed them. Differential DSP simulation
+  and the YPCB implementation now pass the relevant checks.
 - `tests/test_ternary.py`: added compiler-lowering and numerical simulator/reference coverage.
 - `tests/test_rtl.py`: added D=128 ISA-vs-RTL tests for K blocks 1, 3, 4, 5 and 7; both UNIT and
   RSC, ACC, M>MCOLS replay, 25% randomized AXI stalls, and an RTL assertion test for reserved
@@ -193,22 +198,38 @@ PASS (19 modules elaborated).
 - Installing PyTorch was blocked because Ubuntu's `python3-venv`/`ensurepip` is absent; did not
   bypass the system package policy. The latest broad regression and PyTorch-gated model tests
   remain unverified.
-- Vivado was used only for read-only JTAG enumeration as recorded in
-  `HARDWARE_CONNECTIVITY.md`. No Vivado synthesis/implementation, resource estimate, bitstream
-  programming, or physical workload run was performed.
+- A full YPCB-00338 m4 synthesis/implementation completed with Vivado 2024.2.2; exact image hashes,
+  DRC, timing and resource reports are recorded in `HARDWARE_CONNECTIVITY.md`. This version is
+  older than the board documentation's recommended Vivado 2026.1.
+- The full implementation reports WNS +0.004 ns / WHS +0.012 ns and no failing endpoints. This is
+  a very small positive setup margin, not evidence of robustness across tool versions or hardware.
+- The methodology report has 12 TIMING-54 Critical Warnings about scoped inter-clock
+  `Max Delay Datapath Only` CDC constraints. The constraint Tcl documents these as deliberate
+  bounds for synchronizer/data crossings rather than broad false paths; review their scope before
+  programming. They were not suppressed or waived.
+- Routed utilization: 194,733 LUTs (65.22%), 170,912 FFs (28.62%), 295 BRAM tiles (30.89%) and
+  734 DSP48E1s (38.23%). The DRC report contains warnings/advisories but no error-severity
+  violations; `DSP_PCOUT_may_only_drive_PCIN` is absent.
+- Generated `.bit` and `.mcs` images have not been loaded onto the board. PCIe discovery, DMA and
+  physical inference remain unverified.
 - No checkpoint-backed BitNet/Tern2, YOLO, VLA or native vLLM validation has been performed.
 - No model inference, performance measurement or synthesis estimate has been performed.
 - No upstream baseline suite has been run in this task slice.
 
-## Provisional resources and timing
+## Measured synthesis/implementation resources and timing
 
-- No synthesis/resource estimate, area, timing, traffic, cycles, or speedup claim is produced.
-- No physical results are available. User-reported Vivado utilization/timing must be recorded
-  separately from simulations or estimates.
+- These are Vivado 2024.2.2 routed implementation reports for YPCB-00338 m4, not estimates or
+  measurements on the physical board. The board documentation recommends Vivado 2026.1.
+- LUTs: 194,733 / 298,600 (65.22%); registers: 170,912 / 597,200 (28.62%).
+- BRAM tiles: 295 / 955 (30.89%); DSP48E1: 734 / 1,920 (38.23%).
+- Setup WNS: +0.004 ns; hold WHS: +0.012 ns; failing setup/hold endpoints: 0/0. The setup
+  margin is minimal. No traffic, cycles, speedup or workload-performance result is implied.
+- The generated bitstream was not programmed. No physical-board timing or workload measurement
+  has been made.
 
 ## User-only hardware handoff
 
-No build-source or XDC change is included. Before any later user-owned implementation, preserve
-the existing bitstream and reports, build from the documented board target, record Vivado version
-and source revision, and share utilization, timing (WNS/TNS), bitstream, and board-test logs. Do
-not program the FPGA until the user has reviewed and approved the build and rollback plan.
+The verified build outputs and reports are under `build/vivado-m4-20261017-r2/project`. Preserve
+the pre-existing board image and make a rollback plan before any programming. The current bitstream
+has not been programmed; PCIe/DMA testing requires successful read-only Linux-host discovery and
+separate confirmation before any PCIe-changing operation.

@@ -147,6 +147,7 @@ module base_top
         .clk, .en(en_c), .act(as_k[j][i]), .wlo(wc[JW][i][7:0]), .whi(wc[JW][i][15:8]),
         .sel(hi0[j]), .ternary(1'b0),
         .pcin((i % CLS == 0) ? 48'd0 : pc[j][(i % CLS == 0) ? i : i - 1]), .pcout(pc[j][i]),
+        .tpcin((i % CLS == 0) ? 24'sd0 : preg[j][(i % CLS == 0) ? i : i - 1]),
         .p(preg[j][i]));
     end
   end

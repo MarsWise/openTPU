@@ -18,6 +18,7 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic               sel,               // the select from the next cycle on
   input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
+  input  logic signed [23:0] tpcin,             // ternary feedback, kept off the DSP cascade
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
@@ -25,8 +26,9 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   logic       selr, ternary_r, ternary_m;
   logic signed [15:0] m;
   logic signed [8:0] tm;
+  logic signed [23:0] pn_r;
   wire  signed [23:0] pn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(m);
-  wire  signed [23:0] tpn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(tm);
+  wire  signed [23:0] tpn = (FIRST ? 24'sd0 : tpcin) + 24'(tm);
   wire  [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
   wire  signed [7:0] tw = $signed(selr ? wh : wl);
   wire  signed [8:0] ta = $signed({br[7], br});
@@ -41,13 +43,14 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     ternary_r <= ternary;
     tm <= tprod;
     ternary_m <= ternary_r;
+    pn_r <= pn;
   end
   if (LAST) begin : g_comb
     assign p = ternary_m ? tpn : pn;
   end else begin : g_preg
     always_ff @(posedge clk) if (en) p <= ternary_m ? tpn : pn;
   end
-  assign pcout = LAST ? 48'd0 : 48'(p);              // (a chain's last cascades nowhere)
+  assign pcout = LAST ? 48'd0 : 48'(pn_r);           // cascade data is DSP-only, never ternary-selected
 endmodule
 
 
