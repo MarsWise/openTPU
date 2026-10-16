@@ -31,3 +31,24 @@ The recent-history inspection established active changes to board constraints/bu
 classification and local-vs-upstream semantic reimplementation review has not been completed.
 Future ports must compare against the pinned SHA and review these files before touching shared
 contracts.
+
+## Later integration status (2026-10-16)
+
+This section supersedes only the stale "remaining audit" state above; the initial-base history is
+preserved as historical context.
+
+- Fetched `FeSens/openTPU:main` read-only at `f237dab2f196855a59a083b1454786df8f01291f`,
+  authored 2026-10-14 19:58:00 -03:00. No newer upstream commit was present at the 2026-10-16
+  check.
+- Integrated 100 commits / 124 files (+12,184/-2,505) beyond `702d6c98013f279af4b11e135c3d3e0529410021`
+  in merge `07eb6cd19be5521fd405ab866fc7b0683eae731e`.
+- The MXU and RTL-test conflicts were resolved by retaining the local TMM path/tests together
+  with upstream `mx_gq` and arbiter changes. See `UPSTREAM_FEATURE_MATRIX.md` for the file-level
+  disposition and overlap list.
+- Follow-up commits `fb7602d83676f7b409a20eb884622b1f2f3c0437` and
+  `668dcff5295043a2618e558fe72c44a183ebd56d` recorded/published the integration state. The
+  existing feature worktree is still on the required branch; do not use this report's original
+  "starting tree clean" statement to imply the present worktree has no local updates.
+- Targeted integration-time checks passed, but the full suite was not rerun after the 100-commit
+  merge. Current-session TMM selected checks and remaining full-suite status are recorded in
+  `PROGRESS.md`.

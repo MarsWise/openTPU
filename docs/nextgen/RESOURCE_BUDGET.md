@@ -19,8 +19,8 @@ URAM, HBM, DDR4, tensor DSP instructions, or any free device resources.
 
 | Quantity | Value/status |
 |---|---|
-| Existing synthesis utilization report for this task's changes | None; no RTL was changed |
-| New design DSP/LUT/FF/BRAM use | Not applicable / NOT MEASURED |
+| Existing synthesis utilization report for the TMM RTL | None |
+| New design DSP/LUT/FF/BRAM use | TMM RTL was added; NOT MEASURED |
 | New timing, WNS/TNS, Fmax | NOT RUN |
 | Estimated fit or resource margin | NOT ESTIMATED |
 | Physical performance or DDR contention | NOT RUN |
@@ -38,8 +38,9 @@ new build.
 4. Build transcript, source manifest and bitstream checksum (if user creates a bitstream).
 5. Board-side model trace and latency/bandwidth counters, separately labeled as physical results.
 
-No Vivado command was run for this work. No source/XDC changes are included. Do not program the
-FPGA as part of this software task.
+Vivado 2024.2.2 was used only to enumerate the local JTAG target/device read-only; see
+`HARDWARE_CONNECTIVITY.md`. No synthesis/implementation command was run and no source/XDC change
+is included in the TMM increment. Do not program the FPGA as part of this software task.
 
 ## Report ingestion
 
