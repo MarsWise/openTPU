@@ -1,8 +1,8 @@
 # Nextgen implementation progress
 
-Snapshot: local feature branch HEAD `1d496cfe` (test-only commit based on published
-`668dcff5295043a2618e558fe72c44a183ebd56d`), with current uncommitted documentation updates,
-checked 2026-10-16. This is not a claim that the complete master brief has been
+Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published
+`668dcff5295043a2618e558fe72c44a183ebd56d`; this status document records follow-up discovery and
+documentation through 2026-10-16. This is not a claim that the complete master brief has been
 delivered.
 
 ## Repository and provenance
