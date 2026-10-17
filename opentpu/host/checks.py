@@ -133,6 +133,45 @@ def stream_check(board, cfg) -> tuple[bool, str]:
     return ok, f"STREAM (every mode) and DSTEP: {msg}"
 
 
+def tmm_check(board, cfg) -> tuple[bool, str]:
+    """otpu-selftest's tmm stage: packed ternary TMM programs (unit and per-row scale, with and
+    without accumulate, several K blocks) against the ISA simulator, from the same DRAM image."""
+    from opentpu.quant import pack_ternary_mxu
+    cases = [(1, False, False), (3, True, False), (4, False, True), (5, True, True)]
+    cases = [c for c in cases if c[0] <= cfg.ACT_BLOCKS]
+    done = []
+    for KB, unit, acc in cases:
+        rng = np.random.default_rng(0x7E2 + KB)
+        D, M, N = cfg.D, min(6, cfg.ACT_ROWS), 7
+        values = rng.standard_normal((M, KB * D), dtype=np.float32)
+        weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(weights, D)
+        weight_at, scale_at, init_at, out_at = 0x20000, 0x30000, 0x40000, 2048
+        stride, ostride = packed.shape[1], N + 2
+        img = np.zeros(PROG_AT, np.uint8)
+        img[0:values.nbytes] = values.view(np.uint8).reshape(-1)
+        img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+        if acc:
+            init = rng.standard_normal((M, ostride), dtype=np.float32)
+            img[init_at:init_at + init.nbytes] = init.view(np.uint8).reshape(-1)
+        if not unit:
+            sc = rng.uniform(0.05, 0.2, N).astype(np.float32)
+            img[scale_at:scale_at + sc.nbytes] = sc.view(np.uint8)
+        prog = [I.ld(0, 0, M * KB * D)]
+        if acc:
+            prog.append(I.ld(init_at, out_at, M * ostride))
+        prog += [I.qact(0, M, 0, KB, KB * D),
+                 I.tmm(weight_at, 0 if unit else scale_at, out_at, N, KB, stride, ostride, M, 0,
+                       4, unit=unit, acc=acc, rsc=not unit),
+                 I.st(0x50000, out_at, M * ostride),
+                 I.halt()]
+        ok, msg, _ = run_demo(board, cfg, prog, img)
+        if not ok:
+            return False, f"TMM KB={KB} unit={unit} acc={acc}: {msg}"
+        done.append(f"KB={KB}")
+    return True, f"{len(done)} ternary TMM programs match the ISA simulator ({', '.join(done)})"
+
+
 def vops_check(board, cfg, need: bool = False) -> tuple[bool, str]:
     """otpu-selftest's vops stage: vops_program() against the ISA simulator. Wrong results fail
     on a bitstream that has the functions (register map >= VOPS_SINCE), and on an older one

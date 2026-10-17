@@ -50,7 +50,7 @@ from opentpu.host.board import (CH_BYTES, ID_OTPU, R_ID, R_SCRATCH, R_STATUS, ST
                                 device_config)
 from opentpu.host.checks import (address_lines, bandwidth, channel_patterns, masked_program,
                                  model_check, partial_writes, pattern_test, run_demo,
-                                 stream_check, vops_check)
+                                 stream_check, tmm_check, vops_check)
 
 HINTS = {
     "link": "Is the card enumerated (lspci -d 10ee:), the XDMA driver loaded (lsmod | grep "
@@ -266,6 +266,9 @@ def main(argv=None) -> int:
     def stream():
         return stream_check(board, cfg)
 
+    def tmm():
+        return tmm_check(board, cfg)
+
     def model():
         return model_check(t, cfg, a.model, a.tokens, a.sim, a.wformat, a.head_format)
 
@@ -283,6 +286,7 @@ def main(argv=None) -> int:
     r.stage("kernel", kernel)
     r.stage("vops", vops)
     r.stage("stream", stream)
+    r.stage("tmm", tmm)
     if a.model:
         r.stage("model", model)
     r.stage("ecc", ecc)
