@@ -2,9 +2,9 @@
   "schema_version": 1,
   "firmware": {
     "name": "openTPU NextGen m4 ternary-MXU",
-    "source_commit": "291c7c0e802c2bf2276ef4d751309cbc32c6c088",
-    "build_id": "0x20261017",
-    "bitstream_sha256": "7CE56D7EAE5F97648D3E3E5183C9CEC921F6666D2D569C9F4268F243C580E572",
+    "source_commit": "e97273038ae1fdefc134845f9df6a4c700f5765a",
+    "build_id": "0xe9727303",
+    "bitstream_sha256": "1B248980DB51B9705BCB9499F9B6863CD8C025E6C1D741BAA3CCC67364677AAB",
     "part": "xc7k480tffg1156-2",
     "version": {
       "D": 128,
