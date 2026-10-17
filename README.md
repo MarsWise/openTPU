@@ -190,6 +190,23 @@ With a card, build the bitstream (`make bit` in [`boards/ypcb-00338`](boards/ypc
 it over JTAG, then run `sudo otpu-setup` and `otpu-chat --backend board`.
 [docs/board.md](docs/board.md) walks through the bring-up.
 
+### BitNET host / firmware contract
+
+The NextGen ternary-MXU host deployment is pinned by
+[`firmware_contract.json`](firmware_contract.json). It records the source revision, bitstream
+SHA-256, FPGA part, build ID, and the hardware dimensions expected by the matching host branch.
+Before any DMA or inference run, verify the checkout itself:
+
+```sh
+python3 tools/firmware_contract.py
+```
+
+On a card host, add `--card` to read the XDMA BAR0 identity/configuration registers. This is a
+read-only check; it does not calibrate memory, acquire the runtime lock, transfer DMA data, or
+program the FPGA. A mismatch means the loaded image must be replaced or the matching host source
+must be checked out; the SHA-256 is retained as the image-file identity and cannot be read back
+from the FPGA.
+
 | Command | What it does |
 |:--|:--|
 | `otpu-chat` | chat with Qwen3-0.6B, LFM2.5-230M (`--model lfm2`), Qwen3.5-0.8B (`--model qwen35`), LFM2-2.6B (`lfm2-2.6b`), SmolLM3-3B (`smollm3`), Phi-4-mini (`phi4-mini`) or Qwen3.5-2B / 4B (`qwen35-2b`, `qwen35-4b`), Gemma 4 E2B / E4B (`gemma4`, `gemma4-e4b`: the instruct checkpoints, gemma-4-E2B-it / E4B-it); MoE models bigger than the card with their experts streamed: LFM2.5-8B-A1B (`lfm2-8b`), Qwen3.5-35B-A3B (`qwen35-35b`), gemma-4-26B-A4B-it (`gemma4-26b`); a checkpoint without a chat template (a base model) only with `--raw` |
