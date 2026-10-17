@@ -19,6 +19,7 @@ def test_host_contract_matches_tmm_instruction():
 
     assert report["tmm_opcode"] == "0x23"
     assert len(report["source_commit"]) == 40
+    assert contract["firmware"]["version"] == {"D": 128, "MCOLS": 4, "LANES": 8}
 
 
 def test_rejects_unknown_contract_schema(tmp_path):

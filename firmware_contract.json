@@ -9,7 +9,7 @@
     "version": {
       "D": 128,
       "MCOLS": 4,
-      "LANES": 4
+      "LANES": 8
     }
   },
   "host": {
