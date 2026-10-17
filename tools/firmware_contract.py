@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -88,12 +89,27 @@ def card_report(contract: dict, dev: str) -> dict:
     }
 
 
+def bitstream_report(contract: dict, path: Path) -> dict:
+    try:
+        with path.open("rb") as image:
+            digest = hashlib.file_digest(image, "sha256").hexdigest().upper()
+    except OSError as exc:
+        raise ContractMismatch(f"cannot hash bitstream {path}: {exc}") from exc
+    expected = contract["firmware"]["bitstream_sha256"]
+    if digest != expected:
+        raise ContractMismatch(
+            f"bitstream SHA-256 is {digest}, expected {expected}: do not load this image"
+        )
+    return {"path": str(path), "sha256": digest}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="check the openTPU BitNET host/firmware compatibility contract"
     )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--dev", default="/dev/xdma0", help="XDMA device prefix")
+    parser.add_argument("--bitstream", type=Path, help="verify this .bit file before loading it")
     parser.add_argument("--card", action="store_true", help="also read the card's BAR0 registers")
     parser.add_argument("--json", action="store_true", help="write the successful report as JSON")
     args = parser.parse_args(argv)
@@ -101,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         contract = load_contract(args.manifest)
         report = {"host": host_report(contract)}
+        if args.bitstream:
+            report["bitstream"] = bitstream_report(contract, args.bitstream)
         if args.card:
             report["card"] = card_report(contract, args.dev)
     except ContractMismatch as exc:
@@ -121,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"D={card['version']['D']} MCOLS={card['version']['MCOLS']} "
                 f"LANES={card['version']['LANES']}"
             )
+        if "bitstream" in report:
+            print(f"firmware-contract: verified {report['bitstream']['path']}")
     return 0
 
 

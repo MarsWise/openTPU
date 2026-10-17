@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -28,3 +29,15 @@ def test_rejects_unknown_contract_schema(tmp_path):
 
     with pytest.raises(firmware_contract.ContractMismatch, match="unsupported"):
         firmware_contract.load_contract(manifest)
+
+
+def test_bitstream_report_requires_manifest_hash(tmp_path):
+    image = tmp_path / "otpu.bit"
+    image.write_bytes(b"verified bitstream")
+    contract = {"firmware": {"bitstream_sha256": hashlib.sha256(image.read_bytes()).hexdigest().upper()}}
+
+    assert firmware_contract.bitstream_report(contract, image)["path"] == str(image)
+
+    contract["firmware"]["bitstream_sha256"] = "0" * 64
+    with pytest.raises(firmware_contract.ContractMismatch, match="do not load"):
+        firmware_contract.bitstream_report(contract, image)

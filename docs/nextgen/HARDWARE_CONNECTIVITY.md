@@ -50,7 +50,7 @@ documentation recommends Vivado 2026.1; these results are specific to 2024.2.2.
 | Artifact/result | Verified value |
 |---|---|
 | Bitstream | `build/vivado-m4-20261017-r2/project/otpu.bit`, 13,769,562 bytes |
-| Bitstream SHA-256 | `7CE56D7EAE5F97648D3E3E5183C9CEC921F666D2D569C9F4268F243C580E572` |
+| Bitstream SHA-256 | `7CE56D7EAE5F97648D3E3E5183C9CEC921F6666D2D569C9F4268F243C580E572` |
 | BPI x16 MCS | `build/vivado-m4-20261017-r2/project/otpu.mcs`, 38,730,134 bytes |
 | MCS SHA-256 | `419193D809C1D4E0704ABFD825FABBE454F14F8C781C189B138DD65A880E012C` |
 | Routed timing | WNS +0.004 ns, WHS +0.012 ns; no failing setup/hold endpoints |

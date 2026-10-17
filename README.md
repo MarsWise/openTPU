@@ -201,11 +201,12 @@ Before any DMA or inference run, verify the checkout itself:
 python3 tools/firmware_contract.py
 ```
 
-On a card host, add `--card` to read the XDMA BAR0 identity/configuration registers. This is a
-read-only check; it does not calibrate memory, acquire the runtime lock, transfer DMA data, or
-program the FPGA. A mismatch means the loaded image must be replaced or the matching host source
-must be checked out; the SHA-256 is retained as the image-file identity and cannot be read back
-from the FPGA.
+Before loading a saved `.bit`, pass its path with `--bitstream`; the command refuses a
+non-matching SHA-256. On a card host, add `--card` to read the XDMA BAR0
+identity/configuration registers. These are read-only checks; they do not calibrate memory,
+acquire the runtime lock, transfer DMA data, or program the FPGA. A mismatch means the loaded
+image must be replaced or the matching host source must be checked out; the SHA-256 is retained
+as the image-file identity and cannot be read back from the FPGA.
 
 | Command | What it does |
 |:--|:--|
