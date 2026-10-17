@@ -140,6 +140,7 @@ def tmm_check(board, cfg) -> tuple[bool, str]:
     cases = [(1, False, False), (3, True, False), (4, False, True), (5, True, True)]
     cases = [c for c in cases if c[0] <= cfg.ACT_BLOCKS]
     done = []
+    errs = []
     for KB, unit, acc in cases:
         rng = np.random.default_rng(0x7E2 + KB)
         D, M, N = cfg.D, min(6, cfg.ACT_ROWS), 7
@@ -168,8 +169,19 @@ def tmm_check(board, cfg) -> tuple[bool, str]:
         ok, msg, _ = run_demo(board, cfg, prog, img)
         if not ok:
             return False, f"TMM KB={KB} unit={unit} acc={acc}: {msg}"
+        if not acc:
+            # independent float reference: bit-exactness to the simulator alone would not catch
+            # a shared misreading of the ternary semantics
+            got = board.read(0x50000, 4 * M * ostride).view("<f4").reshape(M, ostride)[:, :N]
+            want = values @ weights.T.astype(np.float32) * (1.0 if unit else sc)
+            err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
+            if not err < 0.03:
+                return False, f"TMM KB={KB} unit={unit}: result differs from float reference " \
+                              f"(rel {err:.4f})"
+            errs.append(err)
         done.append(f"KB={KB}")
-    return True, f"{len(done)} ternary TMM programs match the ISA simulator ({', '.join(done)})"
+    return True, (f"{len(done)} ternary TMM programs match the ISA simulator "
+                  f"({', '.join(done)}); max rel err vs float {max(errs):.4f}")
 
 
 def vops_check(board, cfg, need: bool = False) -> tuple[bool, str]:
