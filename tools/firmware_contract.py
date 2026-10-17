@@ -92,7 +92,10 @@ def card_report(contract: dict, dev: str) -> dict:
 def bitstream_report(contract: dict, path: Path) -> dict:
     try:
         with path.open("rb") as image:
-            digest = hashlib.file_digest(image, "sha256").hexdigest().upper()
+            hasher = hashlib.sha256()
+            for block in iter(lambda: image.read(1 << 20), b""):
+                hasher.update(block)
+            digest = hasher.hexdigest().upper()
     except OSError as exc:
         raise ContractMismatch(f"cannot hash bitstream {path}: {exc}") from exc
     expected = contract["firmware"]["bitstream_sha256"]
