@@ -113,7 +113,7 @@ class TmmBackend:
         x = np.ascontiguousarray(x, np.float32)
         d = self.cfg.D
         kb = k // d
-        mmax = min(getattr(self.cfg, "ACT_ROWS", 16), x.shape[0])
+        mmax = min(getattr(self.cfg, "ACT_ROWS", 0) or 16, x.shape[0])
         out = np.empty((x.shape[0], n), np.float32)
         for r0 in range(0, x.shape[0], mmax):
             xm = x[r0:r0 + mmax]
