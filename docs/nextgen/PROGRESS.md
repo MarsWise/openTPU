@@ -39,6 +39,18 @@ Findings of the day:
   `BitLinear` (divides by `weight_scale`) does not, so `bitnet_generate.py` now refuses other
   `quantization_config`s.
 
+### CNN / YOLO (2026-10-20)
+
+- `opentpu/kernels/conv.py` (`fd8888bb`): Conv2D as an implicit GEMM on the existing MXU (QACT
+  reads the patches through a strided TMEM view, one MM per kernel row with ACC), depthwise /
+  max pool / upsample on the VPU. No new instruction; works on the r3 bitstream's ISA.
+- `tests/test_conv.py`: ISA vs float (int8 rel L2 0.006-0.011, depthwise < 1e-5, pool / upsample
+  exact), reference = torch; RTL = ISA bit-exact for conv (2 shapes), depthwise, pool, upsample.
+- YOLOX-Nano selected (Apache-2.0, checkpoint hash in MODEL_COMPATIBILITY.md); whole model on
+  the ISA simulator at 416²: 413,529 instructions, all 522.6 M MACs on the device kernels, the
+  same three confident detections on `dog.jpg` as the float model (one weak one lost);
+  accumulated int8 error is the next accuracy item (calibration / mixed precision), mAP not run.
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published

@@ -3,10 +3,12 @@ BaseConv (Conv2d + folded BatchNorm + SiLU), MaxPool2d and Upsample run by kerne
 ISA simulator; the rest of the graph runs in PyTorch on the host and is counted.
 
 Usage: python tools/yolox_run.py YOLOX_REPO yolox_nano.pth [--image IMG] [--size 416]
-                                 [--backend isa|ref] [--stubs DIR]
+                                 [--backend isa|ref|board] [--check-isa] [--dev /dev/xdma0]
 YOLOX_REPO is a checkout of github.com/Megvii-BaseDetection/YOLOX (its `yolox` package and
 exps/default/yolox_nano.py). --backend ref runs the kernels' numpy references instead (fast; the
-same graph). Reports: device vs host operator counts and MACs, every BaseConv's output against
+same graph). --backend board runs every kernel on the card (the bitstream's Config,
+opentpu.host.board.device_config); --check-isa also runs each on the ISA simulator from the same
+DRAM image and requires the outputs to be bit-identical. Reports: device vs host operator counts and MACs, every BaseConv's output against
 the float model's (relative L2), the head outputs, and the detections (score > 0.3, NMS 0.45)
 of both.
 """
@@ -27,7 +29,9 @@ def main():
     ap.add_argument("weights")
     ap.add_argument("--image", default=None)
     ap.add_argument("--size", type=int, default=416)
-    ap.add_argument("--backend", default="isa", choices=("isa", "ref"))
+    ap.add_argument("--backend", default="isa", choices=("isa", "ref", "board"))
+    ap.add_argument("--check-isa", action="store_true")
+    ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--stubs", default=None, help="a dir with a torchvision stub, if absent")
     a = ap.parse_args()
     sys.path.insert(0, a.repo)
@@ -50,18 +54,40 @@ def main():
     img = load_image(a.image, a.size)
     x = torch.from_numpy(img)[None]
 
-    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536,
-                 DRAM_BYTES=1 << 26, LANES=8)
     stats = collections.Counter()
     t_dev = [0.0]
+    board = None
+    if a.backend == "board":
+        import dataclasses
+        from opentpu.host.board import Board, XdmaTransport, device_config
+        board = Board(XdmaTransport(a.dev), check=False)
+        info = board.info()
+        cfg = dataclasses.replace(device_config(info, DRAM_BYTES=1 << 26), S=1)
+        print(f"card: build {info.get('build_id', 0):#x}, D={cfg.D} MCOLS={cfg.MCOLS} "
+              f"ACT_ROWS={cfg.act_rows} ACT_BLOCKS={cfg.ACT_BLOCKS} TMEM={cfg.TMEM_WORDS}")
+    else:
+        cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536,
+                     DRAM_BYTES=1 << 26, LANES=8)
 
     def launch(kernel, **args):
         t0 = time.time()
         comp, imgs = compile_kernel(kernel, cfg, **args)
-        r = run(comp, imgs, "isa")
+        if board is None:
+            r = run(comp, imgs, "isa")
+            stats["instructions"] += r.stats["instructions"][0]
+            t_dev[0] += time.time() - t0
+            return r.outputs["y"]
+        y = run_on_board(board, comp, imgs[0])
+        stats["instructions"] += y[1]["instructions"][0]
+        stats["card cycles"] += y[1]["cycles"]
         t_dev[0] += time.time() - t0
-        stats["instructions"] += r.stats["instructions"][0]
-        return r.outputs["y"]
+        if a.check_isa:
+            r = run(comp, [imgs[0].copy()], "isa")
+            stats["launches checked bit-exact vs ISA"] += 1
+            if not np.array_equal(r.outputs["y"].view(np.uint32), y[0].view(np.uint32)):
+                bad = int((r.outputs["y"].view(np.uint32) != y[0].view(np.uint32)).sum())
+                raise SystemExit(f"{kernel.__name__}: {bad} output words differ from the ISA")
+        return y[0]
 
     def npy(t):
         return t.detach().cpu().numpy().astype(np.float64)
@@ -197,6 +223,40 @@ def main():
     print(f"float detections matched by a device detection of the same class: IoU min "
           f"{min(match, default=0):.3f}, mean {np.mean(match) if match else 0:.3f}")
     return 0
+
+
+PROG_GAP = 1 << 20
+
+
+def run_on_board(board, comp, img):
+    """Run one compiled kernel on the card: its DRAM image (up to its last placed byte) at 0,
+    the program above it, then the output read back. Returns (y, run stats)."""
+    from opentpu import quant as Q
+    from opentpu.runtime import Input, Output, Weight, collect
+    D = comp.cfg.D
+    top = 0                     # the end of every placed argument: all of it is written, so the
+    for a, addr in comp.layout.params.values():     # card never reads a beat it has not written
+        if isinstance(a, Output):
+            top = max(top, addr + 4 * int(np.prod(a.shape)))
+        elif isinstance(a, Weight):
+            n, k = a.array.shape
+            top = max(top, addr[0] + n * Q.row_bytes(k, a.fmt, D), addr[1] + n * Q.scale_bytes(k, a.fmt, D))
+        elif isinstance(a, Input):
+            top = max(top, addr + a.array.nbytes)
+        else:
+            raise NotImplementedError(f"placing {type(a).__name__} on the card")
+    top = -(-top // 4096) * 4096
+    used = img[:top].copy()
+    board.write(0, used)
+    at = top + PROG_GAP
+    board.load(at, comp.programs[0])
+    st = board.run(timeout=60.0)
+    dram = img.copy()
+    for a, addr in comp.layout.params.values():
+        if isinstance(a, Output):
+            n = 4 * int(np.prod(a.shape))
+            dram[addr:addr + n] = board.read(addr, n)
+    return collect(comp, [dram], [None], st).outputs["y"], st
 
 
 def rel(a, b):

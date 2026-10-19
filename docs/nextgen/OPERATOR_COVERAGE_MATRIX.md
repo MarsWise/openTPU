@@ -9,7 +9,7 @@ For CNN, VLM and VLA no checkpoint has been selected, so their rows are a scope/
 | Ternary | Packed weight encode/decode | `opentpu/quant.py` (`pack_ternary_mxu`), HF layout in `opentpu/bitnet.py` | `tests/test_ternary.py`, `tests/test_bitnet.py` | — |
 | Ternary | Signed ternary matmul | **FPGA**: TMM opcode `0x23` on the MXU (RTL, ISA simulator, compiler lowering) | RTL = ISA bit-exact (`tests/test_rtl.py -k tmm`); board selftest `tmm` stage | — |
 | Transformer | GEMM, attention, norm, RoPE, KV, token sampling | Existing supported project paths documented in ISA/model docs; not newly audited for strict offload | No new regression run in this branch | No new fallback guarantees |
-| CNN/YOLO | Conv/depthwise/pool/resize/concat/detection | No selected graph or new RTL path | NOT RUN | Unsupported for this branch |
+| CNN/YOLO | Conv2D (std, 1x1, strided), depthwise, max pool, upsample | **FPGA** kernels (`kernels/conv.py`): conv on the MXU, the rest on the VPU | ISA vs float/torch, RTL = ISA (`tests/test_conv.py`) | YOLOX-Nano graph below |
 | VLM | Visual encoder/projector/fusion/LLM | No compatible checkpoint selected | NOT RUN | Unsupported for this branch |
 | VLA | Observation/state fusion/action head | No authentic pretrained policy selected | NOT RUN | Unsupported for this branch |
 | MoE | Router/expert residency/cache scheduling | Existing baseline retained; no changes | No new tests run | Existing documented behavior only |
@@ -33,3 +33,19 @@ been implemented or verified.
 
 There is no strict mode yet: every host operator above is a documented host operation, not a
 silent fallback, but no `--strict-fpga` flag enforces or reports it per run.
+
+## YOLOX-Nano 416² (`tools/yolox_run.py`, ISA simulator, 2026-10-20)
+
+| Operator (count in the graph) | Where it runs | MACs |
+|---|---|---|
+| Conv2d 1x1 incl. the head's predictions (82), Conv2d 3x3 stem (1) | **FPGA** MXU, `conv2d` (int8 MX, BN folded, SiLU on the VPU) | 503.8 M |
+| Depthwise 3x3 (30) | **FPGA** VPU, `depthwise2d` (fp32) | 18.7 M |
+| MaxPool 5/9/13 (SPP, 3) | **FPGA** VPU, `maxpool2d` | — |
+| Upsample x2 nearest (2) | **FPGA** VPU, `upsample2x` | — |
+| Concat (21) | Host (torch.cat) — on the device it is stores into channel slices, not yet wired | — |
+| Residual add (8) | Host — a VPU ADD, not yet wired | — |
+| Focus (space-to-depth of the input) | Host (input layout) | — |
+| Head decode: sigmoid, exp, grid, stride (≈30 small ops), NMS | Host | — |
+
+100% of the model's MACs run on the device kernels; the host keeps memory-layout glue and the
+decode. There is no `--strict-fpga` yet: the run prints these host operations per run.
