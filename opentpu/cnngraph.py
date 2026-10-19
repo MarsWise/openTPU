@@ -146,7 +146,8 @@ def focus_weights(w3: np.ndarray) -> np.ndarray:
 
 
 class Plan:
-    def __init__(self):
+    def __init__(self, wsplit: bool = False):
+        self.wsplit = wsplit                    # convolutions' weights as int8 hi + lo (split_weight)
         self.ops: list[Op] = []
         self.bufs: list[Buf] = []
         self.inputs: dict[str, Buf] = {}
@@ -211,10 +212,11 @@ class Plan:
             if op.kind == "conv":
                 w2, bias = self.weights[op.name]
                 n, k = w2.shape
-                op.p["w_at"] = top
-                top = -(-(top + n * Q.row_bytes(k, "int8", D)) // ALIGN) * ALIGN
-                op.p["s_at"] = top
-                top = -(-(top + n * Q.scale_bytes(k, "int8", D)) // ALIGN) * ALIGN
+                for t in (("w_at", "s_at"), ("wl_at", "sl_at")) if self.wsplit else (("w_at", "s_at"),):
+                    op.p[t[0]] = top
+                    top = -(-(top + n * Q.row_bytes(k, "int8", D)) // ALIGN) * ALIGN
+                    op.p[t[1]] = top
+                    top = -(-(top + n * Q.scale_bytes(k, "int8", D)) // ALIGN) * ALIGN
             elif op.kind == "dw":
                 taps, bias = self.weights[op.name]
                 op.p["w_at"] = top
@@ -235,9 +237,11 @@ class Plan:
         for op in self.ops:
             if op.kind == "conv":
                 w2, bias = self.weights[op.name]
-                q, sc = Q.quantize_mxu(w2, "int8", D)
-                img[op.p["w_at"]:op.p["w_at"] + q.nbytes] = q.view(np.uint8).reshape(-1)
-                img[op.p["s_at"]:op.p["s_at"] + sc.nbytes] = sc.view(np.uint8).reshape(-1)
+                mats = C.split_weight(w2, D) if self.wsplit else (w2,)
+                for m, (wa, sa) in zip(mats, (("w_at", "s_at"), ("wl_at", "sl_at"))):
+                    q, sc = Q.quantize_mxu(m, "int8", D)
+                    img[op.p[wa]:op.p[wa] + q.nbytes] = q.view(np.uint8).reshape(-1)
+                    img[op.p[sa]:op.p[sa] + sc.nbytes] = sc.view(np.uint8).reshape(-1)
             elif op.kind == "dw":
                 taps, bias = self.weights[op.name]
                 img[op.p["w_at"]:op.p["w_at"] + taps.nbytes] = taps.view(np.uint8).reshape(-1)
@@ -285,7 +289,9 @@ class Plan:
                                               "int8", D),
                              b=Tensor(Affine(op.p["b_at"]), (ov.C,), (1,)), y=y, H=ib.H, W=ib.W,
                              Cin=ib.C, Cout=ov.C, KH=K, KW=K, stride=s, pad=pad, act=op.p["act"],
-                             res=res)
+                             res=res,
+                             wlo=(QTensor.weight(op.p["wl_at"], op.p["sl_at"], w2.shape[0],
+                                                 w2.shape[1], "int8", D) if self.wsplit else None))
                 kern = C.conv2d
             elif op.kind == "dw":
                 K, s, pad = op.p["K"], op.p["stride"], op.p["pad"]
@@ -322,11 +328,11 @@ class Plan:
         return img
 
 
-def lower(gm, input_shape) -> Plan:
+def lower(gm, input_shape, wsplit: bool = False) -> Plan:
     """Plan a traced CNN (see the module docstring). input_shape: (C, H, W) of the one input."""
     import torch
     import torch.nn as nn
-    pl = Plan()
+    pl = Plan(wsplit)
     env = {}
     users = {n: list(n.users) for n in gm.graph.nodes}
     mods = dict(gm.named_modules())
@@ -481,10 +487,11 @@ def host_nodes(gm, plan) -> list:
     return out
 
 
-def build(gm, input_shape, cfg, extend=None) -> Plan:
-    """lower, then extend(plan) (appended device ops, e.g. a detection decode), layout, compile."""
+def build(gm, input_shape, cfg, extend=None, wsplit: bool = False) -> Plan:
+    """lower, then extend(plan) (appended device ops, e.g. a detection decode), layout, compile.
+    wsplit: convolution weights as int8 hi + lo (two MMs a kernel row, ~16-bit weights)."""
     D_HINT[0] = cfg.D
-    pl = lower(gm, input_shape)
+    pl = lower(gm, input_shape, wsplit)
     if extend is not None:
         extend(pl)
     size = pl.layout(cfg.D)

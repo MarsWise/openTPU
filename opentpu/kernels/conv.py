@@ -66,6 +66,17 @@ def pad_input(x: np.ndarray, KH: int, KW: int, stride: int, pad: int, D: int) ->
     return out
 
 
+def split_weight(w2: np.ndarray, D: int) -> tuple[np.ndarray, np.ndarray]:
+    """A packed weight matrix as two int8 MXU matrices whose sum is it to ~16 bits: hi = the
+    matrix itself (quantized as runtime.Weight does), lo = what hi's int8 rows miss (w2 minus
+    hi's dequantized values), quantized on its own. conv2d(..., wlo=Weight(lo)) adds the second
+    MM on the same quantized patches (twice the weight stream, the same activation rounding)."""
+    from .. import quant as Q
+    q, sc = Q.quantize_mxu(w2, "int8", D)
+    hi = Q.dequantize_mxu(q, sc, "int8", w2.shape[1], D)
+    return w2, (w2.astype(np.float64) - hi).astype(np.float32)
+
+
 def pack_conv_weight(w: np.ndarray, D: int) -> np.ndarray:
     """OIHW (PyTorch) [Cout, Cin, KH, KW] -> [Cout, KH * Kp]: per kernel row kh its (kw, ci)
     values, zero padded to Kp (a multiple of D). Quantize it as runtime.Weight(.., fmt="int8")."""
@@ -78,11 +89,11 @@ def pack_conv_weight(w: np.ndarray, D: int) -> np.ndarray:
 
 @ol.jit
 def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, stride: int,
-           pad: int, act: str = "silu", res=None):
+           pad: int, act: str = "silu", res=None, wlo=None):
     """y [OH*OW, Cout] (or a [OH, OW, Cout] view) = act(conv2d(x, w) + b) (+ res, a view like
     y: a residual added after the activation, YOLOX's Bottleneck). x: pad_input rows
     [Hp, row_words] (or a view of at least that many words a row); w: Weight(pack_conv_weight)
-    [Cout, KH*Kp]; b: [Cout]."""
+    [Cout, KH*Kp]; b: [Cout]. wlo: split_weight's low part (a second MM per kernel row)."""
     D = ol.block_size()
     OH, OW, Hp, Wp, Kp, rw = geometry(H, W, Cin, KH, KW, stride, pad, D)
     R = ol.current().cfg.act_rows
@@ -99,7 +110,10 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
             yt.set(bias[None, :])
             for kh in range(KH):
                 patches = rows.windows(kh, ow0 * stride * Cin, n, stride * Cin, Kp)
-                ol.dot(ol.quantize(patches), w[:, kh * Kp:(kh + 1) * Kp], acc=yt)
+                q = ol.quantize(patches)
+                ol.dot(q, w[:, kh * Kp:(kh + 1) * Kp], acc=yt)
+                if wlo is not None:
+                    ol.dot(q, wlo[:, kh * Kp:(kh + 1) * Kp], acc=yt)
             if f is not None:
                 yt.set(f(yt))
             if res is not None:

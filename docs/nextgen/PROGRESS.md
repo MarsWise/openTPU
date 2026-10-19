@@ -55,6 +55,18 @@ Findings of the day:
   an exact 6x6 stride-2 conv); ISA: 470,154 instructions, the same three detections (IoU 0.92-
   0.99). Host: input, head readout, decode, NMS. Board run prepared (`--backend board
   --check-isa`), not yet executed.
+- `--strict-fpga` (`dcff5651`): the box decode on the device too (`kernels/detect.py`); the
+  host keeps only the input write, the readout and NMS. 126 ops.
+- Accuracy (`wsplit`): the accumulated error came from the int8 *weights* (box error 5.4% from
+  weights vs 2.3% from activations, measured by quantizing one side at a time). `--wsplit`
+  stores each convolution's weights as int8 hi + int8 lo rows (`conv.split_weight`), two MMs
+  on the same quantized patches with ACC - no new hardware, 2x the conv MMs. ISA, 416²
+  `dog.jpg`, strict: head rel L2 0.225 -> 0.092, per-op median 0.20 -> 0.075, all four float
+  detections recovered (IoU 0.986 / 0.993 / 0.977 / 0.991), 501,634 instructions.
+- COCO val2017 mAP (`tools/yolox_coco.py`, float / emul / board, `--wsplit`) is prepared for
+  the host run; not yet run on the real annotations (container has no COCO download).
+- Known upstream failure, not from NextGen: `test_minicpmv.py::test_warm_entries_are_found_by_
+  the_first_start` fails identically on pristine `9bd4d83c` (disk hits 26 vs expected 13).
 
 ## Earlier record (through 2026-10-17)
 

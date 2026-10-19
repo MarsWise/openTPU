@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--stubs", default=None)
     ap.add_argument("--per-op", action="store_true")
     ap.add_argument("--strict-fpga", action="store_true")
+    ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
     sys.path.insert(0, a.repo)
     if a.stubs:
@@ -101,7 +102,8 @@ def main():
             r0 += h * w
         dec["val"] = G.Val(out)
 
-    plan = G.build(gm, (3, a.size, a.size), cfg, extend if a.strict_fpga else None)
+    plan = G.build(gm, (3, a.size, a.size), cfg, extend if a.strict_fpga else None,
+                   wsplit=a.wsplit)
     if a.strict_fpga:
         bad = [t for t in G.host_nodes(gm, plan) if t[2] not in G.HOST_LAYOUT]
         if bad:

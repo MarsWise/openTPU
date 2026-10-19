@@ -66,7 +66,7 @@ def letterbox(path, size):
     return np.ascontiguousarray(out.transpose(2, 0, 1)), r
 
 
-def emulate(model, D=128):
+def emulate(model, D=128, wsplit=False):
     """Patch the model's groups=1 convolutions with the card's int8 numerics (see above)."""
     import torch
     from opentpu import fp32 as F, quant as Q
@@ -79,6 +79,9 @@ def emulate(model, D=128):
             p = C.pack_conv_weight(w, D)
             q, sc = Q.quantize_mxu(p, "int8", D)
             deq = Q.dequantize_mxu(q, sc, "int8", p.shape[1], D)
+            if wsplit:                  # + the low part's int8 rows (conv.split_weight)
+                ql, sl = Q.quantize_mxu((p - deq).astype(np.float32), "int8", D)
+                deq = deq + Q.dequantize_mxu(ql, sl, "int8", p.shape[1], D)
             Kp = p.shape[1] // K
             wd = deq.reshape(Co, K, Kp)[:, :, :K * Ci].reshape(Co, K, K, Ci).transpose(0, 3, 1, 2)
             mod.weight.data = torch.from_numpy(np.ascontiguousarray(wd, np.float32))
@@ -108,6 +111,7 @@ def main():
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--stubs", default=None)
     ap.add_argument("--out", default=None, help="write the detections JSON here")
+    ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
     sys.path.insert(0, a.repo)
     if a.stubs:
@@ -147,7 +151,7 @@ def main():
     ev.evaluate()
     ev.accumulate()
     ev.summarize()
-    print(f"RESULT backend={a.backend} images={len(ids)} mAP50-95={ev.stats[0]:.4f} "
+    print(f"RESULT backend={a.backend}{' wsplit' if a.wsplit else ''} images={len(ids)} mAP50-95={ev.stats[0]:.4f} "
           f"mAP50={ev.stats[1]:.4f}")
     return 0
 
@@ -155,7 +159,7 @@ def main():
 def make_runner(a, model, exp):
     import torch
     if a.backend in ("float", "emul"):
-        m = model if a.backend == "float" else emulate(model)
+        m = model if a.backend == "float" else emulate(model, wsplit=a.wsplit)
         m.head.decode_in_inference = True
 
         def run(x):
@@ -201,7 +205,7 @@ def make_runner(a, model, exp):
             r0 += h * w
         dec["val"] = G.Val(out)
 
-    plan = G.build(gm, (3, a.size, a.size), cfg, extend)
+    plan = G.build(gm, (3, a.size, a.size), cfg, extend, wsplit=a.wsplit)
     img = plan.image(plan.size, cfg.D)
     board.write(0, img)
     at = -(-(len(img) + (1 << 20)) // 4096) * 4096

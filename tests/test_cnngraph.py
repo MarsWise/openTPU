@@ -116,6 +116,26 @@ def test_graph_on_isa_matches_torch(D):
     assert np.abs(got[..., 4:] - want[..., 4:]).max() < 0.02
 
 
+def test_graph_wsplit_is_more_accurate():
+    """build(wsplit=True): each convolution's weights as int8 hi + lo rows (conv.split_weight),
+    two MMs on the same quantized patches; the graph's error falls (YOLOX-Nano's head on the dog
+    image: rel L2 0.225 -> 0.092)."""
+    m = net()
+    gm = torch.fx.GraphModule(m, Leaf().trace(m))
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536, LANES=8)
+    H = W = 32
+    x = np.random.default_rng(2).standard_normal((1, 3, H, W)).astype(np.float32)
+    want = m(torch.from_numpy(x))[0].permute(1, 2, 0).detach().numpy()
+    errs = []
+    for ws in (False, True):
+        plan = G.build(gm, (3, H, W), cfg, wsplit=ws)
+        img = plan.image(plan.size, cfg.D)
+        plan.put_input(img, "x", x[0].transpose(1, 2, 0))
+        got = plan.read(plan.run_isa(cfg, img), plan.env[plan.out_node])
+        errs.append(np.linalg.norm(got - want) / np.linalg.norm(want))
+    assert errs[1] < errs[0], errs
+
+
 def _decode_case(n=37, cols=12, stride=8):
     from opentpu.kernels import detect as K
     from opentpu.runtime import Input, Output

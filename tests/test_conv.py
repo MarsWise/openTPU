@@ -170,3 +170,16 @@ def test_pool_upsample_rtl(have_verilator):
         comp, imgs = compile_kernel(kernel, cfg, **args)
         assert_same_state(run(comp, [i.copy() for i in imgs], "isa"),
                           run(comp, [i.copy() for i in imgs], "rtl"))
+
+
+def test_conv2d_split_weights_are_more_accurate():
+    """split_weight: int8 hi + lo weights (two MMs on the same quantized patches) bring the error
+    down to the activations' rounding alone."""
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16)
+    x, w, b, args = case(np.random.default_rng(21), 7, 9, 16, 12, 3, 1, 1, cfg.D, "none")
+    want = C.reference(x, w, b, 1, 1, "none")
+    one = run(*compile_kernel(C.conv2d, cfg, **args), "isa").outputs["y"]
+    hi, lo = C.split_weight(C.pack_conv_weight(w, cfg.D), cfg.D)
+    args2 = dict(args, w=Weight(hi, fmt="int8"), wlo=Weight(lo, fmt="int8"))
+    two = run(*compile_kernel(C.conv2d, cfg, **args2), "isa").outputs["y"]
+    assert rel(two, want) < 0.8 * rel(one, want), (rel(two, want), rel(one, want))
