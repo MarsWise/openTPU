@@ -29,9 +29,18 @@ from __future__ import annotations
 import numpy as np
 
 from .. import language as ol
-from .lib import silu
+from .lib import sigmoid, silu
 
-ACTS = {"none": None, "silu": silu, "relu": lambda x: ol.maximum(x, 0.0)}
+ACTS = {"none": None, "silu": silu, "relu": lambda x: ol.maximum(x, 0.0), "sigmoid": sigmoid}
+
+
+def _out(y, oh, ow0: int, n: int, OW: int):
+    """Output pixels (oh, ow0 .. ow0 + n) of y: a [OH*OW, C] tensor (one pixel a row), or a
+    [OH, OW, C] view whose pixels may be further apart than C words (a channel slice of a
+    concatenation's buffer, a padded consumer's interior: kernels/../cnngraph.py)."""
+    if len(y.shape) == 3:
+        return y[oh, ow0:ow0 + n, :]
+    return y[oh * OW + ow0:oh * OW + ow0 + n, :]
 
 
 def geometry(H: int, W: int, Cin: int, KH: int, KW: int, stride: int, pad: int, D: int):
@@ -69,9 +78,11 @@ def pack_conv_weight(w: np.ndarray, D: int) -> np.ndarray:
 
 @ol.jit
 def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, stride: int,
-           pad: int, act: str = "silu"):
-    """y [OH*OW, Cout] = act(conv2d(x, w) + b). x: pad_input rows [Hp, row_words];
-    w: Weight(pack_conv_weight(...)) [Cout, KH*Kp]; b: [Cout]."""
+           pad: int, act: str = "silu", res=None):
+    """y [OH*OW, Cout] (or a [OH, OW, Cout] view) = act(conv2d(x, w) + b) (+ res, a view like
+    y: a residual added after the activation, YOLOX's Bottleneck). x: pad_input rows
+    [Hp, row_words] (or a view of at least that many words a row); w: Weight(pack_conv_weight)
+    [Cout, KH*Kp]; b: [Cout]."""
     D = ol.block_size()
     OH, OW, Hp, Wp, Kp, rw = geometry(H, W, Cin, KH, KW, stride, pad, D)
     R = ol.current().cfg.act_rows
@@ -91,8 +102,11 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
                 ol.dot(ol.quantize(patches), w[:, kh * Kp:(kh + 1) * Kp], acc=yt)
             if f is not None:
                 yt.set(f(yt))
-            ol.store(y[oh * OW + ow0:oh * OW + ow0 + n, :], yt)
+            if res is not None:
+                yt.set(yt + ol.load(_out(res, oh, ow0, n, OW), out=rbuf[0:n, :]))
+            ol.store(_out(y, oh, ow0, n, OW), yt)
 
+    rbuf = ol.empty([R, Cout]) if res is not None else None
     if OH == 1:
         row(0)
     else:
@@ -124,8 +138,8 @@ def pack_dw_weight(w: np.ndarray) -> np.ndarray:
 
 @ol.jit
 def depthwise2d(x, w, b, y, H: int, W: int, C: int, K: int, stride: int, pad: int,
-                act: str = "silu"):
-    """y [OH*OW, C] = act(depthwise_conv(x, w) + b) on the VPU (fp32). x: pad_input_dw rows
+                act: str = "silu", res=None):
+    """y [OH*OW, C] (or a [OH, OW, C] view) = act(depthwise_conv(x, w) + b) (+ res) on the VPU (fp32). x: pad_input_dw rows
     [Hp, Wp*C]; w: pack_dw_weight [K*K, C]; b: [C]. Output pixels in groups of up to G rows."""
     OH, OW, Hp, Wp = dw_geometry(H, W, C, K, stride, pad)
     f = ACTS[act]
@@ -149,7 +163,9 @@ def depthwise2d(x, w, b, y, H: int, W: int, C: int, K: int, stride: int, pad: in
                     a.set(a + t)
             if f is not None:
                 a.set(f(a))
-            ol.store(y[oh * OW + ow0:oh * OW + ow0 + n, :], a)
+            if res is not None:
+                a.set(a + ol.load(_out(res, oh, ow0, n, OW), out=tmp[0:n, :]))
+            ol.store(_out(y, oh, ow0, n, OW), a)
 
     if OH == 1:
         row(0)
@@ -190,7 +206,7 @@ def maxpool2d(x, y, H: int, W: int, C: int, K: int, stride: int, pad: int):
                     if kh or kw:
                         a.set(ol.maximum(a, rows.windows(kh, (ow0 * stride + kw) * C, n,
                                                          stride * C, C)))
-            ol.store(y[oh * OW + ow0:oh * OW + ow0 + n, :], a)
+            ol.store(_out(y, oh, ow0, n, OW), a)
 
     if OH == 1:
         row(0)
@@ -213,8 +229,25 @@ def upsample2x(x, y, H: int, W: int, C: int):
         out.windows(0, 0, W, 2 * C, C).set(v)
         out.windows(0, C, W, 2 * C, C).set(v)
         o = out.reshape(2 * W, C)
-        ol.store(y[(2 * h) * 2 * W:(2 * h + 1) * 2 * W, :], o)
-        ol.store(y[(2 * h + 1) * 2 * W:(2 * h + 2) * 2 * W, :], o)
+        ol.store(_out(y, 2 * h, 0, 2 * W, 2 * W), o)
+        ol.store(_out(y, 2 * h + 1, 0, 2 * W, 2 * W), o)
+
+    if H == 1:
+        row(0)
+    else:
+        for h in ol.range(H):
+            row(h)
+
+
+@ol.jit
+def copy_into(x, y, H: int, W: int, C: int):
+    """y[h] = x[h] for h < H: a [H, W, C] value into a view of the same shape whose pixels may
+    be further apart (a concatenation's channel slice): one LD and one ST a pixel row."""
+    t = ol.empty([W, C])
+
+    def row(h):
+        ol.load(x[h, :, :], out=t)
+        ol.store(y[h, :, :], t)
 
     if H == 1:
         row(0)
