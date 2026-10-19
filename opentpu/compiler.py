@@ -227,6 +227,25 @@ class Affine:
         return f"({self.const}{' + ' + s if s else ''})"
 
 
+def _store_offsets(off: "Affine", limit: int = 1 << 16) -> list:
+    """Every element offset a store to a kernel output covers: one for a static address, one
+    per iteration for an address in hardware loops of compile-time counts (runtime.collect
+    checks the outputs were written whole). A loop with a run-time count, or more than `limit`
+    iterations in all, is not recorded: those stores need a static address."""
+    if off.is_static:
+        return [off.static()]
+    loops = list(off.terms)
+    if any(l.rcount or l.count <= 0 for l in loops) or \
+            int(np.prod([l.count for l in loops])) > limit:
+        raise CompileError("stores to kernel outputs must use static addresses or hardware "
+                           "loops of compile-time counts")
+    offs = [off.const]
+    for l in loops:
+        c = off.terms[l]
+        offs = [o + i * c for o in offs for i in range(l.count)]
+    return offs
+
+
 def _static(x) -> int:
     return Affine.of(x).static()
 
@@ -601,6 +620,16 @@ class Tile:
         if len(self.shape) != 2 or r0 + (n - 1) * step >= self.rows:
             raise CompileError(f"row_stride_view({r0}, {n}, {step}) outside {self}")
         return Tile(self.b, self.base + r0 * self.rs, (n, self.cols), self.rs * step, self.buf)
+
+    def windows(self, row: int, c0: int, n: int, step: int, cols: int) -> "Tile":
+        """n overlapping windows of `cols` words in row `row` of a 2-D tile, the j-th starting at
+        column c0 + j * step, as a read-only [n, cols] view (row stride `step`, which may be
+        less than `cols`): a convolution's input patches for QACT, which reads rows at any
+        stride (kernels/conv.py). The windows must stay inside the row."""
+        if len(self.shape) != 2 or not 0 <= row < self.rows or n < 1 or step < 1 or \
+                c0 < 0 or c0 + (n - 1) * step + cols > self.cols:
+            raise CompileError(f"windows({row}, {c0}, {n}, {step}, {cols}) outside {self}")
+        return Tile(self.b, self.base + row * self.rs + c0, (n, cols), step, self.buf)
 
     def reshape(self, rows: int, cols: int) -> "Tile":
         """The same words as a [rows, cols] tile (contiguous tiles only; one row always is)."""
@@ -1547,10 +1576,8 @@ class Builder:
             n = rows * x.cols if merged else x.cols
             self.emit(I.st(imm, x.base + r * x.rs, n, ra=ra, comment="store"))
             if t.host is not None:
-                if not Affine.of(t.offset).is_static or not Affine.of(base).is_static:
-                    raise CompileError("stores to kernel outputs must use static addresses")
-                off = Affine.of(t.offset).static() + r * rstride
-                self.stores.append((t.host, off, n))
+                for off in _store_offsets(Affine.of(t.offset) + r * rstride):
+                    self.stores.append((t.host, off, n))
 
     def quantize(self, x: Tile, temp: bool = False, free: bool = False,
                  rscale: Tile | None = None, cscale: Tile | None = None) -> Stationary:
