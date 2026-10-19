@@ -49,3 +49,13 @@ silent fallback, but no `--strict-fpga` flag enforces or reports it per run.
 
 100% of the model's MACs run on the device kernels; the host keeps memory-layout glue and the
 decode. There is no `--strict-fpga` yet: the run prints these host operations per run.
+
+### Whole graph on the device (`opentpu/cnngraph.py`, `tools/yolox_graph.py`)
+
+The same model planned as 123 device ops over NHWC buffers resident in DRAM: concatenations are
+producers writing into channel slices (5 copies where a tensor is also read elsewhere), the 8
+residual adds are the convolutions' epilogues, the head's sigmoids their activations, and Focus
++ the stem convolution one 6x6 / stride-2 convolution (exact). Left on the host: writing the
+input image, reading the three head levels, the box decode (grid, exp, stride) and NMS.
+ISA simulator, 416² dog.jpg: 470,154 instructions; detections IoU 0.963 / 0.988 / 0.916 to the
+float model's.

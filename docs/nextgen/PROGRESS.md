@@ -50,6 +50,11 @@ Findings of the day:
   the ISA simulator at 416²: 413,529 instructions, all 522.6 M MACs on the device kernels, the
   same three confident detections on `dog.jpg` as the float model (one weak one lost);
   accumulated int8 error is the next accuracy item (calibration / mixed precision), mAP not run.
+- `opentpu/cnngraph.py` (`534d94e3`): the whole YOLOX-Nano graph as 123 device ops over
+  DRAM-resident buffers (concat as channel-slice writes, residuals and sigmoids fused, Focus as
+  an exact 6x6 stride-2 conv); ISA: 470,154 instructions, the same three detections (IoU 0.92-
+  0.99). Host: input, head readout, decode, NMS. Board run prepared (`--backend board
+  --check-isa`), not yet executed.
 
 ## Earlier record (through 2026-10-17)
 
