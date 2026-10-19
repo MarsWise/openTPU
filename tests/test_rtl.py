@@ -99,6 +99,50 @@ def test_tmm_rtl(have_verilator, KB, unit, acc):
     assert np.array_equal(tmems[0], ref.slices[0].tmem)
 
 
+@pytest.mark.parametrize("M", [3, 6])
+def test_tmm_rtl_row_offsets_past_the_window(have_verilator, M):
+    # QACT gives each row its own per-group offsets da; a group whose da exceeds TMM's W = 11 drops
+    # out of that row only (docs/isa.md: sh = 11 - da[j][...]). One row's tiny group must not change
+    # the other rows' sums (isasim once skipped the group for the whole batch). M = 6 > MCOLS
+    # replays the streamed rows.
+    from opentpu import fp32 as F
+    rng = np.random.default_rng(0xD11 + M)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16)
+    D, KB, N = cfg.D, 2, 9
+    g = D // 4
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    values[0, g:2 * g] *= 2.0 ** -14                 # row 0, block 0, group 1: da > 11
+    values[M - 1, KB * D - g:] *= 2.0 ** -13         # the last row, block 1, group 3
+    _, _, da = F.quantize_mx(values, g, False)
+    assert da[0, 1] > 11 and da[M - 1, 4 * KB - 1] > 11
+    assert (da[1:M - 1] <= 11).all()                 # the middle rows keep every group
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    weight_at, out_at = 0x20000, 2048
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    prog = [
+        I.ld(DATA, 0, M * KB * D),
+        I.qact(0, M, 0, KB, KB * D),
+        I.tmm(weight_at, 0, out_at, N, KB, packed.shape[1], N, M, 0, 4, unit=True),
+        I.st(0x60000, out_at, M * N),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25, seed=0xD11 + M)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+    # the middle rows equal their own exact dot products of the quantized activations
+    q, s, d = F.quantize_mx(values, g, False)
+    rec = (q.astype(np.float64).reshape(M, -1, g) * (s[:, None, None].astype(np.float64)
+           / np.ldexp(1.0, d.astype(int))[:, :, None])).reshape(M, -1)
+    got = ref.slices[0].dram[0x60000:0x60000 + M * N * 4].view(np.float32).reshape(M, N)
+    want = rec @ weights.T.astype(np.float64)
+    for r in range(1, M - 1):
+        assert np.allclose(got[r], want[r], rtol=1e-5, atol=1e-6 * np.abs(want[r]).max())
+
+
 def test_tmm_rtl_ascale_rmax_final_values(have_verilator):
     cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=4, ACT_BLOCKS=2)
     M, N, D, ors = 3, 4, cfg.D, 6
