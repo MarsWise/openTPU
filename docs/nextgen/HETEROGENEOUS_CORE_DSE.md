@@ -23,3 +23,41 @@ tool versions, random seed, input shapes, RTL simulation result, workload trace,
 resource estimate or synthesis report, timing status, and the add-vs-share acceptance decision.
 Keep modeled, RTL-simulated, synthesis-estimated and user-measured physical results in separate
 columns. Never populate physical results from source estimates.
+
+## C1: TMM K-split for single-row decode (design, 2026-10-20; not implemented)
+
+**Bottleneck.** A TMM DRAM chunk (D bytes) carries four D-element K blocks (2 bits a weight); the
+MXU consumes one block per advance per column, every column the same block of the weight row
+against its own ACT row. With M = 1 (decode) three of the four columns idle: KB cycles a weight
+row, 128 MAC/cycle (board r3: 127.7 MAC/cycle at M = 1, 511.6 at M >= 4).
+
+**Cycle model, BitNet b1.58 2B4T, one token, TMM only.** 30 layers x (q 2560x2560, k/v
+640x2560, o 2560x2560, gate/up 6912x2560, down 2560x6912) = 2.08 G ternary MACs:
+
+| Mode | cycles / token | ms at 133.33 MHz | DRAM bytes / token | DRAM-bound ms at 128 B/cycle |
+|---|---|---|---|---|
+| today (M = 1, one column) | 16.3 M | 122 | 520 M | 30.5 |
+| K-split (four columns, one chunk an advance) | 4.07 M | 30.5 | 520 M | 30.5 |
+
+K-split makes decode DRAM-bound instead of compute-bound (4x on TMM time). For int8 MM nothing
+changes: one D-byte chunk is one block, already the DRAM rate.
+
+**Design (bit-exact: the same integer sums).**
+- QACT flag KSPLIT (rows = 1): source block k goes to ACT row k mod 4, block ab + k div 4, with
+  the row's one Sa and its block's da offsets (the scale records move with the block).
+- TMM flag KSPLIT (M = 1): one advance per chunk; column j decodes quarter j of the chunk
+  (symbols j*D .. j*D + D - 1, the existing `ts` select per column instead of per advance) against
+  its ACT row's block; at the row's end the four columns' integer accumulators are added (a
+  4-input 48-bit adder) and the one fp32 epilogue runs for column 0. The ISA result is TMM's
+  without KSPLIT bit for bit, so isasim needs only the layout and the checks.
+- RTL cost: per-column ternary decode at S1 (4 x D symbol muxes, or the raw chunk hopping 1,024
+  bits a column instead of decoded 2,048), a 2:1 mux in front of each column's weight hop
+  register, the QACT write addressing, the column-sum adder; WNS today is +0.011 ns, so the mux
+  must sit before a register.
+
+**Acceptance.** RTL = ISA bit-exact for TMM KSPLIT vs plain TMM on random shapes (KB not a multiple
+of 4, scales, ACC, RMAX); board: TMM M = 1 at >= 480 MAC/cycle; no timing regression (WNS >= 0
+at 133.33 MHz); BitNet decode TMM time per token <= 35 ms. **Precondition:** the board run of the
+hybrid BitNet model must show TMM as the decode bottleneck; if the 210 host launches a token
+dominate, moving a whole layer on the device (BitNet as a resident-program Spec, like the Qwen3
+engine) comes first.
