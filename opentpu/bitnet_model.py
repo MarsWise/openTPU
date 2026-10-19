@@ -113,20 +113,21 @@ class TmmBackend:
         x = np.ascontiguousarray(x, np.float32)
         d = self.cfg.D
         kb = k // d
-        mmax = min(getattr(self.cfg, "ACT_ROWS", 0) or 16, x.shape[0])
+        mmax = min(getattr(self.cfg, "ACT_ROWS", 0) or 16, x.shape[0],
+                   self.cfg.TMEM_WORDS // k)
+        assert mmax >= 1, "one activation row does not fit TMEM"
         out = np.empty((x.shape[0], n), np.float32)
         for r0 in range(0, x.shape[0], mmax):
             xm = x[r0:r0 + mmax]
             m = xm.shape[0]
-            nt = min(n, (self.cfg.TMEM_WORDS - m * k) // m)
-            assert nt > 0, "activation rows do not fit TMEM"
+            nt = min(n, self.cfg.TMEM_WORDS // m)      # QACT has consumed x: results reuse TMEM from 0
             prog = [I.ld(self.X_AT, 0, m * k), I.qact(0, m, 0, kb, k)]
             tiles = []
             for n0 in range(0, n, nt):
                 c = min(nt, n - n0)
                 o_at = self.OUT_AT + sum(t[2] * m * 4 for t in tiles)
-                prog += [I.tmm(w_at + n0 * rs, s_at + n0 * 4, m * k, c, kb, rs, c, m, 0, 4, rsc=True),
-                         I.st(o_at, m * k, m * c)]
+                prog += [I.tmm(w_at + n0 * rs, s_at + n0 * 4, 0, c, kb, rs, c, m, 0, 4, rsc=True),
+                         I.st(o_at, 0, m * c)]
                 tiles.append((n0, c, c))
             prog.append(I.halt())
             res = self._run(prog, xm, sum(t[2] for t in tiles) * m * 4)
