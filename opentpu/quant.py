@@ -267,6 +267,7 @@ DEC = {"int4": DEC_INT4, "fp4": DEC_FP4, "nvfp4": DEC_FP4}
 NSUB = 4                       # sub-blocks per K-block (QACT's offsets, int4 / fp4's multipliers)
 NVG = 8                        # nvfp4: E4M3 groups per K-block
 MXU_FORMATS = ("int8", "int4", "fp4", "nvfp4")
+TERNARY = "ternary"          # TMM's packed rows (2 bits a weight) with one fp32 scale a row (RSC)
 FOUR = ("int4", "fp4", "nvfp4")
 MMAX = 63                      # int4 / fp4: the largest 6-bit multiplier
 DW_MAX = 255                   # an offset byte
@@ -384,7 +385,10 @@ def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.nd
 
 
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:
-    """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks)."""
+    """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks;
+    ternary: four K-blocks a D-byte chunk, TMM's)."""
+    if fmt == TERNARY:
+        return -(-K // (4 * D)) * D
     return K if fmt == "int8" else -(-K // (2 * D)) * D
 
 
@@ -396,7 +400,7 @@ def scale_bytes(K: int, fmt: str, D: int = 128, rsc: bool = False) -> int:
     if K % D:
         raise ValueError(f"inner dimension {K} is not a multiple of D={D}")
     KB = K // D
-    if rsc:
+    if rsc or fmt == TERNARY:
         return 4
     if fmt == "int8":
         return 4 + 4 * -(-KB // 4)
@@ -609,7 +613,11 @@ QUANT_ROWS = 1 << 14    # quantize_mxu: rows per piece, so its temporaries stay 
 def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
     """W [N, K] in an MXU weight format ("int8", "int4", "fp4" or "nvfp4"): the DRAM rows
     [N, row_bytes] (uint8) and the scale rows [N, scale_bytes] (uint8), ready to place (rows
-    rs and srs bytes apart). Rows are quantized on their own, QUANT_ROWS at a time."""
+    rs and srs bytes apart). Rows are quantized on their own, QUANT_ROWS at a time.
+    "ternary": every row of W must be s * {-1, 0, +1} (a BitNet projection, its weight_scale
+    applied): the row's s (its largest |w|) is its RSC scale, the signs TMM's packed rows."""
+    if fmt == TERNARY:
+        return quantize_ternary(W, D)
     N = W.shape[0]
     if N <= QUANT_ROWS:
         return quantize_mx(W, fmt, D)
@@ -620,6 +628,19 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
     for i in range(QUANT_ROWS, N, QUANT_ROWS):
         q[i:i + QUANT_ROWS], sc[i:i + QUANT_ROWS] = quantize_mx(W[i:i + QUANT_ROWS], fmt, D)
     return q, sc
+
+
+def quantize_ternary(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """W [N, K] with rows s_n * {-1, 0, +1} -> (TMM packed rows [N, row_bytes], fp32 RSC scale
+    rows [N, 4] as bytes). Refuses a row with more than one magnitude (not ternary)."""
+    W = np.asarray(W, np.float32)
+    s = np.abs(W).max(axis=1)
+    codes = np.where(s[:, None] > 0, np.rint(W / np.where(s > 0, s, 1)[:, None]), 0)
+    if not np.array_equal((codes * s[:, None]).astype(np.float32), W):
+        bad = int(np.argmax(np.any((codes * s[:, None]).astype(np.float32) != W, axis=1)))
+        raise ValueError(f"row {bad} is not ternary (s * {{-1, 0, 1}})")
+    return (pack_ternary_mxu(codes.astype(np.int8), D),
+            np.ascontiguousarray(s.astype(np.float32)).view(np.uint8).reshape(-1, 4))
 
 
 def part_scales(srows: np.ndarray, fmt: str, k0: int, kb: int) -> np.ndarray:
@@ -644,6 +665,13 @@ def part_rows(rows: np.ndarray, fmt: str, c0: int, c1: int, D: int = 128) -> np.
     rows = np.asarray(rows, np.uint8)
     if fmt == "int8":
         return np.ascontiguousarray(rows[:, c0:c1])
+    if fmt == TERNARY:                          # four K-blocks a D-byte chunk
+        if c0 % (4 * D):
+            raise ValueError(f"a ternary column part starts on a whole chunk ({c0})")
+        out = np.zeros((rows.shape[0], row_bytes(c1 - c0, fmt, D)), np.uint8)
+        n = out.shape[1]
+        out[:, :n] = rows[:, c0 // 4:c0 // 4 + n]
+        return out
     if c0 % (2 * D):
         raise ValueError(f"a 4-bit column part starts on a whole chunk ({c0})")
     out = np.zeros((rows.shape[0], row_bytes(c1 - c0, fmt, D)), np.uint8)

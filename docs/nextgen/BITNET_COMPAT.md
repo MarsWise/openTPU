@@ -34,6 +34,23 @@ Checkpoint: `microsoft/bitnet-b1.58-2B-4T` (config: 30 layers, hidden 2560, FFN 
   `tools/bitnet_hf_reference.py` (transformers on the host) + `tools/bitnet_compare.py`. Results
   are recorded below once run on the card.
 
+## On the Qwen3 engine: one device run a token (2026-10-20)
+
+`opentpu/llm/bitnet.py` + Spec flags in `opentpu/llm/qwen3.py` (`subln`: attn_sub_norm before
+W_o and ffn_sub_norm over the whole F row before W_down; `act="relu2"`) and the image weight
+format `ternary` (`opentpu/quant.py`: TMM packed rows, one fp32 scale a row = weight_scale).
+Every projection is a TMM, the layers a hardware loop, the int8 KV cache, RoPE, attention and the
+int8 LM head (tied to the bf16 embedding) on the device: a decode step is one program (90
+instructions on the 2-layer test model: 7 TMM, 3 MM, 7 QACT, 56 VOP) instead of the hybrid
+model's 7 launches a layer. Found on the way: the compiler's ternary `dot` never set TMM's RSC
+flag, so a ternary matrix with row scales did not compile (fixed; regression test in
+test_ternary.py).
+
+Verified (`tests/test_bitnet_engine.py`, ISA simulator, a 2-layer checkpoint in the real layout):
+logits vs HF transformers' BitNet (offline AutoBitLinear, float32) cosine >= 0.99895 at every
+position of a 10-token sequence, greedy argmax 10/10; vs the numpy reference > 0.99. The 2B4T
+checkpoint on the card: `tools/bitnet_engine.py --backend board` (pending the board run).
+
 ## Not verified / not implemented
 
 - A whole BitNet model on the board: `opentpu/bitnet_model.py` runs the projections as TMM and

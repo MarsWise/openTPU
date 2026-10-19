@@ -319,6 +319,8 @@ class QTensor:
         "nvfp4", opentpu/quant.py quantize_mxu's rows): element rows row_bytes apart, scale rows
         scale_bytes apart."""
         from . import quant as Q
+        if fmt == Q.TERNARY:                    # TMM's packed rows with RSC row scales
+            return QTensor.ternary_weight(data, scale, n, k, D, **kw)
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), Q.row_bytes(k, fmt, D),
                        Q.scale_bytes(k, fmt, D), D, wf=Q.mxu_wf(fmt), **kw)
 
@@ -1985,7 +1987,7 @@ class Builder:
                 if w.ternary:
                     ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa,
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
-                                w.srs, unit=unit, acc=acc is not None or not first,
+                                w.srs, unit=unit, rsc=not unit, acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,

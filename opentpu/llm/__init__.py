@@ -49,6 +49,9 @@ def load_spec(path):
         from .minicpmv import Spec
     elif t in ("gemma4", "gemma4_text"):
         from .gemma4 import Spec
+    elif t == "bitnet":
+        from .bitnet import spec_from_hf as bitnet_spec
+        return bitnet_spec(path)
     else:
         from .llama import MODEL_TYPES, spec_from_hf
         if t in MODEL_TYPES:

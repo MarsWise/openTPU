@@ -207,3 +207,15 @@ def test_compiler_dot_lowers_ternary_weight_descriptor_to_tmm():
     tmm = next(ins for ins in builder.root if ins.op == I.TMM)
     assert (tmm.w[3] & 0xFFFF, (tmm.w[3] >> 16) & 0xFF) == (5, 7)
     assert tmm.flags & I.F_UNIT
+
+
+def test_compiler_dot_lowers_scaled_ternary_weight_with_rsc():
+    """A ternary descriptor with row scales lowers to TMM RSC (not UNIT): BitNet's projections
+    (their weight_scale a row scale). Before the fix the lowering dropped RSC and I.tmm refused."""
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4)
+    builder = Builder(cfg, 0)
+    activations = builder.alloc((3, 7 * cfg.D))
+    weights = QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D)
+    builder.dot(activations, weights)
+    tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+    assert not tmm.flags & I.F_UNIT and tmm.flags & I.F_RSC

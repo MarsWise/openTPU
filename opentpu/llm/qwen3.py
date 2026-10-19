@@ -52,7 +52,7 @@ from ..kernels import mailbox as MB
 from ..kernels import gather as GA
 from ..kernels.gather import gather_row, onehot, onehot_blocks
 from ..kernels.gather import operand as gather_operand
-from ..kernels.lib import rmsnorm, rope, rope_rows, sigmoid, softcap
+from ..kernels.lib import rmsnorm, rope, rope_rows, sigmoid, silu, softcap
 from ..kernels.mlp import _chunk, down_chunk, swiglu_down
 from ..runtime import ALIGN
 
@@ -85,6 +85,10 @@ class Spec:
     #                           tied int8 LM head holds them: the device gathers them from it,
     #                           kernels.gather.gather_row)
     formats: str = ""         # weight formats per kind over the image's wformat (KINDS)
+    # BitNet b1.58 (opentpu/llm/bitnet.py) runs on this code with:
+    subln: bool = False       # RMSNorm of the attention output before W_o (attn_sub_norm) and of
+    #                           act(gate) * up before W_down (ffn_sub_norm), the whole F row
+    act: str = "silu"         # the MLP's gate activation: "silu" (SwiGLU) or "relu2" (BitNet)
     mix: str = ""             # the recommended mix (wformat "mix": formats.named, MIXES)
 
     @property
@@ -947,14 +951,17 @@ class Image(EmbedHost):
         # W_down in column parts of the MLP's F chunk: each down MM streams one part, whose
         # scales are then contiguous (with row-major scales every row would cost a DRAM beat);
         # the chunk by W_down's format
-        self.dchunks = {fd: _chunk(self.f_loc, D, D if fd == "int8" else 2 * D)
-                        for fd in sorted({f[2] for f in self.lf})}
+        self.dchunks = {fd: (self.f_loc if fd == Q.TERNARY else
+                             _chunk(self.f_loc, D, D if fd == "int8" else 2 * D))
+                        for fd in sorted({f[2] for f in self.lf})}  # (ternary: one part)
         self.dchunk = self.dchunks[self.lf[0][2]]
         self.bofs, self.bsize = {}, {}                  # per layout: offsets inside its block
         for key in dict.fromkeys(self.lf):
             mf, C = self.mats_formats(key), self.dchunks[key[2]]
             lb = _Bump()
             L = {"g_in": lb.alloc(4 * H), "g_post": lb.alloc(4 * H)}
+            if getattr(spec, "subln", False):
+                L.update(g_asub=lb.alloc(4 * spec.n_q * d), g_fsub=lb.alloc(4 * F_))
             if spec.qk_norm:
                 L.update(qn=lb.alloc(4 * d), kn=lb.alloc(4 * d))
             if spec.nope:
@@ -1054,6 +1061,9 @@ class Image(EmbedHost):
             for s in range(S):
                 put(s, Lo["g_in"], f32(W[p + "input_layernorm.weight"]))
                 put(s, Lo["g_post"], f32(W[p + "post_attention_layernorm.weight"]))
+                if getattr(spec, "subln", False):
+                    put(s, Lo["g_asub"], f32(W[p + "self_attn.attn_sub_norm.weight"]))
+                    put(s, Lo["g_fsub"], f32(W[p + "mlp.ffn_sub_norm.weight"]))
                 if spec.qk_norm:
                     put(s, Lo["qn"], f32(qk[0]))
                     put(s, Lo["kn"], f32(qk[1]))
@@ -1149,6 +1159,10 @@ class Image(EmbedHost):
             ns = SimpleNamespace(
                 g_in=Tensor(off + lofs["g_in"], (H,), (1,)),
                 g_post=Tensor(off + lofs["g_post"], (H,), (1,)),
+                g_asub=(Tensor(off + lofs["g_asub"], (spec.n_q * d,), (1,))
+                        if getattr(spec, "subln", False) else None),
+                g_fsub=(Tensor(off + lofs["g_fsub"], (spec.ffn,), (1,))
+                        if getattr(spec, "subln", False) else None),
                 qn=Tensor(off + lofs["qn"], (d,), (1,)) if spec.qk_norm else None,
                 kn=Tensor(off + lofs["kn"], (d,), (1,)) if spec.qk_norm else None,
                 rg=Tensor(off + lofs["rg"], (2,), (1,)) if spec.nope else None)
@@ -1372,11 +1386,31 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
         else:
             o_loc[r0:r1, :].set((acc / l[:, None]) * sg.reshape(G * nh, d)[r0:r1, :])
     o_all = ol.all_gather(o_row)                # [1, n_q*d], slice-major head order
+    if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o
+        o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)
     y = ol.all_gather(ol.dot(o_all, lw.wo))     # [1, H]
     return x + y
 
 
+def _bitnet_mlp(x, lw, spec: Spec):
+    """BitNet's MLP: W_down ffn_sub_norm(relu(W_gate x)^2 * W_up x) after post_attention_layernorm.
+    The sub-norm spans the whole F row, so gate and up are projected whole (one slice) and
+    W_down is one part (Image.dchunks: ternary)."""
+    if ol.num_programs() != 1:
+        raise ol.CompileError("BitNet's MLP (subln) runs on one slice")
+    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
+    g = ol.dot(xs, lw.wg)                       # [1, F]
+    u = ol.dot(xs, lw.wu)
+    r = ol.maximum(g, 0.0) if spec.act == "relu2" else g
+    a = (r * r) * u if spec.act == "relu2" else silu(g) * u
+    a = rmsnorm(a, ol.load(lw.g_fsub), spec.eps)
+    y = ol.dot(a, lw.wd[:, 0:spec.ffn])
+    return x + y
+
+
 def _mlp(x, lw, spec: Spec):
+    if getattr(spec, "subln", False):           # (LFM2's / Qwen3.5's Specs have no subln)
+        return _bitnet_mlp(x, lw, spec)
     sid = ol.program_id()
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
     y = swiglu_down(xs, lw.wg, lw.wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
