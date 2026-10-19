@@ -114,3 +114,50 @@ def test_graph_on_isa_matches_torch(D):
     assert err < 0.03, err
     # the sigmoid outputs are probabilities: their absolute error
     assert np.abs(got[..., 4:] - want[..., 4:]).max() < 0.02
+
+
+def _decode_case(n=37, cols=12, stride=8):
+    from opentpu.kernels import detect as K
+    from opentpu.runtime import Input, Output
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal((n, cols)).astype(np.float32)
+    g = K.grid(1, n)
+    args = dict(x=Input(x), g=Input(g), y=Output((n, cols)), n=n, cols=cols, stride=stride)
+    want = x.copy()
+    want[:, :2] = (x[:, :2] + g) * stride
+    want[:, 2:4] = np.exp(x[:, 2:4]) * stride
+    return K.yolox_decode, args, want
+
+
+def test_yolox_decode_isa():
+    from opentpu.runtime import compile_kernel, run
+    kern, args, want = _decode_case()
+    comp, imgs = compile_kernel(kern, Config(S=1, D=32, MCOLS=4, ACT_BLOCKS=16), **args)
+    got = run(comp, imgs, "isa").outputs["y"]
+    assert np.allclose(got, want, rtol=1e-5)
+
+
+def test_yolox_decode_rtl(have_verilator):
+    from opentpu.runtime import compile_kernel, run
+    from conftest import assert_same_state
+    kern, args, _ = _decode_case(n=21)
+    comp, imgs = compile_kernel(kern, Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16), **args)
+    assert_same_state(run(comp, [i.copy() for i in imgs], "isa"),
+                      run(comp, [i.copy() for i in imgs], "rtl"))
+
+
+def test_unsupported_operator_is_refused():
+    class Odd(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.c = BaseConv(3, 8, 3)
+
+        def forward(self, x):
+            return self.c(x) * 2.0                     # no device op for a scalar multiply
+
+    m = Odd().eval()
+    gm = torch.fx.GraphModule(m, Leaf().trace(m))
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16)
+    plan = G.build(gm, (3, 8, 8), cfg)
+    host = [t for t in G.host_nodes(gm, plan) if t[2] not in G.HOST_LAYOUT]
+    assert host and host[0][2] == "mul"                # --strict-fpga refuses this plan

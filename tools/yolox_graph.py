@@ -4,11 +4,17 @@ three head levels, flattens them and decodes the boxes (grid, stride, exp) and r
 
 Usage: python tools/yolox_graph.py YOLOX_REPO yolox_nano.pth [--image IMG] [--size 416]
                                    [--backend isa|board] [--check-isa] [--dev /dev/xdma0]
-                                   [--stubs DIR]
+                                   [--stubs DIR] [--strict-fpga]
 Compared with the float PyTorch model (the same checkpoint and input): the head outputs, every
 op's output tensor (--per-op), and the detections. --backend board writes the plan's DRAM image
 once, then loads and runs each op's program; --check-isa runs the ISA simulator alongside and
 requires each op's output region to be bit-identical.
+
+--strict-fpga: the box decode runs on the device too (kernels/detect.py: every level decoded
+into one [anchors, 85] buffer, the levels' flatten and concatenation included), and the run fails
+if the plan leaves the host anything but reading that buffer and NMS: graph nodes the plan does
+not run must be pure layout (flatten / permute / the levels' cat / shape queries), which the
+decode buffer's layout replaces. A placement report lists where every operator ran.
 """
 import argparse
 import hashlib
@@ -29,6 +35,7 @@ def main():
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--stubs", default=None)
     ap.add_argument("--per-op", action="store_true")
+    ap.add_argument("--strict-fpga", action="store_true")
     a = ap.parse_args()
     sys.path.insert(0, a.repo)
     if a.stubs:
@@ -68,7 +75,37 @@ def main():
         cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536, LANES=8,
                      DRAM_BYTES=1 << 28)
     t0 = time.time()
-    plan = G.build(gm, (3, a.size, a.size), cfg)
+    dec = {}
+
+    def extend(pl):
+        """--strict-fpga: decode the head levels on the device into one [anchors, 85] buffer."""
+        from opentpu.compiler import Affine, Tensor
+        from opentpu.kernels import detect as K
+        lv = [n for n in gm.graph.nodes if isinstance(pl.env.get(n), G.Val) and
+              any(pl.env.get(u) is None for u in n.users)]
+        sizes = [(pl.env[n].buf.H, pl.env[n].buf.W, pl.env[n].C) for n in lv]
+        total = sum(h * w for h, w, _ in sizes)
+        cols = sizes[0][2]
+        out = pl.buf("decoded", total, 1, cols)
+        r0 = 0
+        for n, (h, w, c) in zip(lv, sizes):
+            g = pl.const(f"grid{h}x{w}", K.grid(h, w))
+            v = pl.env[n]
+
+            def bound(p, v=v, g=g, h=h, w=w, r0=r0):
+                return dict(x=Tensor(Affine(v.buf.addr), (h * w, cols), (cols, 1)),
+                            g=Tensor(Affine(g[2]), (h * w, 2), (2, 1)),
+                            y=Tensor(Affine(out.addr + 4 * r0 * cols), (h * w, cols), (cols, 1)),
+                            n=h * w, cols=cols, stride=a.size // h)
+            pl.kernel_op(f"decode{h}x{w}", K.yolox_decode, bound, G.Val(out))
+            r0 += h * w
+        dec["val"] = G.Val(out)
+
+    plan = G.build(gm, (3, a.size, a.size), cfg, extend if a.strict_fpga else None)
+    if a.strict_fpga:
+        bad = [t for t in G.host_nodes(gm, plan) if t[2] not in G.HOST_LAYOUT]
+        if bad:
+            raise SystemExit(f"--strict-fpga: operators left to the host: {bad}")
     kinds = {}
     for op in plan.ops:
         kinds[op.kind] = kinds.get(op.kind, 0) + 1
@@ -109,7 +146,10 @@ def main():
               any(plan.env.get(u) is None for u in n.users)]
     heads = [plan.read(out, plan.env[n]) for n in levels]
     raw = np.concatenate([h.reshape(-1, h.shape[-1]) for h in heads], 0)
-    yd = decode(raw, [h.shape[:2] for h in heads], a.size)
+    if a.strict_fpga:
+        yd = plan.read(out, dec["val"]).reshape(-1, raw.shape[1])
+    else:
+        yd = decode(raw, [h.shape[:2] for h in heads], a.size)
     print(f"\nrun {t_run:.1f}s: {stats['instructions']} instructions"
           + (f", {stats['cycles']} card cycles = {stats['cycles'] / 133.333e3:.1f} ms at 133.33 MHz"
              if stats["cycles"] else ""))
@@ -136,7 +176,12 @@ def main():
     match = [max((iou(p[:4], q[:4]) for q in dd if q[5] == p[5]), default=0.0) for p in dr]
     print("float detections' best same-class IoU on the device: " +
           ", ".join(f"{v:.3f}" for v in match))
-    print("host work: input write, 3 head reads, flatten, box decode (grid / exp / stride), NMS")
+    if a.strict_fpga:
+        print("placement (--strict-fpga): device", {k: v for k, v in kinds.items()},
+              "| host: input write, one [anchors, 85] read, NMS | layout-only graph nodes "
+              f"replaced by the decode buffer: {len(G.host_nodes(gm, plan))}")
+    else:
+        print("host work: input write, 3 head reads, flatten, box decode (grid / exp / stride), NMS")
     return 0
 
 

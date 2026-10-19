@@ -152,6 +152,22 @@ class Plan:
         self.inputs: dict[str, Buf] = {}
         self.outputs: list[Val] = []
         self.weights: dict[str, tuple] = {}     # op name -> (packed fp32 [N, K] or taps, bias)
+        self.consts: list[tuple] = []           # (name, fp32 array, address) placed with layout
+        self.extra: list[tuple] = []            # (Op, kernel, bound(plan) -> dict): appended ops
+
+    def const(self, name: str, a: np.ndarray) -> list:
+        """A constant fp32 array placed in the image; returns a holder whose [2] is its address
+        once the plan is laid out."""
+        h = [name, np.ascontiguousarray(a, np.float32), -1]
+        self.consts.append(h)
+        return h
+
+    def kernel_op(self, name: str, kernel, bound, out: "Val | None" = None) -> Op:
+        """A device op of any kernel: bound(plan) gives its arguments once addresses are known."""
+        op = Op("kernel", name, None, out)
+        self.extra.append((op, kernel, bound))
+        self.ops.append(op)
+        return op
 
     def buf(self, name, H, W, Cc) -> Buf:
         b = Buf(name, H, W, Cc)
@@ -163,6 +179,8 @@ class Plan:
         """Borders and tails from the consumers, then addresses. Returns the image size."""
         need = {}
         for op in self.ops:
+            if op.inp is None:
+                continue
             b = op.inp.buf
             if op.kind == "conv":
                 K, s, pad = op.p["K"], op.p["stride"], op.p["pad"]
@@ -186,6 +204,9 @@ class Plan:
         for b in self.bufs:
             b.addr = top
             top = -(-(top + b.nbytes) // ALIGN) * ALIGN
+        for h in self.consts:
+            h[2] = top
+            top = -(-(top + h[1].nbytes) // ALIGN) * ALIGN
         for op in self.ops:
             if op.kind == "conv":
                 w2, bias = self.weights[op.name]
@@ -205,6 +226,8 @@ class Plan:
 
     def image(self, size: int, D: int) -> np.ndarray:
         img = np.zeros(size, np.uint8)
+        for _, a, at in self.consts:
+            img[at:at + a.nbytes] = a.view(np.uint8).reshape(-1)
         f32 = img[:size - size % 4].view(np.float32)
         for b in self.bufs:
             if b.fill:
@@ -244,7 +267,12 @@ class Plan:
     # ------------------------------------------------------------------ compile
     def compile(self, cfg) -> None:
         D = cfg.D
+        extra = {id(op): (k, bnd) for op, k, bnd in self.extra}
         for op in self.ops:
+            if op.kind == "kernel":
+                k, bnd = extra[id(op)]
+                op.prog = k.trace(cfg, 0, bnd(self)).finish()
+                continue
             ib, ov = op.inp.buf, op.out
             y = ov.buf.interior(ov.c0, ov.C)
             res = op.res.buf.interior(op.res.c0, op.res.C) if op.res is not None else None
@@ -436,9 +464,29 @@ def lower(gm, input_shape) -> Plan:
 D_HINT = [128]                            # pack_conv_weight's D: set by build() before lower()
 
 
-def build(gm, input_shape, cfg) -> Plan:
+HOST_LAYOUT = {"flatten", "permute", "getattr", "getitem", "cat", "view", "reshape", "size",
+               "contiguous", "type"}
+
+
+def host_nodes(gm, plan) -> list:
+    """The graph's nodes the plan leaves to the host (env None), as (name, op, target)."""
+    out = []
+    for n in gm.graph.nodes:
+        if n.op in ("placeholder", "output") or isinstance(plan.env.get(n), Val):
+            continue
+        if n.op == "placeholder":
+            continue
+        t = getattr(n.target, "__name__", str(n.target))
+        out.append((n.name, n.op, t))
+    return out
+
+
+def build(gm, input_shape, cfg, extend=None) -> Plan:
+    """lower, then extend(plan) (appended device ops, e.g. a detection decode), layout, compile."""
     D_HINT[0] = cfg.D
     pl = lower(gm, input_shape)
+    if extend is not None:
+        extend(pl)
     size = pl.layout(cfg.D)
     pl.size = size
     pl.compile(cfg)
