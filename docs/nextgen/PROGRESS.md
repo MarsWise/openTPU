@@ -1,5 +1,46 @@
 # Nextgen implementation progress
 
+## Current state (2026-10-19)
+
+Plan to close the master brief: phases A-G (hygiene, BitNet to DoD, Matrix Engine 2.0, CNN/YOLO,
+VLM/MoE, VLA, vLLM), kept in the claude.ai project as `NEXTGEN_MASTER_PLAN.md`.
+
+- Upstream `FeSens/openTPU:main` = `9bd4d83c` (46 commits after `f237dab2`, all 2026-10-19),
+  merged into the feature branch as `f507e201` (one conflict, `rtl/mxu/otpu_mxu.sv`; see
+  UPSTREAM_FEATURE_MATRIX.md). Fork `main` was found already at `9bd4d83c`.
+- Feature branch: local commits since the published `668dcff5` are not pushed (no GitHub
+  credentials on the Windows host). Four commits of 2026-10-17/19 carry the author `x <x@x>`
+  (`581ba6c9`, `1ce7acfd`, `c1c6c7fc`, `0e441bef`); left as is, history not rewritten.
+- Host NVX-LPS (192.168.0.192, formerly .156): `~/openTPU_BitNET` at `0e441bef` (clean) before
+  this update; card r3 (`0xe9727303`, m4, 133.33 MHz) loaded over JTAG, volatile; PCIe Gen2
+  **x4** (was x8 on the previous host slot), H2C 0.85 GB/s (was 2.36).
+- The r3 bitstream predates the `9bd4d83c` merge: a rebuild and a new firmware contract are
+  needed before the card again runs the branch's sources.
+
+### Verification on 2026-10-19 (Verilator 5.046 built from source, Python 3.13.16, numpy 2.5.3)
+
+| Tree | Selection | Result |
+|---|---|---|
+| `83b13ed8` + new test (pre-merge) | `tests/test_rtl.py -k tmm` | 9 passed (595 s) |
+| `3b078292` (merged) | `tests/test_rtl.py -k tmm` | 9 passed (609 s) |
+| `3b078292` (merged) | test_ternary, test_bitnet, test_bitnet_model, test_bitnet_hf, test_mx, test_tech, test_compiler | 110 passed, 1 skipped (no yosys Xilinx models) |
+| `83b13ed8` | test_bitnet_hf (transformers 5.20.2, torch 2.14.1), test_bitnet_model, test_bitnet | 13 passed |
+
+Findings of the day:
+- isasim TMM skipped a QACT group for every row of a batch when one row's offset exceeded 11;
+  RTL drops it for that row only (docs/isa.md). Fixed in `c1c6c7fc`; RTL pinned by
+  `test_tmm_rtl_row_offsets_past_the_window` (`3b078292`), which fails on the old isasim.
+- `test_isa_backend_tracks_reference_model` tolerance was raised 0.05 -> 0.1 in `c1c6c7fc`: it had
+  failed since `1ce7acfd` (0.54); after the fix the ISA model is 0.087 from the numpy reference,
+  the same as with one row per call (M = 1). It is the QACT (per-group power-of-two) vs HF
+  (per-token absmax) quantizer difference, not a defect.
+- The numpy BitNet reference equals HF transformers' `AutoBitLinear` model (1e-4 of the logit
+  range, prefill and cached decode) on a synthetic checkpoint in the real layout;
+  `BitLinear` (divides by `weight_scale`) does not, so `bitnet_generate.py` now refuses other
+  `quantization_config`s.
+
+## Earlier record (through 2026-10-17)
+
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published
 `668dcff5295043a2618e558fe72c44a183ebd56d`; this status document records follow-up discovery and
 documentation through 2026-10-17. This is not a claim that the complete master brief has been
@@ -52,7 +93,7 @@ delivered.
   The PR API identifies the actor as `MarsWise`. The public repository metadata confirms the fork
   parent is `FeSens/openTPU`.
 
-## Subsystem status
+## Subsystem status (2026-10-17; superseded by the current state above where they differ)
 
 | Subsystem | Status | Evidence / remaining work |
 |---|---|---|

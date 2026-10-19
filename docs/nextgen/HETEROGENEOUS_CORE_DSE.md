@@ -2,6 +2,9 @@
 
 ## Run status
 
+Updated 2026-10-19: the ternary row below reflects the TMM implementation and board measurements.
+The rest of this section is the earlier (2026-10-14) record.
+
 No candidate RTL cores were added and no DSE sweep was run in this task. No Vivado or board access
 was attempted. Thus the table below records decisions and evidence gaps, not synthesized estimates.
 
@@ -9,7 +12,7 @@ was attempted. Thus the table below records decisions and evidence gaps, not syn
 |---|---|---|---|---|
 | Existing LLM decode | README reports historical decode as DRAM-bound on listed runs; not re-profiled here | Existing MXU / dataflow tuning / more matrix columns / dedicated decode unit | No current trace, cycles, post-route result, or contention measurement in this task | Do not add a core without a fresh baseline trace |
 | Existing LLM prefill | README reports matrix-rate benefits for prior configurations; not re-profiled here | Existing MXU / wider tiles / buffer and schedule changes | No workload-specific current data | Retain baseline pending controlled comparison |
-| Ternary GEMV/GEMM | No model selected; no bottleneck established | Existing MXU extension / dedicated packed add-sub lanes / software reference | Only a software reference test; no RTL, traffic, area, frequency or speedup data | No hardware core promoted |
+| Ternary GEMV/GEMM | Decode (M = 1) uses one of four MXU columns: 127.7 MAC/cycle vs 511.6 at M >= 4 (board, r3) | Shared MXU (implemented: TMM) / N-split of one row across columns / dedicated add-sub lanes | Board r3 (133.33 MHz): 136.4 GOPS at M = 16, 34.1 GOPS at M = 1, bit-exact with ISA. The PE multiplier remains (no DSP saving claimed). | TMM reuses the shared MXU (decided, implemented). Next DSE item: M = 1 decode utilisation, with a cycle model before RTL |
 | YOLO/CNN | No graph/checkpoint | Implicit GEMM / line-buffer stream core / existing MXU compositions | No model operators or trace | No decision |
 | Attention/KV | No new trace | Existing stream/vector path / fused attention core | No current per-operator trace or physical resource margin | No decision |
 

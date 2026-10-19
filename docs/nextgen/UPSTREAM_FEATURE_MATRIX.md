@@ -1,5 +1,32 @@
 # Upstream feature and compatibility matrix
 
+## 2026-10-19: `f237dab2..9bd4d83c` (46 commits, merged in `f507e201`)
+
+- `FeSens/openTPU:main` = `9bd4d83c5e03231057f9a9eed22370747ec89d0a`, committed 2026-10-19
+  11:02:12 -03:00 ("Merge timing-ffs (d3fa1105): the m8 card at a real 150 MHz"). Commits are
+  dated 2026-10-19 02:20-10:29 -03:00. Merge-base with the feature branch: `f237dab2`.
+- `MarsWise/openTPU:main` was found at `9bd4d83c` too (a fast-forward from `5309a20d`, which is
+  its ancestor; not done by an agent of this project). Feature branch on GitHub: `668dcff5`.
+- Delta: 42 files, +2,954/-383. No change to `opentpu/isa.py`, `isasim.py`, `compiler.py` or
+  `quant.py`, so TMM's software contract is untouched.
+
+| Upstream area (paths) | Effect | NextGen overlap and decision | Verification |
+|---|---|---|---|
+| MXU (`rtl/mxu/otpu_mxu.sv`, +400): epilogue on a registered advance with a TMEM request queue (TQ), RMAX compare a stage later, `last_k` as a compare against `KBm1`, decoded block scale as a registered copy per column (`dlo0/dhi0` -> `g_bd`) | Timing at 150 MHz on m8; cycle-exact by upstream's tests | **Conflict** (2 hunks). Kept `KBm1` and our `ternary` bit in the command entry; TMM's `m0.ternary` passed to the new per-column `bdec()`; the old `always_ff` copy dropped. `KBm1` derives from `cmd_KBa`, which already counts TMM advances | TMM RTL vs ISA on the merged tree (PROGRESS.md) |
+| Sequencer / pkg (`otpu_seq.sv`, `otpu_pkg.sv`): command store and VPU wait hold from flip-flops, `otpu_tmem_breq` | Timing | Auto-merged; upstream adds no opcode dispatch that bypasses `OP_TMM` (checked by diff) | same |
+| TMEM / DMA / VPU / slice (`otpu_tmem.sv`, `otpu_dma.sv`, `otpu_vpu.sv`, `otpu_quant.sv`, `otpu_se_*`, `otpu_slice.sv`, `otpu_native_dram.sv`, `otpu_afifo.sv`, tech RAMs) | Reads by bank from flip-flops, LUT RAMs as read-ahead BRAMs, fanout copies | No NextGen edits in these files; taken as is | upstream tests; selected local regression |
+| XDMA write packing (`rtl/shell/otpu_mem_ch.sv`) | Host-to-card write path at 150 MHz | Taken as is; affects every host write (weights, activations) | upstream `memch_test`; board only after a rebuild |
+| Board build (`boards/ypcb-00338/vivado/*`, `core_clock.tcl`, `constraints/otpu_mxu_place.tcl`) | 150 MHz CLK2X clock, setup margins, TMEM/XDMA pblocks, movable MXU array, place directive | `create_project.tcl` auto-merged; our `SEQ_WC` default of 1 kept | Not rebuilt; r3 on the card predates this merge |
+| Host (`opentpu/host/loadcal.py` +399, `board.py`, `ddrcal.py`) | DDR3 read taps centred under load on a configuration's first scrub when the core clock differs from the controllers' | No NextGen overlap; behaviour on the m4 133.33 MHz image to be checked at the next board bring-up | upstream test_loadcal etc. |
+| ASIC flow (`asic/nangate45/*`, `tools/asic/flow.py`) | CTS / GRT repair | No overlap | not run |
+| Docs (`docs/timing_ffs.md`, `docs/litedram.md`) | The timing study; r150o production at 150 MHz on m8 since 2026-10-19 | Reference | — |
+
+Consequence for the card: the loaded r3 bitstream (`e9727303`, m4, 133.33 MHz) no longer matches the
+feature sources. A rebuild (m4 at 133.33 MHz, or upstream's m8 at 150 MHz with TMM) and a new
+`firmware_contract.json` are needed before the board is again "the sources' image".
+
+## Earlier snapshot (2026-10-16)
+
 ## Snapshot and review scope
 
 - Source repository: `FeSens/openTPU`, read-only.

@@ -19,10 +19,25 @@ Checkpoint: `microsoft/bitnet-b1.58-2B-4T` (config: 30 layers, hidden 2560, FFN 
   each D-block by a power of two, HF scales the whole token by absmax/127, so results are close,
   not identical.
 
+## Framework verification (2026-10-19)
+
+- `tests/test_bitnet_hf.py` builds a tiny checkpoint in the real layout (U8 `[N/4, K]` weights,
+  bf16 `weight_scale` and norms, `quantization_config` bitnet/offline) and runs it in HF
+  transformers 5.20.2 (torch 2.14.1, float32): the numpy reference model (`RefBackend`) matches
+  `AutoBitLinear` within 1e-4 of the logits' range over a prefill and two cached decode steps
+  (embedding, RMSNorm, SubLN, RoPE theta 500000, GQA, relu², tied head). With
+  `linear_class: bitlinear` (divides by `weight_scale`) it does not, so the converter and
+  `tools/bitnet_generate.py` accept only offline `autobitlinear` checkpoints.
+- On the same synthetic checkpoint the ISA backend (QACT activations) is cosine 0.99986 from HF,
+  greedy tokens 6/6 equal.
+- Real checkpoint, whole model: `tools/bitnet_generate.py --save` (board, ISA) +
+  `tools/bitnet_hf_reference.py` (transformers on the host) + `tools/bitnet_compare.py`. Results
+  are recorded below once run on the card.
+
 ## Not verified / not implemented
 
-- A whole BitNet model: RMSNorm, SubLN, RoPE, ReLU², attention, embeddings/LM head and the
-  tokenizer are not wired to a BitNet model spec on the board; no token has been generated.
+- A whole BitNet model on the board: `opentpu/bitnet_model.py` runs the projections as TMM and
+  the rest on the host (see OPERATOR_COVERAGE_MATRIX.md); the board run is pending (above).
 - Other checkpoints (including any "Tern2" model): not examined.
 - TMEM (64 Ki words) bounds M x (K + N) per TMM call, so real layers need tiling over M and N;
   the 2B model's weights (about 0.5 GiB packed) fit in the card's DRAM, but that is not measured.

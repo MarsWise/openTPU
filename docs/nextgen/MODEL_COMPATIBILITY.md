@@ -2,14 +2,16 @@
 
 ## New workload families requested
 
+Updated 2026-10-19 (feature HEAD after the `9bd4d83c` upstream merge).
+
 | Family | Selected checkpoint / revision | Current evidence in this branch | Status |
 |---|---|---|---|
-| BitNet b1.58 / Tern2 | None selected; no model file or checksum supplied | Generic signed ternary reference only; it is not a checkpoint importer | `BLOCKED` on identifying exact model semantics and obtaining checkpoint |
+| BitNet b1.58 | `microsoft/bitnet-b1.58-2B-4T` (HF, `model_type` bitnet, offline `AutoBitLinear`); Tern2 not examined | Converter `opentpu/bitnet.py`; hybrid model `opentpu/bitnet_model.py` (projections as TMM, the rest on the host); numpy reference = HF transformers on a synthetic checkpoint in the real layout (`tests/test_bitnet_hf.py`); real `layers.0.q_proj` on the board bit-exact with the ISA simulator; full-model board run and real-checkpoint HF comparison: `tools/bitnet_generate.py` + `tools/bitnet_hf_reference.py` (see BITNET_COMPAT.md for results) | `SOFTWARE + FRAMEWORK VERIFIED (synthetic)`; single layer `PHYSICAL`; whole model: see BITNET_COMPAT.md |
 | YOLO / CNN | None | No graph export, checkpoint, Conv RTL, or detection test | `PLANNED` |
-| Vision-language | None | No compatible encoder/projector/LLM combination or image-conditioned test | `PLANNED` |
+| Vision-language | MiniCPM-V (upstream `opentpu/llm/minicpmv.py`, `opentpu/kernels/vit.py`) | Upstream code and tests are in the branch; not run here, no image-conditioned check | `UPSTREAM CODE; NOT RUN` |
 | Vision-language-action | None | No authentic policy, state/action metadata, offline trace, or closed-loop simulator test | `PLANNED` |
 | vLLM | No version pinned for an openTPU backend | Existing `otpu-serve` is not evidence of vLLM device execution | `PLANNED` |
-| MoE | Existing project support is present in `opentpu/llm/moe.py` and `docs/offload.md` | No new cache or performance experiment in this branch | `NOT CHANGED` |
+| MoE / MTP | Upstream `opentpu/llm/moe.py`, `mtp.py`, offload (`docs/offload.md`) | Upstream code and tests in the branch; not re-run or measured here | `UPSTREAM CODE; NOT RUN` |
 
 ## Existing LLM support
 
