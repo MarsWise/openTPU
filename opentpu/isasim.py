@@ -602,9 +602,6 @@ class Slice:
                 raise SimError("TMM: reserved ternary code 11")
             weights = np.where(codes == 1, 1, np.where(codes == 2, -1, 0)).astype(np.int64)
             for g in range(4):
-                sh = 11 - int(da[:, k, g].max())
-                if sh < 0:
-                    continue
                 lo, hi = g * group, (g + 1) * group
                 # QACT has one offset per D/4 group; hardware's two adjacent D/8
                 # ternary reductions share the same 2^(11-da) scale.
