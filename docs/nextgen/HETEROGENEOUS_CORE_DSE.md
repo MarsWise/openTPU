@@ -39,6 +39,20 @@ row, 128 MAC/cycle (board r3: 127.7 MAC/cycle at M = 1, 511.6 at M >= 4).
 | today (M = 1, one column) | 16.3 M | 122 | 520 M | 30.5 |
 | K-split (four columns, one chunk an advance) | 4.07 M | 30.5 | 520 M | 30.5 |
 
+**RTL measurement (2026-10-20, Verilator 5.046, `tools/tmm_cycles.py`, D=128 MCOLS=4, TMM of N
+rows x K = 2560 against M ACT rows, cycles of the TMM alone):**
+
+| M | N = 64 | N = 128 | MAC/cycle |
+|---|---|---|---|
+| 1 | 1,321 | 2,601 | 124-126 |
+| 2 | 1,322 | 2,602 | 248-252 |
+| 4 | 1,324 | 2,604 | 495-503 |
+
+TMM time does not depend on M: KB = 20 cycles per weight row (one K block an advance) plus
+~40 cycles of fill — the r3 card's 127.7 MAC/cycle at M = 1 is the same number. The weight
+stream at M = 1 is 640 B per 20 cycles = 32 B/cycle, a quarter of the DRAM path's 128 B/cycle:
+K-split would take it to 128 B/cycle. Evidence class: RTL SIMULATED.
+
 K-split makes decode DRAM-bound instead of compute-bound (4x on TMM time). For int8 MM nothing
 changes: one D-byte chunk is one block, already the DRAM rate.
 
