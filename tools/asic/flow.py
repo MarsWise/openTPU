@@ -80,7 +80,7 @@ def yosys() -> str:
 # multiplier and adder one and two stages deeper (LM 3, LA 6: the localparams of the VPU, the
 # stream engine and the quantizer), for the critical-path study.
 _DEEP = {f: [("localparam int LM = 2, LA = 4;", "localparam int LM = 3, LA = 6;")]
-         for f in ("vpu/otpu_vpu.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
+         for f in ("vpu/otpu_vpu.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
                    "vpu/otpu_quant.sv")}
 POINTS = {
     "small": dict(target="nangate45-small", util=35),

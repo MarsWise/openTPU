@@ -13,13 +13,20 @@ package otpu_pkg;
                          V_OUTER = 6, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
                          V_ABS = 12, V_FILL = 13, V_EXP2SUB = 14, V_LOG2 = 15, V_RSUM = 16,
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20;
+  // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
+  // otpu_se_comp only (the stream engine's composites)
+  localparam logic [7:0] V_TFN0 = 8'h20;
+  localparam int         V_TFN_N = 10;
+  function automatic logic is_tfn(input logic [7:0] f);
+    return f >= V_TFN0 && f < V_TFN0 + 8'(V_TFN_N);
+  endfunction
   // HALT flag bit0 CHAIN: load R[rb] instructions from DRAM R[ra] and start them; RLD flag
   // bit0 RAW: the word's bits instead of f2i, bit1 MUL: times R[rb] + w2 (docs/isa.md)
   localparam int HF_CHAIN = 0, RF_RAW = 0, RF_MUL = 1;
   // the composite functions' classes (otpu_se_comp's microcode; the VPU decodes a chunk's as it
   // loads it)
   localparam logic [2:0] CC_NONE = 3'd0, CC_EXP = 3'd1, CC_EXS = 3'd2, CC_RCP = 3'd3,
-                         CC_RSQ = 3'd4, CC_LOG = 3'd5;
+                         CC_RSQ = 3'd4, CC_LOG = 3'd5, CC_TFN = 3'd6;
   function automatic logic [2:0] f_cc(input logic [7:0] f);
     case (f)
       V_EXP2:    return CC_EXP;
@@ -27,7 +34,7 @@ package otpu_pkg;
       V_RECIP:   return CC_RCP;
       V_RSQRT:   return CC_RSQ;
       V_LOG2:    return CC_LOG;
-      default:   return CC_NONE;
+      default:   return is_tfn(f) ? CC_TFN : CC_NONE;
     endcase
   endfunction
   // VOP OUTER flags: one decay word T[d] for all columns / decay 1.0 (T[d] not read)

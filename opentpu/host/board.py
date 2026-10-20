@@ -1320,11 +1320,13 @@ def device_config(info: dict, **kw):
     stream = bool(caps.get("stream"))
     tpair = pair and bool((info.get("caps2") or {}).get("tpair"))
     tquad = pair and bool((info.get("caps2") or {}).get("tquad"))
+    tfn = dstep and bool((info.get("caps2") or {}).get("tfn"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
                           ("STREAM", stream, "the stream engine (CAPS bit26)"),
                           ("TPAIR", tpair, "TMM PAIR (CAPS2 bit1, with CAPS bit5)"),
-                          ("TQUAD", tquad, "TMM QUAD (CAPS2 bit2, with CAPS bit5)")):
+                          ("TQUAD", tquad, "TMM QUAD (CAPS2 bit2, with CAPS bit5)"),
+                          ("TFN", tfn, "the table functions (CAPS2 bit3, with CAPS bit6)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
@@ -1332,7 +1334,7 @@ def device_config(info: dict, **kw):
                                  f"bitstream)")
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
     dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
-           "TQUAD": tquad,
+           "TQUAD": tquad, "TFN": tfn,
            "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
@@ -1404,6 +1406,8 @@ def check_hash(info: dict, cfg=None) -> None:
                            and bool((info.get("caps2") or {}).get("tpair")),
                            TQUAD=bool(caps.get("pair"))
                            and bool((info.get("caps2") or {}).get("tquad")),
+                           TFN=bool(caps.get("dstep"))
+                           and bool((info.get("caps2") or {}).get("tfn")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

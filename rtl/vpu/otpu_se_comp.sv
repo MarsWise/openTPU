@@ -19,6 +19,15 @@
 //   RECIP      6   2                 4
 //   RSQRT     10   4                 2
 //   LOG2      10   4                 2
+//   TFN        6   2                 4       (the table functions, VOP 0x20 + fn: below)
+//
+// TFN (docs/isa.md "Table functions", opentpu/tfn.py): op 0 u = a*S + O (a = x, or |x| for the
+// periodic functions; S and O the function's), RR's TFN path (the range flags, the segment
+// trunc(u) mod 256 into ii, -trunc(u) into k2, and the segment's {c2, c1, c0} from the table ROM
+// otpu_tfn_rom into cf: one synchronous read, a block RAM per lane), op 1 f = u - trunc(u)
+// (exact; v = c2), op 2 v = v*f + c1, op 3 v = v*f + c0, op 4 the post step (x*g, g + relu(x) or
+// g), op 5 the identity (six ops: TFN's passes are RECIP's at every NS, so the latency rule
+// orders them alike); finish negates for an odd function of a negative x, or gives NaN.
 //
 // Stage s of a lane is a unit y = add(mul(a, b), c) (an otpu_fmma with e = 1.0, or an
 // otpu_fmul then otpu_fadd) whose operands (st_a, st_b, st_c, st_e) are registered at the
@@ -40,6 +49,7 @@
 module otpu_se_comp
   import otpu_pkg::*;
   import otpu_fp::*;
+  import otpu_tfn_rom::*;
 #(
   parameter int LANES = 8,
   parameter int MW    = 64,       // the core's opaque chunk meta (out_meta = in_meta)
@@ -55,6 +65,7 @@ module otpu_se_comp
   // the S0 selects and the setup start at it, so it should come from a flip-flop)
   input  logic             in_v,
   input  logic [2:0]       in_c,
+  input  logic [3:0]       in_tf,            // TFN: the function (VOP func - 0x20)
   input  f32_t             in_a [LANES],     // operand A
   input  f32_t             in_b [LANES],     // operand B (EXP2SUB)
   input  logic [LANES-1:0] in_m,             // lane mask (carried)
@@ -92,6 +103,7 @@ module otpu_se_comp
       CC_EXP, CC_EXS: return 9;
       CC_RCP:         return 6;
       CC_RSQ, CC_LOG: return 10;
+      CC_TFN:         return 6;
       default:        return 1;
     endcase
   endfunction
@@ -101,6 +113,7 @@ module otpu_se_comp
       CC_EXP, CC_EXS: return 4'((9 + NS - 1) / NS);
       CC_RCP:         return 4'((6 + NS - 1) / NS);
       CC_RSQ, CC_LOG: return 4'((10 + NS - 1) / NS);
+      CC_TFN:         return 4'((6 + NS - 1) / NS);
       default:        return 4'd1;
     endcase
   endfunction
@@ -110,15 +123,18 @@ module otpu_se_comp
   // coefficient is written into v by the op before (kv: v when dst is not v), so a never
   // takes a constant. At S0 a also takes the input A and c the negated input B.
   localparam logic [1:0] A_V = 2'd0, A_K1 = 2'd1, A_K2 = 2'd2, A_X = 2'd3;
-  localparam logic [1:0] B_K1 = 2'd0, B_K2 = 2'd1, B_KB = 2'd2;
-  localparam logic [1:0] C_KC = 2'd0, C_K2 = 2'd1, C_NY = 2'd2;
+  localparam logic [1:0] B_K1 = 2'd0, B_K2 = 2'd1, B_KB = 2'd2, B_PX = 2'd3;
+  // C_T1 / C_T0: TFN's c1 / c0 (cf); B_PX, C_PR: TFN's post step (x or 1.0; relu(x) or -0)
+  localparam logic [2:0] C_KC = 3'd0, C_K2 = 3'd1, C_NY = 3'd2, C_T1 = 3'd3, C_T0 = 3'd4,
+                         C_PR = 3'd5;
   localparam logic [1:0] D_NO = 2'd0, D_V = 2'd1, D_K1 = 2'd2, D_K2 = 2'd3;
   typedef struct packed {
     logic [1:0] as;
     logic [1:0] bs;
-    logic [1:0] cs;
+    logic [2:0] cs;
     logic [1:0] dst;
     logic       neg;
+    logic       kt;          // v takes TFN's c2 (cf) at the output
     f32_t       kb;
     f32_t       kc;
     f32_t       kv;
@@ -142,7 +158,8 @@ module otpu_se_comp
   // v = v*1 + -0
   function automatic uc_t ucode(input logic [2:0] c, input int k);
     uc_t u;
-    u = '{as: A_V, bs: B_KB, cs: C_KC, dst: D_V, neg: 1'b0, kb: F_ONE, kc: F_NZ, kv: F_ZERO};
+    u = '{as: A_V, bs: B_KB, cs: C_KC, dst: D_V, neg: 1'b0, kt: 1'b0, kb: F_ONE, kc: F_NZ,
+          kv: F_ZERO};
     case (c)
       CC_EXP, CC_EXS: begin
         if (k == 0) begin                                            // v = x (- y)
@@ -185,6 +202,18 @@ module otpu_se_comp
         end else if (k == 9) begin                                   // q*t + i2f(e)
           u.bs = B_K1; u.cs = C_K2;
         end
+      CC_TFN:
+        if (k == 0) begin                                            // u = a*S + O (S0's muxes)
+          u.as = A_X;
+        end else if (k == 1) begin                                   // f = u - trunc(u); v = c2
+          u.cs = C_K2; u.dst = D_K2; u.kt = 1'b1;
+        end else if (k == 2) begin                                   // v*f + c1
+          u.bs = B_K2; u.cs = C_T1;
+        end else if (k == 3) begin                                   // v*f + c0
+          u.bs = B_K2; u.cs = C_T0;
+        end else if (k == 4) begin                                   // x*g, g + relu(x), g
+          u.bs = B_PX; u.cs = C_PR;
+        end
       default: ;
     endcase
     return u;
@@ -193,11 +222,11 @@ module otpu_se_comp
   // What stage s's ops use, over every function and pass (elaboration time): the operand and
   // destination muxes keep only those inputs. At NS = 3, e.g., Q's c is a constant or k2 (RECIP's
   // y*e + y) and Q never writes k1.
-  function automatic logic [3:0] st_use(input int s, input int w);   // w: 0 a, 1 b, 2 c, 3 dst
-    logic [3:0] m;
+  function automatic logic [7:0] st_use(input int s, input int w);   // w: 0 a, 1 b, 2 c, 3 dst
+    logic [7:0] m;
     uc_t u;
     m = '0;
-    for (int c = 1; c <= 5; c++)
+    for (int c = 1; c <= 6; c++)
       for (int p = 0; p < int'(n_pass(3'(c))); p++) begin
         u = ucode(3'(c), p * NS + s);
         case (w)
@@ -212,11 +241,21 @@ module otpu_se_comp
   // ... and whether one of them writes a constant into v (kv)
   function automatic logic kv_use(input int s);
     uc_t u;
-    for (int c = 1; c <= 5; c++)
+    for (int c = 1; c <= 6; c++)
       for (int p = 0; p < int'(n_pass(3'(c))); p++) begin
         u = ucode(3'(c), p * NS + s);
         if (u.dst != D_V && u.kv != F_ZERO) return 1'b1;
       end
+    return 1'b0;
+  endfunction
+
+  // ... and whether one of them takes TFN's c2 into v (kt)
+  function automatic logic kt_use(input int s);
+    uc_t u;
+    for (int p = 0; p < int'(n_pass(CC_TFN)); p++) begin
+      u = ucode(CC_TFN, p * NS + s);
+      if (u.kt) return 1'b1;
+    end
     return 1'b0;
   endfunction
 
@@ -225,19 +264,23 @@ module otpu_se_comp
   function automatic uc_t uc_rom(input logic [2:0] c, input logic [3:0] p, input int s);
     uc_t u;
     u = ucode(CC_NONE, 0);
-    for (int ci = 1; ci <= 5; ci++)
+    for (int ci = 1; ci <= 6; ci++)
       for (int pi = 0; pi < 16; pi++)
         if (c == 3'(ci) && p == 4'(pi)) u = ucode(3'(ci), pi * NS + s);
     return u;
   endfunction
 
   // ---------------------------------------------------------------- state and meta
+  // TFN: tf its function, cf the segment's {c2, c1, c0} (from RR); f[0] NaN, f[2] negate; ii
+  // {tail, segment} (a tail: ii[0] hi)
   typedef struct packed {
-    f32_t       v, k1, k2;
-    logic [8:0] ii;
-    logic [2:0] f;
+    f32_t        v, k1, k2;
+    logic [8:0]  ii;
+    logic [2:0]  f;
+    logic [3:0]  tf;
+    logic [95:0] cf;
   } cst_t;
-  localparam int KW = 32 + 32 + 9 + 3;     // the fields carried along a stage (not v)
+  localparam int KW = 32 + 32 + 9 + 3 + 4 + 96;   // the fields carried along a stage (not v)
   typedef struct packed {
     logic [2:0]       cls;
     logic [3:0]       pass;
@@ -259,7 +302,7 @@ module otpu_se_comp
   // exponent field 127) and RSQRT on a scaled x out of range (otpu_fp's rsq_lo, rsq_hi; the
   // seed's constant takes the scaling); both carry the result's exponent adjustment in ii
   // (RECIP's rcp_ek), which finish adds as EXP2's i.
-  function automatic cst_t setup(input logic [2:0] c, input f32_t x);
+  function automatic cst_t setup(input logic [2:0] c, input f32_t x, input logic [3:0] tf);
     cst_t t;
     f32_t xz, ax, sd, mg;
     logic ge, z, rcp, lo, hi;
@@ -287,8 +330,11 @@ module otpu_se_comp
       CC_RCP: t.f = {xz[31], (ax >= 32'h7E80_0000), (ax == 0)};
       CC_RSQ: t.f = {2'b00, (xz[31] || z || xz == F_INF)};
       CC_LOG: t.f = {!z && (xz[31] || is_nan(xz)), xz == F_INF, z};  // NaN, +inf, -inf
+      CC_TFN: t.f = {tfn_desc(tf).odd && xz[31], 2'b00};
       default: ;
     endcase
+    if (c == CC_TFN) t.k1 = x;                                        // the post step's x
+    t.tf = tf;
     return t;
   endfunction
 
@@ -332,6 +378,7 @@ module otpu_se_comp
                              (t.f[2] ? fneg(ve) : ve);
       CC_RSQ:         return t.f[0] ? F_ZERO : ve;
       CC_LOG:         return t.f[0] ? F_NINF : t.f[2] ? F_NAN : t.f[1] ? F_INF : t.v;
+      CC_TFN:         return t.f[0] ? F_NAN : t.f[2] ? fneg(t.v) : t.v;
       default:        return F_ZERO;
     endcase
   endfunction
@@ -414,7 +461,7 @@ module otpu_se_comp
   // after the input, so the result's path to the next stage (y, the destination mux, RR)
   // starts at flip-flops, as does RR's flags' (pass 0 of EXP2 / LOG2)
   uc_t uci [NS], uco [NS];
-  logic rr_e, rr_g;
+  logic rr_e, rr_g, rr_t;
   for (genvar s = 0; s < NS; s++) begin : g_uc
     if (s == 0) begin : g_u0
       assign uci[s] = ret ? uc_rt : uc_rom(in_c, 4'd0, 0);
@@ -428,6 +475,7 @@ module otpu_se_comp
       always_ff @(posedge clk) if (en) begin
         rr_e <= (cp[3:0] == 0) && (cp[6:4] == CC_EXP || cp[6:4] == CC_EXS);
         rr_g <= (cp[3:0] == 0) && (cp[6:4] == CC_LOG);
+        rr_t <= (cp[3:0] == 0) && (cp[6:4] == CC_TFN);
       end
     end
   end
@@ -439,21 +487,41 @@ module otpu_se_comp
         $fatal(1, "otpu_se_comp: output control out of step");
   end
 `endif
-  logic e1, e2, g1, g2;
+  logic e1, e2, g1, g2, t1, t2;
   always_ff @(posedge clk) if (en) begin
-    e1 <= rr_e; g1 <= rr_g;
-    e2 <= e1;   g2 <= g1;
+    e1 <= rr_e; g1 <= rr_g; t1 <= rr_t;
+    e2 <= e1;   g2 <= g1;   t2 <= t1;
   end
+
+  // TFN's trunc(u) for u flushed, finite and >= 0: the integer part's bits as fp32, and the
+  // integer mod 256 (the segment)
+  localparam f32_t F_256 = 32'h4380_0000;
+  function automatic f32_t tfn_trb(input f32_t u);
+    logic [7:0] e;
+    e = u[30:23];
+    if (e < 8'd127) return F_ZERO;
+    if (e >= 8'd150) return u;
+    return {u[31:23], u[22:0] & ~(23'h7F_FFFF >> (e - 8'd127))};
+  endfunction
+  function automatic logic [7:0] tfn_seg(input f32_t u);
+    logic [7:0]  e;
+    logic [31:0] m;
+    e = u[30:23];
+    m = {8'd1, u[22:0]};
+    if (e < 8'd127 || e >= 8'd158) return 8'd0;
+    return 8'((e >= 8'd150) ? (m << (e - 8'd150)) : (m >> (8'd150 - e)));
+  endfunction
 
   // ---------------------------------------------------------------- lanes
   for (genvar l = 0; l < LANES; l++) begin : g_lane
     cst_t sti [NS], sto [NS], stp [NS];    // state at each stage's input, output, after it
-    assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l]);
+    assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l], in_tf);
 
     for (genvar s = 0; s < NS; s++) begin : g_st
-      localparam logic [3:0] AU = st_use(s, 0), BU = st_use(s, 1), CU = st_use(s, 2),
+      localparam logic [7:0] AU = st_use(s, 0), BU = st_use(s, 1), CU = st_use(s, 2),
                              DU = st_use(s, 3);
-      localparam logic       KVU = kv_use(s);
+      localparam logic       KVU = kv_use(s), KTU = kt_use(s);
+      localparam bit         T0 = (s == 0);      // TFN's op 0 (pass 0) is at S0
       f32_t a, b, c, y;
       always_comb begin
         cst_t t;
@@ -461,19 +529,28 @@ module otpu_se_comp
         case (uci[s].as)
           A_K1:    a = AU[A_K1] ? t.k1 : t.v;
           A_K2:    a = AU[A_K2] ? t.k2 : t.v;
-          A_X:     a = (s == 0 && AU[A_X]) ? in_a[l] : t.v;     // pass 0 is at S0
+          A_X:     a = (s == 0 && AU[A_X]) ?                    // pass 0 is at S0
+                       ((T0 && !ret && in_c == CC_TFN && tfn_desc(in_tf).per) ? fabs(in_a[l])
+                                                                              : in_a[l]) : t.v;
           default: a = t.v;
         endcase
         case (uci[s].bs)
           B_K1:    b = BU[B_K1] ? t.k1 : uci[s].kb;
           B_K2:    b = BU[B_K2] ? t.k2 : uci[s].kb;
-          // RSQRT's op 0 (pass 0, at S0): h's factor per lane (rsq_h; the ROM's is 0.5)
-          default: b = (s == 0 && !ret && in_c == CC_RSQ) ? rsq_h(in_a[l]) : uci[s].kb;
+          B_PX:    b = (BU[B_PX] && tfn_desc(t.tf).post == 2'd1) ? t.k1 : F_ONE;
+          // RSQRT's op 0 (pass 0, at S0): h's factor per lane (rsq_h; the ROM's is 0.5); TFN's
+          // op 0: the function's S
+          default: b = (s == 0 && !ret && in_c == CC_RSQ) ? rsq_h(in_a[l]) :
+                       (T0 && !ret && in_c == CC_TFN) ? tfn_desc(in_tf).s : uci[s].kb;
         endcase
         case (uci[s].cs)
           C_K2:    c = CU[C_K2] ? t.k2 : uci[s].kc;
           C_NY:    c = (s == 0 && CU[C_NY]) ? fneg(in_b[l]) : uci[s].kc;
-          default: c = uci[s].kc;
+          C_T1:    c = CU[C_T1] ? t.cf[63:32] : uci[s].kc;
+          C_T0:    c = CU[C_T0] ? t.cf[31:0] : uci[s].kc;
+          C_PR:    c = (CU[C_PR] && tfn_desc(t.tf).post == 2'd2 && fp_gt(t.k1, F_ZERO)) ?
+                       ftz(t.k1) : F_NZ;                    // relu(x), or -0
+          default: c = (T0 && !ret && in_c == CC_TFN) ? tfn_desc(in_tf).o : uci[s].kc;
         endcase
       end
       assign st_a[s][l] = a;
@@ -491,14 +568,16 @@ module otpu_se_comp
       end
       // the carried fields, SL cycles (v is the stage's result or dead)
       logic [KW-1:0] kd;
-      otpu_delay #(.W(KW), .N(SL)) u_k (.clk, .en(en_l[l]), .d({sti[s].k1, sti[s].k2, sti[s].ii, sti[s].f}),
-                                        .q(kd));
+      otpu_delay #(.W(KW), .N(SL)) u_k (.clk, .en(en_l[l]),
+                                        .d({sti[s].k1, sti[s].k2, sti[s].ii, sti[s].f, sti[s].tf,
+                                            sti[s].cf}), .q(kd));
       always_comb begin
         f32_t r;
         r = uco[s].neg ? fneg(y) : y;
         sto[s] = '0;
-        {sto[s].k1, sto[s].k2, sto[s].ii, sto[s].f} = kd;
+        {sto[s].k1, sto[s].k2, sto[s].ii, sto[s].f, sto[s].tf, sto[s].cf} = kd;
         sto[s].v = KVU ? uco[s].kv : F_ZERO;
+        if (KTU && uco[s].kt) sto[s].v = sto[s].cf[95:64];
         case (uco[s].dst)
           D_V:  sto[s].v  = r;
           D_K1: if (DU[D_K1]) sto[s].k1 = r;
@@ -508,11 +587,15 @@ module otpu_se_comp
       end
 
       if (s == 0) begin : g_rr
-        // RR: EXP2 f = (hi, lo) | i = floor(v) | k2 = -i2f(i); LOG2 k2 = i2f(e)
+        // RR: EXP2 f = (hi, lo) | i = floor(v) | k2 = -i2f(i); LOG2 k2 = i2f(e). TFN: the
+        // flags (u = v at a tail or NaN: v = 0) | the segment | k2 = -trunc(u), cf the
+        // segment's coefficients (the ROM's synchronous read: a block RAM)
         cst_t q0, q1, q2;
+        logic [95:0] rom_q;
+        logic        rom_t, rom_h;                // q2's: a tail, its hi
         always_ff @(posedge clk) if (en_l[l]) begin
           cst_t t;
-          logic lo, hi;
+          logic lo, hi, bad, per;
           t = sto[s];
           if (rr_e) begin
             // x < -126 or x >= 128 (or NaN): the result is +0 or +inf whatever the steps
@@ -521,18 +604,38 @@ module otpu_se_comp
             hi = !fp_gt(F_128, t.v);
             t.f = {1'b0, hi, lo};
           end
+          if (rr_t) begin
+            per = tfn_desc(t.tf).per;
+            bad = per && (t.v[30:23] == 8'hFF);
+            lo = !per && fp_gt(F_ZERO, t.v);
+            hi = !per && !fp_gt(F_256, t.v);
+            t.f[0] = bad;
+            t.ii = {lo || hi, 7'd0, hi};
+            if (bad || lo || hi) t.v = F_ZERO;
+          end
           q0 <= t;
           t = q0;
           if (e1) t.ii = rr_floor(q0.v);
+          if (t1 && !q0.ii[8]) t.ii[7:0] = tfn_seg(q0.v);
           q1 <= t;
           t = q1;
           if (e2 || g2) begin
             t.k2 = i2f9(q1.ii);
             t.k2[31] = t.k2[31] ^ e2;
           end
+          if (t2) t.k2 = fneg(tfn_trb(q1.v));
           q2 <= t;
+          rom_q <= TFN_COEF[{tfn_desc(q1.tf).tbl, q1.ii[7:0]}];
+          rom_t <= t2 && q1.ii[8];
+          rom_h <= q1.ii[0];
         end
-        assign stp[s] = q2;
+        // the coefficients enter the state with q2 (TFN pass 0 only; a tail: {0, 0, the tail})
+        logic t3;
+        always_ff @(posedge clk) if (en_l[l]) t3 <= t2;
+        always_comb begin
+          stp[s] = q2;
+          if (t3) stp[s].cf = rom_t ? {64'd0, TFN_TAIL[{tfn_desc(q2.tf).tbl, rom_h}]} : rom_q;
+        end
       end else begin : g_nrr
         assign stp[s] = sto[s];
       end

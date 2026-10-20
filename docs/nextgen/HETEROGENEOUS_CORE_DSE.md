@@ -178,3 +178,29 @@ Evidence class: **RTL SIMULATED**. Timing risk for the Vivado build: the 4-input
 sum is one cycle (PAIR's was 2-input) and the PE's ternary select gains a 4:1 code mux; WNS on r3
 is +0.011 ns. If the build misses, the sum takes a register (LROW + 1). Resources: ~MCOLS x D
 two-bit selects and registers in the PEs, three 16-bit block addresses to the ACT RAM.
+
+## R-series (2026-10-20): RTL acceleration for r5, ranked by the measured profile
+
+Profile (RTL SIMULATED, Verilator, board uarch m4 D=128 MCOLS=4 MXU_E=4, `opentpu/profile.py`,
+script `wk/prof.py` in the session scratchpad; tree `444c32ad`):
+
+| kernel | MAC/cycle | busy (MXU / QUANT / VPU / DMA) | the time goes to |
+|---|---|---|---|
+| conv3x3 C128 16x16 (SiLU) | 276.5 | 0.72 / 0.31 / 0.39 / 0.16 | MM 163k, QACT 42k, VOP.fill 18k, exp2 13k, recip 9k cycles |
+| linear 16x1024x1024 | 406.4 | 0.95 / 0.05 / 0.09 / 0.12 | MXU-bound (fill 16k: the bias) |
+| sdpa H2 L128 d64 | 34.8 | 0.65 / 0.74 / 0.28 / 0.16 | QST 71k (V^T's strided bytes, one a cycle), exp2sub 32k |
+| silu 16x1024 (5 VOPs) | 0.79 elem/cycle | VPU 0.80 | exp2 6.2k, recip 4.1k, mul 4.1k, add 2.1k |
+
+| id | block | status | why |
+|---|---|---|---|
+| R2 | TFN: table functions VOP 0x20..0x29 (sigmoid, SiLU, tanh, GELU erf/tanh, softplus, Mish, QuickGELU, sin, cos) on otpu_se_comp, BRAM tables | RTL SIMULATED (this commit) | every family's activations: 1 VOP at 4 col/cycle instead of 5-8 VOPs at ~1 |
+| R2b | conv2d: two output tiles (VPU/store of one overlaps the MXU of the other) | SOFTWARE (this commit) | the VPU's bias fill + activation stop serializing with the MMs |
+| R6 | QST transposed writes (V^T: four rows' bytes a word a cycle) | PLANNED | attention prefill everywhere (ViT/VLM/SD/VLA/LLM prefill): QST 59% of sdpa |
+| R3 | fused row/column affine VOP (LayerNorm, RMSNorm, GroupNorm, AdaLN) | PLANNED | 6 passes -> 3 for LN |
+| R4 | MAC VOP (dst += A * C(c)) / depthwise engine | PLANNED | depthwise 2 passes a tap -> 1 (YOLO-nano/v10/v11, MobileNet) |
+| R7 | m8 (8 MX columns) at 133 MHz | PLANNED | 2x MACs; upstream r2.1 does not close timing yet |
+
+The fused bias + activation in the MXU epilogue (R1 in the first list) is deferred: with TFN at
+4 columns a cycle and double-buffered output tiles the activation overlaps the MXU (the conv's
+MXU produces ~0.25 outputs a cycle), so the epilogue fusion would save little against its cost
+(a pipelined TFN per epilogue lane and an MM encoding change: MM's flags are fully allocated).

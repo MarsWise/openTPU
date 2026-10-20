@@ -97,7 +97,7 @@ set rtl [list \
   rtl/mem/otpu_tmem.sv rtl/mem/otpu_actram.sv \
   rtl/seq/otpu_seq.sv rtl/vpu/otpu_vtree.sv rtl/dma/otpu_dma.sv \
   rtl/mxu/otpu_mxu.sv rtl/tech/xilinx7/otpu_tech_dsp.sv rtl/tech/generic/otpu_tech_ram.sv \
-  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
+  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
   rtl/top/otpu_slice.sv \
   rtl/shell/otpu_ctrl.sv rtl/shell/otpu_trace.sv \
   rtl/shell/otpu_board.sv rtl/mem/otpu_native_dram.sv \
@@ -129,7 +129,9 @@ set SEQ_WC [expr {[info exists ::env(OTPU_SEQ_WC_GEN)] ? $::env(OTPU_SEQ_WC_GEN)
 set TPAIR [expr {[info exists ::env(OTPU_TPAIR_GEN)] ? $::env(OTPU_TPAIR_GEN) eq "1" : 0}]
 # TMM QUAD in CAPS2 bit2 (run_vivado.sh: TQUAD=1 or the target's [arch] TQUAD)
 set TQUAD [expr {[info exists ::env(OTPU_TQUAD_GEN)] ? $::env(OTPU_TQUAD_GEN) eq "1" : 0}]
-set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
+# the table functions in CAPS2 bit3 (run_vivado.sh: TFN=1 or the target's [arch] TFN)
+set TFN [expr {[info exists ::env(OTPU_TFN_GEN)] ? $::env(OTPU_TFN_GEN) eq "1" : 0}]
+set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
 
 # ---- constraints: the board (otpu_top_ld.xdc) and the core's pads, VREF and synchronizers
 # (otpu_litedram.xdc); then, after the IP's constraints, as unmanaged Tcl on the implemented

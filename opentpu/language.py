@@ -31,7 +31,7 @@ __all__ = ["jit", "program_id", "num_programs", "block_size", "tmem_words", "mxu
            "recip", "rsqrt", "abs", "maximum", "minimum", "max", "sum", "sumsq", "outer", "full",
            "zeros",
            "empty", "all_gather", "all_reduce", "range", "static_range", "kv_append", "Tensor", "QTensor",
-           "KVDesc", "Tile", "CompileError", "LOG2E", "LN2"]
+           "KVDesc", "Tile", "CompileError", "LOG2E", "LN2", "has_tfn", "tfn"]
 
 LOG2E = 1.0 / math.log(2.0)
 LN2 = math.log(2.0)
@@ -200,6 +200,21 @@ def recip(x) -> Tile:
 def rsqrt(x) -> Tile:
     """1/sqrt(x) (VOP RSQRT, within 1.03 ulp, exact at powers of four); +0 for x <= 0, +inf."""
     return current().unop(I.V_RSQRT, x)
+
+
+def has_tfn() -> bool:
+    """The target runs the table functions (Config.TFN: VOP 0x20..0x29, opentpu/tfn.py)."""
+    return bool(getattr(current().cfg, "TFN", False))
+
+
+def tfn(name: str, x) -> Tile:
+    """A table function of x in one VOP (opentpu/tfn.py: sigmoid, silu, tanh, gelu, gelu_tanh,
+    softplus, mish, quick_gelu, sin, cos; ~1e-6 absolute against float64). Needs Config.TFN
+    (has_tfn): kernels/lib.py's activations take it when the target has it."""
+    from . import tfn as T
+    if not has_tfn():
+        raise CompileError(f"tfn({name!r}): the target has no table functions (Config.TFN)")
+    return current().unop(T.func_code(name), x)
 
 
 def abs(x) -> Tile:  # noqa: A001

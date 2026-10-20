@@ -106,7 +106,7 @@ def test_caps2_gather_and_the_load_refusal():
     gather = I.assemble([I.gather(0, 256, 4, 64, 256, 64, 0), I.halt()])
     bar = I.assemble([I.bar(), I.halt()])
     b = Board(FakeTransport(devname=None, regmap=5, gather=False))
-    assert b.info()["caps2"] == {"gather": False, "tpair": False, "tquad": False}
+    assert b.info()["caps2"] == {"gather": False, "tpair": False, "tquad": False, "tfn": False}
     assert not b.gather
     with pytest.raises(NoGather, match="instruction 0"):
         b.load_program(4096, gather)
@@ -124,11 +124,13 @@ def test_caps2_gather_and_the_load_refusal():
     names = {n for g, n, _ in op_checks(cfg)}
     assert "GATHER" in names
     assert names - {n for g, n, _ in op_checks(cfg, gather=False)} == {"GATHER"}
-    assert R.caps2(None) == {"gather": True, "tpair": False, "tquad": False}
-    assert R.caps2(0) == {"gather": False, "tpair": False, "tquad": False}
+    assert R.caps2(None) == {"gather": True, "tpair": False, "tquad": False, "tfn": False}
+    assert R.caps2(0) == {"gather": False, "tpair": False, "tquad": False, "tfn": False}
     assert R.caps2(R.CAP2_GATHER | R.CAP2_TPAIR) == {"gather": True, "tpair": True,
-                                                     "tquad": False}
-    assert R.caps2(R.CAP2_TQUAD) == {"gather": False, "tpair": False, "tquad": True}
+                                                     "tquad": False, "tfn": False}
+    assert R.caps2(R.CAP2_TQUAD) == {"gather": False, "tpair": False, "tquad": True,
+                                     "tfn": False}
+    assert R.caps2(R.CAP2_TFN)["tfn"] and not R.caps2(R.CAP2_TQUAD)["tfn"]
 
 
 def test_ddr_rate(monkeypatch, capsys):

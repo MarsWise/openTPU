@@ -10,6 +10,7 @@ import pytest
 
 from opentpu import fp32 as F
 from opentpu import rtlsim
+from opentpu import tfn as T
 
 V_EXP2, V_RECIP, V_RSQRT, V_EXP2SUB, V_LOG2 = 9, 10, 11, 14, 15
 FUNCS = [V_EXP2, V_EXP2SUB, V_RECIP, V_RSQRT, V_LOG2]
@@ -68,6 +69,8 @@ def reference(f, x, y):
 
 
 def _reference(f, x, y):
+    if T.is_tfn(f):
+        return T.tfn(f - T.V_TFN0, x)
     return {V_EXP2: lambda: F.exp2(x), V_EXP2SUB: lambda: F.exp2(F.sub(x, y)),
             V_RECIP: lambda: F.recip(x), V_RSQRT: lambda: F.rsqrt(x),
             V_LOG2: lambda: F.log2(x)}[f]()
@@ -94,7 +97,8 @@ def run_comp(chunks, tmp_path, lanes=8, ns=3, ext=0, ha=2, ipct=100, epct=0, see
     fin.write_text("\n".join(lines) + "\n")
     R = rtlsim.RTL
     exe = rtlsim.build("tb_se_comp", [R / "vpu/otpu_fp.sv", R / "vpu/otpu_fpipe.sv",
-                                      R / "top/otpu_pkg.sv", R / "vpu/otpu_se_comp.sv",
+                                      R / "top/otpu_pkg.sv", R / "vpu/otpu_tfn_rom.sv",
+                                      R / "vpu/otpu_se_comp.sv",
                                       rtlsim.TB / "tb_se_comp.sv"],
                        {"LANES": lanes, "NS": ns, "EXT": ext, "HA": ha})
     r = rtlsim.run_sim([exe, f"+in={fin}", f"+out={fout}"], timeout=600)
@@ -217,3 +221,83 @@ def test_se_comp_throughput(tmp_path):
         check(chunks, got)
         rates[f] = n * 8 / cyc
         assert abs(rates[f] - 8 / p) < 0.05 * 8 / p, rates
+
+
+# ---------------------------------------------------------------- TFN, the table functions
+TFNS = list(range(T.V_TFN0, T.V_TFN0 + T.NFUNC))
+
+
+def _tfn_values(rng, fn, n):
+    """Inputs of table function fn: its segment edges (each u = k, one ulp either side), the
+    tails' limits, the edge words, wide random words and a dense range."""
+    d = T.FUNCS[fn]
+    k = np.arange(0, T.NSEG + 1, dtype=np.float64)
+    if d.periodic:
+        k = np.concatenate([k, k + 256 * rng.integers(1, 4000, len(k))])
+        e = F.f32((k - d.O) / d.S)
+    else:
+        e = F.f32((k - d.O) / d.S)
+    e = np.concatenate([e, np.nextafter(e, np.float32(np.inf)), np.nextafter(e, np.float32(-np.inf)),
+                        -e]).astype(np.float32)
+    big = F.f32([2.0 ** 23, 2.0 ** 24 + 3, 2.0 ** 31, 2.0 ** 40, 1e30, 3e38, 2.0 ** 22 + 0.5])
+    w = _words(rng, n)
+    dense = F.f32(rng.uniform(-40, 40, n))
+    return np.concatenate([e, big, -big, EDGE, -EDGE, NANS, w, dense]).astype(np.float32)
+
+
+def _chunks_of(f, v):
+    v = np.resize(v, -(-len(v) // 8) * 8).astype(np.float32)
+    z = np.zeros(8, np.float32)
+    return [(f, v[k:k + 8], z) for k in range(0, len(v), 8)]
+
+
+@pytest.mark.parametrize("f", TFNS)
+def test_se_comp_tfn_each(f, tmp_path):
+    """Each table function bit for bit against opentpu/tfn.py: segment edges, tails, periodic
+    wrap-around, huge, denormal, infinite and NaN inputs, random words."""
+    rng = np.random.default_rng(f)
+    chunks = _chunks_of(f, _tfn_values(rng, f - T.V_TFN0, 400))
+    got, _ = run_comp(chunks, tmp_path)
+    check(chunks, got)
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_se_comp_tfn_mixed(seed, tmp_path):
+    """TFN interleaved with the other composites, random gaps and enable stalls."""
+    rng = np.random.default_rng(300 + seed)
+    chunks = []
+    for _ in range(30):
+        f = int(rng.choice(FUNCS + TFNS))
+        k = int(rng.choice([1, 2, 5, 25, 26]))
+        if T.is_tfn(f):
+            chunks += _chunks_of(f, rng.choice(_tfn_values(rng, f - T.V_TFN0, 64), 8 * k))
+        else:
+            x, y = _operands(rng, f, 8 * k)
+            chunks += [(f, x[i * 8:(i + 1) * 8], y[i * 8:(i + 1) * 8]) for i in range(k)]
+    got, _ = run_comp(chunks, tmp_path, ipct=int(rng.choice([100, 70])), epct=25, seed=seed)
+    check(chunks, got)
+
+
+@pytest.mark.parametrize("ns,ext,ha", [(3, 1, 2), (2, 0, 2), (4, 0, 1), (1, 0, 2)])
+def test_se_comp_tfn_configs(ns, ext, ha, tmp_path):
+    """TFN at other stage counts (its ops land on other stages and passes) and EXT units."""
+    rng = np.random.default_rng(50 + ns)
+    chunks = []
+    for f in TFNS:
+        chunks += _chunks_of(f, rng.choice(_tfn_values(rng, f - T.V_TFN0, 32), 24))
+    chunks += _program(rng, 4, 8)
+    order = rng.permutation(len(chunks))
+    chunks = [chunks[i] for i in order]
+    got, _ = run_comp(chunks, tmp_path, ns=ns, ext=ext, ha=ha, ipct=80, epct=20, seed=ns)
+    check(chunks, got)
+
+
+def test_se_comp_tfn_throughput(tmp_path):
+    """TFN at full rate: 4 columns a cycle (two passes of T = 25 cycles), 8 lanes, NS = 3."""
+    rng = np.random.default_rng(9)
+    n = 25 * 40
+    x = F.f32(rng.uniform(-10, 10, n * 8))
+    chunks = [(T.V_TFN0 + 1, x[i * 8:(i + 1) * 8], np.zeros(8, np.float32)) for i in range(n)]
+    got, cyc = run_comp(chunks, tmp_path)
+    check(chunks, got)
+    assert abs(n * 8 / cyc - 4.0) < 0.2, n * 8 / cyc

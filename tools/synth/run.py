@@ -24,7 +24,7 @@ BASE = ["vpu/otpu_fp.sv", "vpu/otpu_fpipe.sv", "top/otpu_pkg.sv",
 ALL = ["mem/otpu_tmem.sv", "mem/otpu_native_dram.sv", "mem/otpu_actram.sv",
        "seq/otpu_seq.sv", "vpu/otpu_vtree.sv", "dma/otpu_dma.sv", "mxu/otpu_mxu.sv",
        "tech/xilinx7/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv",
-       "vpu/otpu_quant.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv", "vpu/otpu_vpu.sv",
+       "vpu/otpu_quant.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv", "vpu/otpu_vpu.sv",
        "top/otpu_coll.sv", "top/otpu_slice.sv", "shell/otpu_ctrl.sv",
        "shell/otpu_trace.sv", "shell/otpu_board.sv"]
 
@@ -35,7 +35,7 @@ COMPONENTS = {
                  dict(D=128, LANES=8)),
     "otpu_mxu": (["mxu/otpu_mxu.sv", "tech/xilinx7/otpu_tech_dsp.sv"], dict(D=128, MCOLS=4, DEPTH=1024, LANES=8, IMPL=2)),
     "otpu_quant": (["vpu/otpu_quant.sv"], dict(D=128, LANES=8)),
-    "otpu_vpu": (["vpu/otpu_vtree.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
+    "otpu_vpu": (["vpu/otpu_vtree.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
                   "vpu/otpu_vpu.sv"], dict(LANES=8)),
     "otpu_tmem": (["mem/otpu_tmem.sv"], dict(WORDS=65536, LANES=8, NRP=8, NWP=4, WPB=1)),
     "otpu_actram": (["mem/otpu_actram.sv"], dict(D=128, MCOLS=4, BLOCKS=128, LANES=8)),

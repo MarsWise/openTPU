@@ -101,12 +101,16 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     bias = ol.load(b)
     rows = ol.empty([KH, rw])
     groups = [(o, min(R, OW - o)) for o in range(0, OW, R)]
-    out = ol.empty([R, Cout])
+    # two output tiles when TMEM has room: the VPU's bias fill, activation and residual and the
+    # store of one tile overlap the MXU's MMs into the other (the sequencer runs units
+    # concurrently on disjoint TMEM)
+    nbuf = 2 if 2 * R * Cout + KH * rw + 3 * Cout + 4096 <= ol.tmem_words() else 1
+    outs = [ol.empty([R, Cout]) for _ in range(nbuf)]
 
-    def row(oh):
+    def row(oh, par=0):
         ol.load(x[oh * stride:oh * stride + KH, :], out=rows)
-        for ow0, n in groups:
-            yt = out[0:n, :]
+        for gi, (ow0, n) in enumerate(groups):
+            yt = outs[(par + gi) % nbuf][0:n, :]
             yt.set(bias[None, :])
             for kh in range(KH):
                 patches = rows.windows(kh, ow0 * stride * Cin, n, stride * Cin, Kp)
@@ -123,6 +127,13 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     rbuf = ol.empty([R, Cout]) if res is not None else None
     if OH == 1:
         row(0)
+    elif nbuf == 2 and len(groups) % 2 == 1:
+        # an odd number of tiles a row: two rows an iteration, so the tiles still alternate
+        for oh2 in ol.range(OH // 2):
+            row(2 * oh2, 0)
+            row(2 * oh2 + 1, 1)
+        if OH % 2:
+            row(OH - 1, 0)
     else:
         for oh in ol.range(OH):
             row(oh)

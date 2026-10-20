@@ -9,7 +9,7 @@ RAM blocks its own QACT filled.
 
 Groups (otpu-diag's diagnosis keys on them): control, dma, mxu, quant, collective, vpu,
 vpu-reduce, vpu-composite, vpu-edge, vpu-new (RDOT / OUTER / LOG2, which bitstreams before
-ddec900 lack), gen (RLD, VOP ARGMAX, HALT CHAIN: the decode loop's instructions, CAPS bit30;
+ddec900 lack), vpu-tfn (the table functions; only with cfg.TFN, CAPS2 bit3), gen (RLD, VOP ARGMAX, HALT CHAIN: the decode loop's instructions, CAPS bit30;
 only with gen=True), waitw (WAITW whose condition holds, CAPS bit31; only with waitw=True);
 collective's GATHER only with gather=True (CAPS2 bit0: a one-slice bitstream may run BAR alone).
 
@@ -164,7 +164,7 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
 
     # ---- VPU: every function under its legal broadcast modes
     for f, name in I.VFUNCS.items():
-        if f in (I.V_OUTER, I.V_ARGMAX):
+        if f in (I.V_OUTER, I.V_ARGMAX) or f in I.TFN_FUNCS:
             continue
         if f in I.READS_B:
             modes = [("FULL", I.B_FULL), ("ROW", I.B_ROW), ("COL", I.B_COL),
@@ -196,6 +196,11 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
         add("vpu-edge", f"VOP {I.VFUNCS[f].upper()} edge values",
             [I.ld(EDGE, TE, 2 * NE), I.vop(f, RES, TE, 0, 2, NE // 2, 1, NE // 2, 0),
              I.st(OUT, RES, 2), I.halt()])
+    # ---- the table functions (CAPS2 bit3, Config.TFN): each on a tile and on the edge values
+    if getattr(cfg, "TFN", False):
+        for f in sorted(I.TFN_FUNCS):
+            add("vpu-tfn", f"VOP {I.VFUNCS[f].upper()}", _vop(f))
+            add("vpu-tfn", f"VOP {I.VFUNCS[f].upper()} edge values", _edge(f))
     if gen:
         out += _gen_checks()
     if waitw:

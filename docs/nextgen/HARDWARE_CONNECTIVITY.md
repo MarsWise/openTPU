@@ -76,7 +76,15 @@ file is not a verified programming image and was left untouched.
 
 ## Linux PCIe host
 
-Target supplied by the user: `nvx@192.168.0.156`.
+Target supplied by the user: `nvx@192.168.0.156` (later sessions: `192.168.0.192`).
+
+**2026-10-20 (user report, NOT YET VERIFIED):** the card's PCIe host is now `192.168.0.157`,
+and its slot gives the card **PCIe x8** (it trained Gen2 x4, max x8, at the previous host:
+recover_check.sh, below). The Windows helper scripts (`C:\myOpenTPU\_claude\*.cmd`) point
+there; `host157_check.cmd` runs a read-only survey of the new host (lspci link state, driver,
+XDMA nodes, repository, tools; no rescan, no BAR writes). Until it runs, the link width, BDF,
+driver and the host's repository state are NOT INSPECTED. The new host's SSH key is not in the
+session's known_hosts: the first connection asks to confirm it.
 
 - TCP port 22 is reachable from the Windows host.
 - SSH host-key lookup had no matching existing `known_hosts` entry.

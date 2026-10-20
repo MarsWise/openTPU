@@ -13,6 +13,7 @@ import numpy as np
 from . import fp32 as F
 from . import isa as I
 from . import quant as Q
+from . import tfn
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class Config:
     #                          two K blocks an advance (the K-split by two; CAPS2 bit1)
     TQUAD: bool = False      # TMM QUAD (QACT DUP4): ternary MMs of M <= MCOLS/4 rows four K
     #                          blocks an advance (the K-split by four; CAPS2 bit2)
+    TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
+    #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
     STREAM: bool = False     # the stream engine runs STREAM's hardware subset (docs/stream.md)
     ACT_ROWS: int = 0        # ACT RAM rows == max stationary rows of one MM (0: MCOLS); more
@@ -77,6 +80,7 @@ def board_config(**kw) -> Config:
                 PAIR=bool(int(env.get("OTPU_PAIR", 0))),
                 TPAIR=bool(int(env.get("OTPU_TPAIR", 0))),
                 TQUAD=bool(int(env.get("OTPU_TQUAD", 0))),
+                TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
                 SEQ_WC=bool(int(env.get("OTPU_SEQ_WC", 0))))
@@ -767,6 +771,10 @@ class Slice:
                I.V_RECIP: lambda: F.recip(A), I.V_RSQRT: lambda: F.rsqrt(A),
                I.V_ABS: lambda: F.fabs(A), I.V_FILL: lambda: F.ftz(B),
                I.V_EXP2SUB: lambda: F.exp2(F.sub(A, B)), I.V_LOG2: lambda: F.log2(A)}
+        if func in I.TFN_FUNCS:
+            if not getattr(self.cfg, "TFN", False):
+                raise SimError(f"VOP: table function {func:#x} needs Config.TFN")
+            ops[func] = lambda: tfn.tfn(func - I.V_SIGMOID, A)
         if func not in ops:
             raise SimError(f"VOP: bad func {func}")
         self.tput(didx, ops[func]())

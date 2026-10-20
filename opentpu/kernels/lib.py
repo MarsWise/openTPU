@@ -14,13 +14,29 @@ def rmsnorm(x, gamma, eps: float):
 
 
 def sigmoid(x):
-    """1 / (1 + 2^(-x*log2(e)))."""
+    """1 / (1 + 2^(-x*log2(e))); one TFN VOP on a target with the table functions."""
+    if ol.has_tfn():
+        return ol.tfn("sigmoid", x)
     return ol.recip(ol.exp2(x * -ol.LOG2E) + 1.0)
 
 
 def silu(x):
-    """x * sigmoid(x)."""
+    """x * sigmoid(x); one TFN VOP on a target with the table functions."""
+    if ol.has_tfn():
+        return ol.tfn("silu", x)
     return x * sigmoid(x)
+
+
+def gelu(x):
+    """GELU, the erf form (x Phi(x)): a table function (TFN) only."""
+    return ol.tfn("gelu", x)
+
+
+def tanh(x):
+    """tanh: one TFN VOP, else 2 sigmoid(2x) - 1 (4 VOPs)."""
+    if ol.has_tfn():
+        return ol.tfn("tanh", x)
+    return ol.recip(ol.exp2(x * (-2.0 * ol.LOG2E)) + 1.0) * 2.0 - 1.0
 
 
 # gelu_tanh's exponent x (A + B x^2): -2 sqrt(2 / pi) log2(e) (x + 0.044715 x^3)
@@ -30,19 +46,27 @@ GELU_B = GELU_A * 0.044715
 
 def gelu_tanh(x):
     """GELU, tanh approximation (gelu_pytorch_tanh): 0.5 x (1 + tanh(z)) = x sigmoid(2 z),
-    z = sqrt(2 / pi) (x + 0.044715 x^3), as x / (1 + 2^(x (A + B x^2))): 8 VOPs."""
+    z = sqrt(2 / pi) (x + 0.044715 x^3), as x / (1 + 2^(x (A + B x^2))): 8 VOPs (one TFN VOP on a
+    target with the table functions)."""
+    if ol.has_tfn():
+        return ol.tfn("gelu_tanh", x)
     return x * ol.recip(ol.exp2(x * (x * x * GELU_B + GELU_A)) + 1.0)
 
 
 def softcap(x, c: float):
     """The logit soft cap c tanh(x / c) (Gemma's final_logit_softcapping), as 2c sigmoid(2x / c)
-    - c = 2c / (1 + 2^(-2 log2(e) x / c)) - c: 5 VOPs."""
+    - c = 2c / (1 + 2^(-2 log2(e) x / c)) - c: 5 VOPs (3 with TFN's tanh)."""
+    if ol.has_tfn():
+        return ol.tfn("tanh", x * (1.0 / c)) * c
     return ol.recip(ol.exp2(x * (-2.0 * ol.LOG2E / c)) + 1.0) * (2.0 * c) - c
 
 
 def softplus(x):
     """log(1 + e^x) = max(x, 0) + ln2 * log2(1 + 2^(-|x| log2(e))), exact to ~1e-6 absolute
-    (1 + e^x rounds to 1 for x < -17: the result is then 0 instead of e^x)."""
+    (1 + e^x rounds to 1 for x < -17: the result is then 0 instead of e^x); one TFN VOP on a
+    target with the table functions."""
+    if ol.has_tfn():
+        return ol.tfn("softplus", x)
     return ol.maximum(x, 0.0) + ol.log2(ol.exp2(ol.abs(x) * -ol.LOG2E) + 1.0) * ol.LN2
 
 

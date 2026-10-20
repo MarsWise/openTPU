@@ -170,6 +170,23 @@ and their files are empty; the run script now holds a lock (v10).
 - Bitstream r4 (`TPAIR=1 TQUAD=1`, tree `bb27096f`, CFG_HASH `3fb1359e`): Vivado build started on
   the Windows host (`_claude/build_r4.cmd`), not loaded.
 
+### r5 RTL, block 1: TFN, the table functions (2026-10-20, night)
+
+The user asked for as much as possible in RTL for r5 (VLA, VLM, diffusion, image / video /
+audio generation, YOLO). Profile first (HETEROGENEOUS_CORE_DSE.md "R-series"): activations were
+the largest VPU cost (SiLU 0.79 elements/cycle as 5 VOPs; 29% of a 3x3 conv's time).
+- **TFN** (docs/isa.md "Table functions"): VOP 0x20..0x29, sigmoid, SiLU, tanh, GELU (erf),
+  GELU-tanh, softplus, Mish, QuickGELU, sin, cos; piecewise quadratic on 256 segments, tables in
+  block RAM (rtl/vpu/otpu_tfn_rom.sv, generated: tools/gen_tfn_tables.py), run on the stream
+  engine's composite loop at 4 columns a cycle. Error vs float64 <= 5e-6 (softplus 1.3e-5).
+  RTL = ISA bit for bit (tests/test_se_comp.py TFN cases, tests/test_tfn.py through the core):
+  **RTL SIMULATED**. CAPS2 bit3 / `Config.TFN` / target `TFN` (off in the production targets);
+  kernels/lib.py's activations take it when the target has it.
+- **conv2d double-buffered output tiles** (software, every bitstream): the bias fill, activation
+  and store of one tile overlap the MMs into the other.
+- New PCIe host reported by the user: `192.168.0.157`, x8 (HARDWARE_CONNECTIVITY.md; not yet
+  inspected: `host157_check.cmd`).
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published

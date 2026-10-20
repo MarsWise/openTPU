@@ -49,6 +49,13 @@ VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max"
           V_RSQRT: "rsqrt", V_ABS: "abs", V_FILL: "fill", V_EXP2SUB: "exp2sub",
           V_LOG2: "log2", V_RSUM: "rsum", V_RMAX: "rmax", V_RSSQ: "rssq", V_RDOT: "rdot",
           V_ARGMAX: "argmax"}
+# TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
+V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS = \
+    range(0x20, 0x2A)
+VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "gelu",
+               V_GELU_TANH: "gelu_tanh", V_SOFTPLUS: "softplus", V_MISH: "mish",
+               V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos"})
+TFN_FUNCS = set(range(0x20, 0x2A))
 BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
 READS_B = BINARY | {V_RDOT}          # functions that read operand B in its bmode (OUTER: B_ROW)

@@ -206,7 +206,8 @@ module otpu_vpu
       V_EXP2, V_EXP2SUB:           return 4'd9;
       V_RECIP:                     return 4'd6;
       V_RSQRT, V_LOG2:             return 4'd10;
-      default:                     return 4'd0;
+      // TFN (C8 only): six ops, RECIP's passes (the latency rule orders by slots)
+      default:                     return is_tfn(f) ? 4'd6 : 4'd0;
     endcase
   endfunction
 
@@ -966,7 +967,8 @@ module otpu_vpu
     assign sy[1] = c_uy;
     assign sy[2] = c_qy;
     otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1)) u_comp (
-      .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_a(c_ia),
+      .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_tf(m0.func[3:0]),
+      .in_a(c_ia),
       .in_b(c_ib), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),
       .hold_n(c_hold_n),
       .st_sel(c_sel), .st_a(c_sa), .st_b(c_sb), .st_c(c_sc), .st_e(c_se), .st_y(sy),
@@ -1571,6 +1573,9 @@ module otpu_vpu
           brs <= hc.w6[15:0]; func <= hf; bmode <= hc.w6[25:24];
           imm <= hc.w7;
           nslots <= n_slots(hf);
+`ifndef SYNTHESIS
+          if (is_tfn(hf) && !C8) $fatal(1, "otpu_vpu: TFN (VOP %0h) needs the stream engine", hf);
+`endif
           c16 = hc.w4[31:16];
 `ifndef SYNTHESIS
           nchunks = comp_f(hf) ? (c16 + cwid - 1) / cwid : (c16 + 16'(LANES) - 1) >> LW;
