@@ -151,6 +151,29 @@ def test_seeded_sampling_alone_and_among_others(llm):
     assert a == b and len(a) == 8
 
 
+def test_logprobs_are_the_device_logits(llm, ckpt):
+    """Sample logprobs (vLLM's raw_logprobs: log-softmax of the device's logits): the sampled
+    token's and the top 3 equal those of the Engine's logits at each step."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    from opentpu.vllm.worker import build_engine
+    p = _prompts(8, [9])[0]
+    o = llm.generate([TokensPrompt(prompt_token_ids=p)],
+                     SamplingParams(temperature=0.0, max_tokens=4, ignore_eos=True,
+                                    detokenize=False, logprobs=3), use_tqdm=False)[0].outputs[0]
+    e, _ = build_engine(ckpt, "isa", MAXLEN, 1)
+    lg = e.prefill(p)
+    for t, d in zip(o.token_ids, o.logprobs):
+        x = lg.astype(np.float64)
+        lp = x - (x.max() + np.log(np.exp(x - x.max()).sum()))
+        assert t == int(np.argmax(lg)) and d[t].rank == 1
+        for tid, v in d.items():
+            assert abs(v.logprob - lp[tid]) < 1e-5
+        assert set(d) == {t} | set(np.argsort(-lp)[:3].tolist())
+        lg = e.step(t)
+
+
 def test_preempted_requests_are_recomputed(ckpt, env, llm):
     """KV blocks for one request of max_model_len (num_gpu_blocks_override 17: 16 blocks of 16
     and vLLM's null block): two requests of 144 positions each do not fit together, the
@@ -208,8 +231,8 @@ def test_abort_frees_the_slot_and_refusals(llm, ckpt):
     assert llm.collective_rpc(lambda self: (len(self.reqs), len(self.free)))[0] == (1, SLOTS - 1)
     _gen(llm, [q], max_tokens=1)
     assert llm.collective_rpc(lambda self: (len(self.reqs), len(self.free)))[0] == (1, SLOTS - 1)
-    with pytest.raises(Exception, match="logprobs"):
-        _gen(llm, [q], max_tokens=2, logprobs=1)
+    with pytest.raises(Exception, match="penalty"):
+        _gen(llm, [q], max_tokens=2, presence_penalty=0.5)
     with pytest.raises(Exception):                     # vLLM's own length check
         _gen(llm, [list(range(MAXLEN + 4))], max_tokens=2)
 
@@ -260,8 +283,8 @@ def test_openai_server_streams_and_refuses(ckpt, tmp_path):
         want = _ref(ckpt, [t if t else 0 for t in p], 5)
         assert [int(w[1:]) for w in text.split()] == want
         with pytest.raises(urllib.error.HTTPError) as e:
-            post({"model": "tiny", "prompt": "w1 w2", "max_tokens": 2, "logprobs": 1})
-        assert e.value.code == 400 and "logprobs" in e.value.read().decode()
+            post({"model": "tiny", "prompt": "w1 w2", "max_tokens": 2, "presence_penalty": 0.5})
+        assert e.value.code == 400 and "penalty" in e.value.read().decode()
         r = json.loads(post({"model": "tiny", "prompt": "w1 w2", "max_tokens": 2}).read())
         assert r["usage"]["completion_tokens"] == 2
     finally:

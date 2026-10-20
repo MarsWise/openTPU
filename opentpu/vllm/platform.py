@@ -114,8 +114,8 @@ class OpenTPUPlatform(Platform):
         if not isinstance(params, SamplingParams):
             raise Unsupported("openTPU: generation only (no pooling)")
         bad = []
-        if params.logprobs is not None:
-            bad.append("logprobs")
+        if params.logprobs is not None and params.logprobs < 0:
+            bad.append("logprobs over the whole vocabulary (-1)")
         if params.prompt_logprobs is not None:
             bad.append("prompt_logprobs")
         if params.presence_penalty or params.frequency_penalty:

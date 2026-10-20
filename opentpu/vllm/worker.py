@@ -11,7 +11,7 @@ execute_model runs the step vLLM scheduled: each request's prompt chunk in prefi
 slot (Engine.prefill_chunks), and every request with one token to feed in one batched run
 (Engine.run_rows over their slots). sample_tokens samples each request whose scheduled tokens
 reach its last known token from the logits the device computed (greedy, temperature, top-k,
-top-p, min-p; seeded per request). A request that is preempted is recomputed from its tokens
+top-p, min-p; seeded per request; vLLM's sample logprobs). A request that is preempted is recomputed from its tokens
 (vLLM's recompute preemption). Unsupported features are refused (platform.validate_request,
 check_and_update_config, Unsupported here) -- nothing runs on the CPU in the model's place.
 """
@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from . import ENV_BACKEND
@@ -129,6 +129,29 @@ def sample(logits: np.ndarray, params, rng: np.random.Generator) -> int:
         q[keep] = p[keep]
         p = q / q.sum()
     return int(rng.choice(p.size, p=p))
+
+
+def _logprobs(ids, lps) -> LogprobsLists | None:
+    """vLLM's sample logprobs (its default logprobs_mode, raw_logprobs: log-softmax of the
+    device's logits before any temperature): per request row the sampled token first, then the
+    top k; the sampled token's rank among all (1 = the most likely)."""
+    if not lps:
+        return None
+    K = max(k for _, _, k in lps.values())
+    tok = np.zeros((len(ids), K + 1), np.int64)
+    val = np.zeros((len(ids), K + 1), np.float32)
+    rank = np.zeros(len(ids), np.int64)
+    for i, rid in enumerate(ids):
+        if rid not in lps:
+            continue
+        row, t, k = lps[rid]
+        x = row.astype(np.float64)
+        lp = x - (x.max() + np.log(np.exp(x - x.max()).sum()))
+        top = np.argsort(-lp, kind="stable")[:K]
+        tok[i, 0], val[i, 0] = t, lp[t]
+        tok[i, 1:], val[i, 1:] = top, lp[top]
+        rank[i] = int((lp > lp[t]).sum()) + 1
+    return LogprobsLists(tok, val, rank)
 
 
 class OpenTPUWorker(WorkerBase):
@@ -315,14 +338,17 @@ class OpenTPUWorker(WorkerBase):
             raise Unsupported("openTPU: no structured outputs")
         ids, logits = self._pending
         self._pending = None
-        out = []
+        out, lps = [], {}
         for rid in ids:
             if rid in logits:
                 r = self.reqs[rid]
-                t = sample(np.asarray(logits[rid]), r.params, r.rng)
+                row = np.asarray(logits[rid])
+                t = sample(row, r.params, r.rng)
                 r.tokens.append(t)
                 out.append([t])
+                if r.params.logprobs is not None:
+                    lps[rid] = (row, t, int(r.params.logprobs))
             else:
                 out.append([])
         return ModelRunnerOutput(req_ids=ids, req_id_to_index={r: i for i, r in enumerate(ids)},
-                                 sampled_token_ids=out)
+                                 sampled_token_ids=out, logprobs=_logprobs(ids, lps))
