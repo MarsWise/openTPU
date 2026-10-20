@@ -132,6 +132,68 @@ def test_tmm_pair_rtl(have_verilator, M, KB, unit, acc):
     assert np.array_equal(tmems[0], ref.slices[0].tmem)
 
 
+TMM_BIG = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=256, DRAM_BYTES=1 << 24)
+
+
+@pytest.mark.parametrize("case", ["kb255", "kb255_pair", "acc_limits", "acc_limits_pair",
+                                  "replay8", "ascale_pair"])
+def test_tmm_rtl_edges(have_verilator, case):
+    """TMM edges in the RTL against the ISA simulator, one build (ACT_BLOCKS 256): the largest KB
+    (255, one QACT of 32640 elements), accumulator limits (every weight +1 against activations
+    at the int8 limits in every group: the 48-bit sums at their largest), row replay at
+    M = ACT_ROWS = 8 (each weight chunk consumed twice) and ASCALE with PAIR; plain and TMM
+    PAIR, port stalls."""
+    cfg = TMM_BIG
+    D = cfg.D
+    rng = np.random.default_rng(sum(map(ord, case)))
+    pair = case.endswith("pair")
+    M, N, KB = {"kb255": (1, 5, 255), "kb255_pair": (2, 5, 255), "acc_limits": (4, 6, 64),
+                "acc_limits_pair": (2, 6, 64), "replay8": (8, 7, 16),
+                "ascale_pair": (2, 6, 9)}[case]
+    unit = case.startswith("acc") or case == "ascale_pair"
+    if case.startswith("acc"):
+        values = np.where(rng.random((M, KB * D)) < 0.5, 127.0, -127.0).astype(np.float32)
+        values[:, ::2] = 127.0                       # every group's maximum the int8 limit
+        weights = np.ones((N, KB * D), np.int8)
+        weights[1::2] = -1
+    else:
+        values = rng.standard_normal((M, KB * D), dtype=np.float32)
+        weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    wa, sa, oa, ia, al = 0x400000, 0x600000, 0x8000, 0x700000, 0x7F00
+    ors = N + 1
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    alpha = rng.uniform(-2, 2, M).astype(np.float32)
+    img[ia + init.nbytes:ia + init.nbytes + alpha.nbytes] = alpha.view(np.uint8)
+    asc = case == "ascale_pair"
+    prog = [I.ld(DATA, 0, M * KB * D), I.ld(ia, oa, M * ors)]
+    if asc:
+        prog.append(I.ld(ia + init.nbytes, al, M))
+    prog += [I.qact(0, M, 0, KB, KB * D, dup=pair),
+             I.tmm(wa, al if asc else (0 if unit else sa), oa, N, KB, packed.shape[1], ors, M,
+                   0, 4, unit=unit, rsc=not unit, acc=True, rmax=M <= cfg.MCOLS,
+                   ascale=al if asc else None, pair=pair),
+             I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25,
+                                 seed=sum(map(ord, case)))
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+    if pair:                                      # and TMM PAIR is plain TMM's, bit for bit
+        plain = [i if i.op != I.QACT else I.qact(0, M, 0, KB, KB * D) for i in prog]
+        plain[-2] = I.tmm(wa, al if asc else (0 if unit else sa), oa, N, KB, packed.shape[1],
+                          ors, M, 0, 4, unit=unit, rsc=not unit, acc=True, rmax=True,
+                          ascale=al if asc else None)
+        p2 = Machine(cfg, [plain], [img.copy()]).run()
+        assert np.array_equal(p2.slices[0].tmem[oa:oa + M * ors + M],
+                              ref.slices[0].tmem[oa:oa + M * ors + M])
+
+
 @pytest.mark.parametrize("M", [3, 6])
 def test_tmm_rtl_row_offsets_past_the_window(have_verilator, M):
     # QACT gives each row its own per-group offsets da; a group whose da exceeds TMM's W = 11 drops
