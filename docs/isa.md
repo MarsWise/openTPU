@@ -242,7 +242,8 @@ in CAPS2 bit1, `Config.TPAIR`) needs `2M <= MCOLS` and the operand's rows also i
 `M..2M-1` (QACT `DUP`): column `j` takes the even K blocks from row `j`, column `j + M` the odd
 ones from row `j + M`, two blocks an advance (`ceil(KB/2)` cycles a weight row instead of `KB`),
 and the two columns' exact integers are added before the epilogue — the result is plain TMM's bit
-for bit. With an odd `KB` the last advance's odd block is not consumed. `srs` is a multiple of four. TMM `ASCALE` has MM's
+for bit. With an odd `KB` the last advance's odd block is not consumed. `srs` is a multiple of
+four. TMM `ASCALE` has MM's
 `UNIT+ACC` requirements.
 
 The TMM MXU uses the existing QACT activation scales and offsets and the same fp32 epilogue as
