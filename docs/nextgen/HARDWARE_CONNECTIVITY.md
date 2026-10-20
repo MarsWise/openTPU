@@ -119,3 +119,22 @@ The board lost power (accidental). Recovery, run by the user from `C:\myOpenTPU\
    `/dev/xdma0_*` present, firmware contract build 0xe9727303 D=128 MCOLS=4 LANES=8,
    `otpu-selftest` **ALL PASS** (link, config, calib, scrub 4 GiB, regs, addr, pattern,
    bandwidth host->card 1.67 GB/s / card->host 1.49 GB/s, kernel, vops, stream, tmm, ecc 0/0).
+
+
+## Bitstream r4: build, load and validation procedure (prepared 2026-10-20)
+
+r4 = tree `bb27096f` (upstream `9bd4d83c` merged + TMM PAIR + TMM QUAD), r3's knobs (m4, D=128,
+MCOLS=4, ACT_ROWS=16, 133.33 MHz, PCIe Gen2, SEQ_WC=1) plus `TPAIR=1 TQUAD=1`; CFG_HASH `3fb1359e`
+(r3: `4ffd1e17`), BUILD_ID `bb27096f`. Windows helpers in `C:\myOpenTPU\_claude`:
+
+| Step | Who / where | What | Gate |
+|---|---|---|---|
+| 0 | `build_r4.cmd` (Windows, Vivado 2024.2.2) | fast-forward the feature worktree, create_project, synth / impl / bitstream into `build/vivado-m4-20261020-r4` | authorized by Kostya 2026-10-20 |
+| 1 | Claude | read `reports/SUMMARY.txt`, `timing_summary.rpt`, `util.rpt`: WNS >= 0, no unrouted nets / DRC errors; resources vs r3 | WNS < 0: no load, fix (a register before QUAD's partner sum) |
+| 2 | `r4_1_jtag.cmd` (Windows) | SHA-256 of `otpu.bit` into the log, JTAG program (volatile, no flash) | Kostya's go |
+| 3 | `r4_2_pcie.cmd` (Linux, sudo) | latest code, PCIe rescan, link, `/dev/xdma0`, build / CAPS2 / CFG_HASH, selftest, `bench_tmm --mode plain/pair/quad` at M = 1 vs the ISA simulator | ALL PASS, TQUAD on |
+| 4 | `claude_run.cmd` with `claude_run_r4.sh` | the whole validation: TMM bench; BitNet generate / step / fp4 head, its logits **bit-identical to r3's** (QUAD sums the same integers), vs HF; otpu-chat on every model present; YOLOX graph card = ISA and COCO 500 (r3: 0.2821 / 0.2852); SmolVLA tiny card = ISA and base; vLLM BitNet / Qwen on the card; `tools/qual/qual.sh fast` (LOAD=0) on the models present; the full pytest; final selftest and xdma errors | every CHECK PASS |
+| rollback | `recover_1_jtag.cmd` + `recover_2_pcie.cmd` | r3 back (volatile) | any failure |
+
+The firmware contract (`firmware_contract.json`) moves to r4 (its bitstream SHA-256) only after
+step 4 passes.
