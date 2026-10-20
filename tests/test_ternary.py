@@ -268,3 +268,63 @@ def test_compiler_emits_tmm_pair_with_tpair():
         tmm = next(ins for ins in builder.root if ins.op == I.TMM)
         qact = next(ins for ins in builder.root if ins.op == I.QACT)
         assert bool(tmm.flags & I.F_PAIR) == tpair and qact.flags & I.F_DUP
+
+
+def test_tmm_quad_is_tmm_bit_for_bit_on_the_isa():
+    """TMM QUAD (Config.TQUAD, the K-split by four): the ACT rows DUP4'd into rows M..4M-1,
+    block 4c + q from row j + q M; the same exact integer sums, so every output, RMAX and ACC
+    included, is plain TMM's bit for bit (KB not a multiple of four, unit and row scales)."""
+    from opentpu.isasim import Machine, SimError
+    cfg = Config(S=1, D=32, MCOLS=8, ACT_ROWS=8, ACT_BLOCKS=16, DRAM_BYTES=1 << 20)
+    D = cfg.D
+    for M, N, KB, unit, acc in [(1, 7, 5, False, False), (2, 9, 4, True, True),
+                                (1, 5, 1, False, True), (2, 6, 7, False, False),
+                                (1, 4, 10, True, False), (2, 3, 3, False, True)]:
+        rng = np.random.default_rng(M * 100 + KB + 7)
+        x = rng.standard_normal((M, KB * D), dtype=np.float32)
+        w = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(w, D)
+        wa, sa, oa, ia, ors = 0x40000, 0x60000, 4096, 0x70000, N + 1
+        img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+        img[:x.nbytes] = x.view(np.uint8).reshape(-1)
+        img[wa:wa + packed.size] = packed.reshape(-1)
+        img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+        init = rng.standard_normal((M, ors), dtype=np.float32)
+        img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+        outs = []
+        for mode in ("plain", "pair", "quad"):
+            prog = [I.ld(0, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+                I.qact(0, M, 0, KB, KB * D, dup=mode != "plain", dup4=mode == "quad"),
+                I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4,
+                      unit=unit, rsc=not unit, acc=acc, rmax=True, pair=mode == "pair",
+                      quad=mode == "quad"), I.halt()]
+            m = Machine(cfg, [prog], [img.copy()]).run()
+            outs.append(m.slices[0].tmem[oa:oa + M * ors + M].copy())
+        assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
+        assert np.array_equal(outs[0].view(np.uint32), outs[2].view(np.uint32))
+    bad = [I.qact(0, 3, 0, 1, D, dup4=True), I.halt()]
+    with pytest.raises(SimError, match="ACT RAM bounds"):
+        Machine(cfg, [bad], [img.copy()]).run()
+    bad = [I.qact(0, 3, 0, 1, D),
+           I.tmm(wa, sa, oa, 2, 1, D, 3, 3, 0, 4, rsc=True, quad=True), I.halt()]
+    with pytest.raises(SimError, match="4\\*M"):
+        Machine(cfg, [bad], [img.copy()]).run()
+    with pytest.raises(Exception, match="exclusive"):
+        I.tmm(wa, sa, oa, 2, 1, D, 3, 1, 0, 4, rsc=True, quad=True, pair=True)
+
+
+def test_compiler_emits_tmm_quad_with_tquad():
+    """With TQUAD a ternary dot of M <= MCOLS/4 rows lowers to TMM QUAD on DUP4'd ACT rows; of
+    MCOLS/4 < M <= MCOLS/2 rows to TMM PAIR (with TPAIR); without TQUAD as before."""
+    for tquad, rows, want in ((False, 1, "pair"), (True, 1, "quad"), (True, 2, "pair"),
+                              (True, 3, "plain")):
+        cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4,
+                     PAIR=True, TPAIR=True, TQUAD=tquad)
+        builder = Builder(cfg, 0)
+        activations = builder.alloc((rows, 7 * cfg.D))
+        builder.dot(activations, QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D))
+        tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+        qact = next(ins for ins in builder.root if ins.op == I.QACT)
+        got = "quad" if tmm.flags & I.F_QUAD else "pair" if tmm.flags & I.F_PAIR else "plain"
+        assert got == want, (tquad, rows, got)
+        assert bool(qact.flags & I.F_DUP4) == (want == "quad")

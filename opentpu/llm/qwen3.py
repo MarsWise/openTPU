@@ -2106,10 +2106,11 @@ def mxu_time(progs) -> float:
                 loops.pop()
             if ins.op == I.LOOP:
                 loops.append((pc + ins.w[0], ins.w[1] if ins.ra == 0 else 1))
-            elif ins.op in (I.MM, I.TMM):         # (PAIR: half the advances, MM or TMM)
-                mult = math.prod(c for _, c in loops)
+            elif ins.op in (I.MM, I.TMM):         # (PAIR: half the advances, MM or TMM;
+                mult = math.prod(c for _, c in loops)   # TMM QUAD a quarter)
                 t += mult * (ins.w[3] & 0xFFFF) * ((ins.w[3] >> 16) & 0xFF) * \
-                    (0.5 if ins.flags & I.F_PAIR else 1.0)
+                    (0.25 if ins.op == I.TMM and ins.flags & I.F_QUAD else
+                     0.5 if ins.flags & I.F_PAIR else 1.0)
         best = max(best, t)
     return best
 

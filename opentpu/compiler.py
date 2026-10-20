@@ -737,9 +737,10 @@ class Stationary:
     "MM"), so dot() runs an MM per range and adds them up (MM ACC)."""
 
     def __init__(self, src: Tile, chunks: list, KB: int, owners: list, pair: bool = False,
-                 qranges: list | None = None):
+                 qranges: list | None = None, quad: bool = False):
         self.src, self.chunks, self.KB, self.owners = src, chunks, KB, owners
-        self.pair = pair
+        self.pair = pair or quad
+        self.quad = quad                # rows also in ACT rows 2M..4M-1 (QACT DUP4: TMM QUAD)
         self.qranges = qranges
 
     def add_qrange(self, k0: int, k1: int) -> None:
@@ -1614,17 +1615,20 @@ class Builder:
         # 4-bit MM can feed the odd K-blocks to the second half of the columns. A taller tile
         # (up to ACT_ROWS rows) replays the streamed chunks instead: PAIR would not be faster
         pair = self.cfg.PAIR and 2 * x.rows <= self.cfg.MCOLS
-        st = Stationary(x, chunks, KB, owners, pair)
+        # TMM QUAD (Config.TQUAD): a tile of at most MCOLS/4 rows is written four times (QACT
+        # DUP4, no extra cycles), so a ternary MM takes a chunk's four K blocks an advance
+        quad = pair and getattr(self.cfg, "TQUAD", False) and 4 * x.rows <= self.cfg.MCOLS
+        st = Stationary(x, chunks, KB, owners, pair, quad=quad)
         for m0 in builtins.range(0, x.rows, self.cfg.act_rows):
             mc = min(self.cfg.act_rows, x.rows - m0)
             ab, owner = self.act_alloc(KB)
             for k in builtins.range(ab, ab + KB):   # live now: the next chunk must not take it
                 self.act_live[k] = weakref.ref(st)
             self.emit(I.qact(src + m0 * rs, mc, ab, KB, rs, cscale=cs,
-                             rscale=None if rsc is None else rsc + m0, dup=pair,
+                             rscale=None if rsc is None else rsc + m0, dup=pair, dup4=quad,
                              comment="quantize -> ACT" + (" x col scale" if cs is not None else "")
                              + (" x row scale" if rsc is not None else "")
-                             + (" dup" if pair else "")))
+                             + (" dup4" if quad else " dup" if pair else "")))
             chunks.append((ab, mc))
             owners.append(owner)
         st.loop = self.loops[-1].loop if self.loops else None     # created in this loop body
@@ -1645,7 +1649,8 @@ class Builder:
             raise CompileError(f"a stationary of {rows} rows: ACT RAM holds {self.cfg.act_rows}")
         KB = cols // D
         pair = self.cfg.PAIR and 2 * rows <= self.cfg.MCOLS
-        st = Stationary(_Parts(self, rows, cols), [], KB, [], pair, qranges=[])
+        quad = pair and getattr(self.cfg, "TQUAD", False) and 4 * rows <= self.cfg.MCOLS
+        st = Stationary(_Parts(self, rows, cols), [], KB, [], pair, qranges=[], quad=quad)
         ab, owner = self.act_alloc(KB)
         for k in builtins.range(ab, ab + KB):
             self.act_live[k] = weakref.ref(st)
@@ -1676,7 +1681,8 @@ class Builder:
         (ab, mc), = st.chunks
         rs = x.rs if len(x.shape) == 2 else x.cols
         ra, src = (0, x.base) if at is None else self.addr(Affine(x.base) + Affine.of(at))
-        self.emit(I.qact(src, mc, ab + col // D, x.cols // D, rs, dup=st.pair, ra=ra,
+        self.emit(I.qact(src, mc, ab + col // D, x.cols // D, rs, dup=st.pair, dup4=st.quad,
+                         ra=ra,
                          cscale=None if cscale is None else cscale.base,
                          comment="quantize -> ACT (part)" + (" dup" if st.pair else "")
                          + (" x col scale" if cscale is not None else "")))
@@ -1985,16 +1991,17 @@ class Builder:
             m0 = 0
             for ab, mc in st.chunks:
                 if w.ternary:
-                    tpair = st.pair and getattr(self.cfg, "TPAIR", False)
+                    tquad = st.quad and getattr(self.cfg, "TQUAD", False)
+                    tpair = not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
                     ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa,
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
-                                w.srs, unit=unit, rsc=not unit, pair=tpair,
+                                w.srs, unit=unit, rsc=not unit, pair=tpair, quad=tquad,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
                                 comment=f"tmm {M}x{K} . {N}x{K}^T"
-                                + (" pair" if tpair else "")
+                                + (" pair" if tpair else "") + (" quad" if tquad else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")
                                 + (" acc*=scale" if acc_scale is not None and first else ""))

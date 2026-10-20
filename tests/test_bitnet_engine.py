@@ -178,3 +178,26 @@ def test_resident_generate_loop_matches_steps(ckpt):
     for t in TOKS[:-1]:
         gen.step(t)
     assert gen.generate_card(TOKS[-1], 8, stop_ids=[]) == want
+
+
+def test_tmm_quad_engine_is_bit_identical(ckpt, monkeypatch):
+    """With TMM QUAD (Config.TQUAD, the ternary K-split by four) every single-row projection of
+    the decode program is a TMM QUAD on QACT DUP4 rows, and the logits are plain TMM's bit for
+    bit."""
+    from opentpu import isa as I
+    spec, W = load_spec(ckpt), Weights(ckpt)
+    modes = []
+    tmm = I.tmm
+
+    def counting(*a, **kw):
+        modes.append("quad" if kw.get("quad") else "pair" if kw.get("pair") else "plain")
+        return tmm(*a, **kw)
+    monkeypatch.setattr(I, "tmm", counting)
+    out = []
+    for tq in (False, True):
+        modes.clear()
+        cfg = board_config(DRAM_BYTES=1 << 26, PAIR=tq, TPAIR=tq, TQUAD=tq)
+        eng = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, **IMAGE)
+        out.append(np.array([eng.step(t) for t in TOKS[:4]]))
+        assert modes and all(m == ("quad" if tq else "plain") for m in modes), set(modes)
+    assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))

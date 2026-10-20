@@ -24,7 +24,7 @@ resource estimate or synthesis report, timing status, and the add-vs-share accep
 Keep modeled, RTL-simulated, synthesis-estimated and user-measured physical results in separate
 columns. Never populate physical results from source estimates.
 
-## C1: TMM K-split for single-row decode (design 2026-10-20; step 1, TMM PAIR = K-split by two, implemented: see "C1 step 1" below)
+## C1: TMM K-split for single-row decode (design 2026-10-20; step 1, TMM PAIR = K-split by two, and step 2, TMM QUAD = K-split by four, implemented: see "C1 step 1" / "C1 step 2" below)
 
 **Bottleneck.** A TMM DRAM chunk (D bytes) carries four D-element K blocks (2 bits a weight); the
 MXU consumes one block per advance per column, every column the same block of the weight row
@@ -128,3 +128,53 @@ authorized): `TPAIR=1 boards/ypcb-00338/run_vivado.sh ...` (or `TPAIR = true` in
 on `Config.TPAIR` and the compiler emits TMM PAIR. Acceptance on the card: TMM at M = 1 >= 240
 MAC/cycle (`tools/tmm_cycles.py`'s workload as a board run), WNS >= 0 at 133.33 MHz, BitNet
 engine logits identical to a TPAIR = 0 run.
+
+
+## C1 step 2 (2026-10-20): TMM QUAD, the K-split by four — RTL SIMULATED
+
+The design above (one advance a chunk, the four quarters in the four columns) with the layout
+done by the quantizer instead of a QACT re-layout: **QACT DUP4** writes the operand's rows also to
+ACT rows `M..4M-1` (the ACT RAM's write select takes two more copies, no extra cycles), and
+**TMM QUAD** (TMM flags bit 4, the reserved weight-format field) has column `j + q*M` read block
+`4c + q` from row `j + q*M`. The PEs get the chunk's raw codes instead of a decoded weight:
+
+| Change | Where |
+|---|---|
+| TMM QUAD: `4M <= MCOLS`, not with PAIR; one advance a chunk (`ceil(KB/4)` a row), a chunk request and FIFO pop every advance | `rtl/mxu/otpu_mxu.sv` (`cmd_quad`, `cmd_KBa`, `ckc`, `cdone`, `c_rch`, `adv_b`, the issuer) |
+| the low weight stream carries position i's four 2-bit codes `{q3,q2,q1,q0}` (8 bits: the stream is not widened) | `wd` at S1 |
+| each PE picks quarter `{sel2, sel}` (per command, per column: `j / M`) and decodes it on the existing ternary path (fabric add / sub / skip) | `otpu_pe` in `rtl/tech/{generic,xilinx7,xilinxus}` (`sel2`, `quad`) |
+| per-column ACT block: `r_blk .. r_blk4` by a 2-bit select (replaces PAIR's `r_hi`); quarters past `KB` re-read the advance's first block, their products masked | `otpu_actram`, `act_q0..3`, `m0.ov` |
+| row `j < M` adds partners `j + M`, `j + 2M`, `j + 3M` (a 4-input 48-bit add before the result FIFO) | `rowi` |
+| the pop head moves to the next command only if QUAD and M match (the per-command selects are read late) | `pn` |
+| QACT DUP4 (flags bit 4 with DUP) | `otpu_quant` `act_dup4`, `otpu_actram` `sel()` |
+| CAPS2 bit2 TQUAD, `Config.TQUAD` (in CFG_HASH only when on), targets `TQUAD = false`, `run_vivado.sh TQUAD=` | `otpu_ctrl`, `otpu_board`, `regs`, `board`, `target`, `create_project.tcl` |
+| ISA `I.tmm(quad=)`, `I.qact(dup4=)`, isasim; compiler: a stationary of `M <= MCOLS/4` rows is DUP4'd and its ternary dots emit TMM QUAD when `cfg.TQUAD` (else PAIR / plain as before) | `opentpu/isa.py`, `isasim.py`, `compiler.py`, `docs/isa.md` |
+
+**Measured (Verilator 5.046, `tools/tmm_cycles.py`, D = 128, MCOLS = 4, N = 128, K = 2560, cycles of
+the TMM alone):**
+
+| M | plain | PAIR | **QUAD** | MAC/cycle |
+|---|---|---|---|---|
+| 1 | 2,601 | 1,321 | **681** | 126.0 -> 248.1 -> **481.2** |
+| 2 | 2,602 | 1,322 | (4M > MCOLS) | 251.9 -> 495.7 |
+| 4 | 2,604 | — | — | 503.3 |
+
+681 = 128 rows x 5 chunks + ~41 fill: one chunk (D bytes = 128 B, the DRAM path's width) a cycle,
+the weight stream now at the DRAM rate. The C1 acceptance (TMM at M = 1 >= 480 MAC/cycle) holds
+in RTL simulation; on the card it needs a TQUAD bitstream.
+
+Correctness: `tests/test_rtl.py::test_tmm_quad_rtl` (KB 1, 3, 4, 5, 6, 7, 20; UNIT and RSC; ACC;
+RMAX; a plain TMM and a QUAD back to back; AXI port stalls 25%): RTL = ISA bit-exact, DRAM and
+TMEM, 7 passed; `tests/test_ternary.py`: ISA QUAD = PAIR = plain bit for bit (MCOLS 8, M 1 / 2,
+KB 1..10), the lowering by `TQUAD` / rows; `tests/test_bitnet_engine.py::
+test_tmm_quad_engine_is_bit_identical`: every decode projection a TMM QUAD, logits identical.
+
+Effect (cycle model, BitNet b1.58 2B4T, one token at 133.33 MHz): TMM 122 -> ~31 ms (the DRAM
+bound, 30.5 ms); with the int8 LM head (128,256 x 2,560: ~19 ms, DRAM-bound) and the rest (~3 ms)
+a step of ~52 ms instead of the measured 145.8 ms: ~19 tokens/s of card time. The LM head is then
+the next item (a 4-bit head with MM PAIR: ~10 ms; accuracy to be measured).
+
+Evidence class: **RTL SIMULATED**. Timing risk for the Vivado build: the 4-input 48-bit partner
+sum is one cycle (PAIR's was 2-input) and the PE's ternary select gains a 4:1 code mux; WNS on r3
+is +0.011 ns. If the build misses, the sum takes a register (LROW + 1). Resources: ~MCOLS x D
+two-bit selects and registers in the PEs, three 16-bit block addresses to the ACT RAM.

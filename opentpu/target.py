@@ -242,10 +242,10 @@ def arch_hash(cfg) -> int:
     programs compiled for one Config run on any device whose Config hashes the same). SEQ_WC
     (EXPERIMENTAL, the sequencer's wait entries) is in it only when on: the hash of every
     build without it stays, and a host that writes no entries refuses a build with it (its
-    hash leaves it out: opentpu/host/board.py check_hash). TPAIR (TMM PAIR) likewise: in it only
-    when on, so the bitstreams built before it keep their hashes."""
+    hash leaves it out: opentpu/host/board.py check_hash). TPAIR (TMM PAIR) and TQUAD (TMM
+    QUAD) likewise: in it only when on, so the bitstreams built before them keep their hashes."""
     d = dict(dataclasses.asdict(cfg), NUMERICS=NUMERICS)
-    for k in ("SEQ_WC", "TPAIR"):
+    for k in ("SEQ_WC", "TPAIR", "TQUAD"):
         if not d.get(k):
             d.pop(k, None)
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
@@ -288,6 +288,7 @@ def rtl_params(t: Target | str | None = None) -> dict:
         "RPB": u["RPB"] or NRP * a["LANES"], "WPB": u["WPB"], "WIN": u["WIN"],
         "FIFO_DEPTH": u["FIFO_DEPTH"], "TRACE_DEPTH": u["TRACE_DEPTH"], "PQ_WIN": u["PQ_WIN"],
         "CHASH": int(u["CHASH"]), "SEQ_WC": int(a["SEQ_WC"]), "TPAIR": int(a["TPAIR"]),
+        "TQUAD": int(a.get("TQUAD", False)),
         "DDR_MTS": int(p.get("mem_mts", 0)),
         "NCH": p["channels_per_slice"],
         "CH_LOG2": (p["channel_bytes"] - 1).bit_length(),
@@ -326,6 +327,8 @@ def build_config(t: Target | str | None = None, **knobs):
         a["SEQ_WC"] = bool(int(knobs["SEQ_WC"]))
     if knobs.get("TPAIR") is not None:
         a["TPAIR"] = bool(int(knobs["TPAIR"]))
+    if knobs.get("TQUAD") is not None:
+        a["TQUAD"] = bool(int(knobs["TQUAD"]))
     return config(t, **a)
 
 

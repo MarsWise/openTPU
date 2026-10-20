@@ -22,6 +22,7 @@ DRAM_BYTES = 4294967296         # per slice: 32-bit DRAM addresses (2 GiB of eac
 LANES = 8
 PAIR = true
 TPAIR = false                    # TMM PAIR, the ternary K-split by two (CAPS2 bit1): production builds before it lack it
+TQUAD = false                    # TMM QUAD, the ternary K-split by four (CAPS2 bit2, QACT DUP4): not in production builds yet
 DSTEP = true
 STREAM = true
 SEQ_WC = false                  # the sequencer's wait entries (WAITC, EXPERIMENTAL: docs/seq_vpu.md):

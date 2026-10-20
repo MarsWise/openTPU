@@ -236,14 +236,19 @@ Four consecutive D-element K blocks are packed into one D-byte DRAM chunk; the l
 chunk is zero padded. Thus each packed row occupies `ceil(KB/4)*D` payload bytes, `sa` and `rs`
 are D-byte aligned, and `rs` covers the payload and is D-byte aligned. `D` must be divisible by
 four. The scale row is exactly one fp32 `Sw[n]` at `ssa+n*srs` (`RSC`); alternatively `UNIT`
-implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `WF` bits 5:4
-are reserved and zero. `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
+implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `WF` bit 5 is
+reserved and zero, bit 4 is `QUAD` (below). `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
 in CAPS2 bit1, `Config.TPAIR`) needs `2M <= MCOLS` and the operand's rows also in ACT rows
 `M..2M-1` (QACT `DUP`): column `j` takes the even K blocks from row `j`, column `j + M` the odd
 ones from row `j + M`, two blocks an advance (`ceil(KB/2)` cycles a weight row instead of `KB`),
 and the two columns' exact integers are added before the epilogue — the result is plain TMM's bit
-for bit. With an odd `KB` the last advance's odd block is not consumed. `srs` is a multiple of
-four. TMM `ASCALE` has MM's
+for bit. With an odd `KB` the last advance's odd block is not consumed. `QUAD` (flags bit 4, TMM
+QUAD: the K-split by four; CAPS2 bit2, `Config.TQUAD`; not with `PAIR`) needs `4M <= MCOLS` and
+the operand's rows also in ACT rows `M..4M-1` (QACT `DUP4`): column `j + q*M` (`q < 4`) takes
+block `4c + q` of chunk `c` from row `j + q*M`, a whole chunk an advance (`ceil(KB/4)` cycles a
+weight row), and the four columns' exact integers are added before the epilogue — again plain
+TMM's result bit for bit. With `KB mod 4 = r > 0` the last advance's quarters `q >= r` are not
+consumed. `srs` is a multiple of four. TMM `ASCALE` has MM's
 `UNIT+ACC` requirements.
 
 The TMM MXU uses the existing QACT activation scales and offsets and the same fp32 epilogue as
@@ -325,7 +330,8 @@ per-row factor `T[w5 + r]`. With both, `x = (T[src + r*srs + c] * T[w5 + r]) * T
 `Sa[r][ab+k] = S`, `da[r][ab+k][b] = d` of sub-block `b` of block `k`. Flag bit0 `ROW`: every
 `d = 0` (the row's one scale). Flag bit3 `DUP` (`2*rows <= MCOLS`): row `r + rows` receives the
 same bytes and scale records as row `r` in the same cycles, the operand layout of `MM PAIR`
-("Column reuse").
+("Column reuse"). Flag bit4 `DUP4` (with `DUP`, `4*rows <= MCOLS`; bitstreams with CAPS2 bit2):
+rows `r + rows`, `r + 2*rows` and `r + 3*rows` do, the operand layout of `TMM QUAD`.
 
 ### QST
 

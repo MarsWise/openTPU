@@ -16,6 +16,9 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic [7:0]         wlo,               // WREG: the weights from the next cycle on
   input  logic [7:0]         whi,
   input  logic               sel,               // the select from the next cycle on
+  input  logic               sel2,              // TMM QUAD: the quarter's high bit (with sel)
+  input  logic               quad,              // TMM QUAD: wlo holds four 2-bit codes, quarter
+                                                //   {sel2, sel} is the weight (per command)
   input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
   input  logic signed [23:0] tpcin,             // ternary feedback, kept off the DSP cascade
@@ -23,20 +26,24 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   output logic signed [23:0] p
 );
   logic [7:0] br, wlr, whr;
-  logic       selr, ternary_r, ternary_m;
+  logic       selr, sel2r, quadr, ternary_r, ternary_m;
   logic signed [15:0] m;
   logic signed [8:0] tm;
   logic signed [23:0] pn_r;
   wire  signed [23:0] pn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(m);
   wire  signed [23:0] tpn = (FIRST ? 24'sd0 : tpcin) + 24'(tm);
   wire  [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
-  wire  signed [7:0] tw = $signed(selr ? wh : wl);
+  wire  [1:0] tc = wl[2 * {sel2r, selr} +: 2];     // QUAD: the quarter's code
+  wire  signed [7:0] tw = quadr ? ((tc == 2'b01) ? 8'sd1 : (tc == 2'b10) ? -8'sd1 : 8'sd0) :
+                                  $signed(selr ? wh : wl);
   wire  signed [8:0] ta = $signed({br[7], br});
   wire  signed [8:0] tprod = (tw == 8'sd1) ? ta :
                                (tw == -8'sd1) ? -ta : 9'sd0;
   always_ff @(posedge clk) if (en) begin
     br <= act;
     selr <= sel;
+    sel2r <= sel2;
+    quadr <= quad;
     wlr <= wlo;
     whr <= whi;
     m <= 16'(int'($signed(br)) * int'($signed(selr ? wh : wl)));

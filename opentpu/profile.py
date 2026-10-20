@@ -129,9 +129,11 @@ def _describe(ins: I.Instr, cfg) -> tuple[str, str, int, int, int]:
         N, KB, M = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF, (w[5] >> 16) & 0xFF
         acc = " +acc" if ins.flags & I.F_ACC else ""
         scales = 0 if ins.flags & I.F_UNIT else N * -(-KB // 4)
-        pair = bool(ins.flags & I.F_PAIR)
-        return ("TMM", f"{M}x{KB * D} . {N}x{KB * D}^T ternary{' pair' if pair else ''}{acc}",
-                N * (-(-KB // 2) if pair else KB), N * -(-KB // 4), scales)
+        pair, quad = bool(ins.flags & I.F_PAIR), bool(ins.flags & I.F_QUAD)
+        sp = " quad" if quad else " pair" if pair else ""
+        return ("TMM", f"{M}x{KB * D} . {N}x{KB * D}^T ternary{sp}{acc}",
+                N * (-(-KB // 4) if quad else -(-KB // 2) if pair else KB), N * -(-KB // 4),
+                scales)
     if op == I.MM:
         N, KB, M = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF, (w[5] >> 16) & 0xFF
         acc = " +acc" if ins.flags & I.F_ACC else ""
