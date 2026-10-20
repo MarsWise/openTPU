@@ -49,12 +49,36 @@ test_ternary.py).
 Verified (`tests/test_bitnet_engine.py`, ISA simulator, a 2-layer checkpoint in the real layout):
 logits vs HF transformers' BitNet (offline AutoBitLinear, float32) cosine >= 0.99895 at every
 position of a 10-token sequence, greedy argmax 10/10; vs the numpy reference > 0.99. The 2B4T
-checkpoint on the card: `tools/bitnet_engine.py --backend board` (pending the board run).
+checkpoint on the card: see "On the card" above.
+
+## On the card: the whole 2B4T model (2026-10-20) — PHYSICAL FPGA VERIFIED
+
+Host NVX-LPS, card YPCB-00338 r3 (build 0xe9727303, m4, D = 128, MCOLS = 4, 133.33 MHz, PCIe Gen2
+x4), tree `9ec42b59`, checkpoint `model.safetensors` sha256
+`8143ae115ed6babe5e5ada8fb8c5b769d8f417802b2db042ad98b4f7ed73975b`, prompt "The capital of France
+is" (ids `[128000, 791, 6864, 315, 9822, 374]`), greedy. Reference: HF transformers 5.20.2 /
+torch 2.14.1 CPU, offline `AutoBitLinear`, float32 (`tools/bitnet_hf_reference.py`). Run
+`runs/claude-20261020-113412` on the host (`claude_run.sh` v8).
+
+| Run | Output (16 tokens) | Tokens vs HF | First-token logits vs HF | Time |
+|---|---|---|---|---|
+| hybrid (`bitnet_generate.py`, projections TMM, rest host), 1 layer | `is is is is` | 4/4 | cos 0.99972; **card = ISA simulator bit for bit** | — |
+| hybrid, 30 layers | " Paris. Paris is a city that is known for its rich history, culture," | **16/16** | cos 0.99576, rel L2 0.116, top-5 5/5 | TMM compute 124.9 ms/token; 294 ms/token wall |
+| engine (`bitnet_engine.py`, one device run a token: every projection TMM, norms / RoPE / attention / KV / LM head on the card), 1 layer | `is is is is` | 4/4 | cos 0.99968 | 24.5 ms card / step |
+| engine, 30 layers | same text | **16/16** | cos 0.99231, rel L2 0.156, top-5 5/5 | **145.8 ms card / step** (19.44 M cycles), 271.5 ms/token wall |
+| numpy reference (`RefBackend`) vs HF | same | 16/16 | cos 0.99956 | — |
+
+Reading: the card runs the real 2.4 B-parameter BitNet b1.58 end to end and generates HF's greedy
+text token for token; the logits' distance from HF is the activation quantizer's (QACT per-block
+power-of-two scales vs HF's per-token absmax), the numpy model with HF's quantizer being 0.9996.
+The hybrid's measured TMM time (124.9 ms) is the cycle model's 122 ms (HETEROGENEOUS_CORE_DSE.md
+C1): decode is TMM-bound at M = 1, the case TMM PAIR halves (RTL-simulated, needs a TPAIR
+bitstream). The engine's step (145.8 ms) is TMM + everything else on the card; its wall time
+(271.5 ms) is ~126 ms of host / PCIe per token (Gen2 x4 here) — the next item.
 
 ## Not verified / not implemented
 
-- A whole BitNet model on the board: `opentpu/bitnet_model.py` runs the projections as TMM and
-  the rest on the host (see OPERATOR_COVERAGE_MATRIX.md); the board run is pending (above).
+- (Done 2026-10-20, above: the whole model on the board, hybrid and engine.)
 - Other checkpoints (including any "Tern2" model): not examined.
 - TMEM (64 Ki words) bounds M x (K + N) per TMM call, so real layers need tiling over M and N;
   the 2B model's weights (about 0.5 GiB packed) fit in the card's DRAM, but that is not measured.

@@ -84,6 +84,23 @@ Findings of the day:
   bit-exact, results identical to plain TMM. RTL SIMULATED; needs a bitstream built with TPAIR
   (production stays TPAIR = 0). HETEROGENEOUS_CORE_DSE.md "C1 step 1".
 
+### First host run of the session (2026-10-20, `claude_run.sh` v8, tree `9ec42b59`)
+
+- **BitNet b1.58 2B4T on the card: PHYSICAL FPGA VERIFIED** — 16/16 greedy tokens equal to HF
+  transformers (hybrid and engine), card = ISA bit for bit at 1 layer, engine 145.8 ms card /
+  token (BITNET_COMPAT.md "On the card").
+- Did not run (environment on the host, fixed in `claude_run.sh` v9): YOLOX (the HF venv lacks
+  `cv2`, YOLOX's `yolox.utils` imports it), COCO mAP (same; val2017 downloaded, 5000 images),
+  vLLM 0.32.0 and LeRobot (both need Python >= 3.11 / 3.12, the host has 3.10.12), SmolVLA.
+- Host full pytest (no Verilator, no torch in the project venv): 1075 passed, 395 skipped, 21
+  failed — 17 RTL tests that call Verilator without a skip (test_se_comp, test_fp: upstream tests
+  assume it), `test_host::test_caps2_gather…` (ours: fixed in `ab03adc3`),
+  `test_host::test_chat_loads_the_tokenizer_on_a_thread` (no transformers in that venv),
+  `test_host::test_halt_is_seen_soon…` (a timing bound, median 0.447 ms > 0.4 ms on this host),
+  `test_offload_server::test_pool_file_counts_its_reads_by_the_page_cache` (page-cache count 2
+  vs 1 on this host).
+- Card link: PCIe Gen2 **x4** (max x8): the slot.
+
 ### RTL regression on `c7fb60de` (2026-10-20, container, Verilator 5.046)
 
 `tests/test_rtl.py` + `tests/test_mx.py`, 235 cases, one per pytest run (the container: 2 cores,
