@@ -72,8 +72,8 @@ def sdpa(q, k, v, o, kv, H: int, KVH: int, Lq: int, Lk: int, dv: int, scale: flo
         qs = [lambda h=h: ol.load(q[h * Lq + r0:h * Lq + r0 + n, :]) for h in range(H)]
         out = ol.empty([n, H * dv])
 
-        def emit(i, acc, l, out=out):
-            out[:, i * dv:(i + 1) * dv].set(acc * ol.recip(l)[:, None])
+        def emit(i, acc, den, out=out):
+            out[:, i * dv:(i + 1) * dv].set(acc * ol.recip(den)[:, None])
         _attend_heads(qs, cache, [h // rep for h in range(H)], Lk, blk, sc, emit=emit)
         ol.store(o[r0:r0 + n, :], out)
 
