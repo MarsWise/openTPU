@@ -117,6 +117,11 @@ for these)
 | test_asic_flow, test_batch_steps, test_bitnet*, test_board, test_bpi_image | all passed (board: 133 skipped, no card) |
 | test_qwen3 (+ lfm2 / qwen35 / llama / bitnet_engine) | 134 passed, 46 skipped (models not downloaded) after the `getattr(spec, "subln")` fix |
 | test_autodecode, test_chatkv | not finished in 900 s each here; in the host's full run |
+| test_moe_fold, test_lfm2_moe, test_gemma4_moe | 1 / 29 (+1 skip) / 44 (+1 skip) passed |
+| test_qwen35_moe | 54 passed, 1 skipped, 1 failed (`test_moe_card_streams_as_the_resident_run`; re-run alone: killed by the container's memory cap) — host run decides |
+| test_chatmoe, test_offload | 38 passed (6 skipped), 9 passed |
+| test_serve_api / batching / mtp / scheduler | 12 / 7 / 5 / 8 passed |
+| test_mtp_moe | not finished in 2400 s here; in the host's full run |
 
 ## Earlier record (through 2026-10-17)
 
