@@ -32,7 +32,9 @@ class OpenTPUPlatform(Platform):
     device_type = "cpu"         # vLLM's host-side tensors; the model runs on the openTPU backend
     dispatch_key = "CPU"
     dist_backend = "gloo"
-    supported_quantization: list[str] = []      # the engine quantizes (its own formats)
+    supported_quantization: list[str] = ["bitnet"]  # BitNet's packed ternary checkpoint
+    #                                              (the engine reads it); otherwise the engine
+    #                                              quantizes the float checkpoint itself
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -61,6 +63,8 @@ class OpenTPUPlatform(Platform):
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
+        if quant == "bitnet":
+            return
         raise Unsupported(f"vLLM quantization {quant!r}: the openTPU engine quantizes the "
                           "checkpoint itself (load it unquantized, or BitNet's offline format)")
 

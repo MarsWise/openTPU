@@ -23,7 +23,12 @@ def bf16(a):
 
 @pytest.fixture(scope="module")
 def ckpt(tmp_path_factory):
-    path = tmp_path_factory.mktemp("bitnet")
+    return make_ckpt(tmp_path_factory.mktemp("bitnet"))
+
+
+def make_ckpt(path):
+    """A tiny BitNet b1.58 checkpoint in the real layout (packed U8 ternary weights, BF16
+    scales and norms, offline autobitlinear) at `path`."""
     rng = np.random.default_rng(11)
     t = {"model.embed_tokens.weight": ("BF16", bf16(rng.standard_normal((V, H)) * 0.5)),
          "model.norm.weight": ("BF16", bf16(1 + 0.1 * rng.standard_normal(H)))}

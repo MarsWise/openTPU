@@ -34,6 +34,9 @@ otpu-ddr4 = "opentpu.host.ddr4:main"
 [project.entry-points."vllm.platform_plugins"]
 opentpu = "opentpu.vllm:platform_plugin"
 
+[project.entry-points."vllm.general_plugins"]
+opentpu_models = "opentpu.vllm:register_models"
+
 [tool.setuptools.packages.find]
 include = ["opentpu*"]
 

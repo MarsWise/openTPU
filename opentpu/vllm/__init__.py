@@ -29,3 +29,20 @@ def platform_plugin() -> str | None:
     if b not in BACKENDS:
         raise ValueError(f"{ENV_BACKEND}={b!r}: one of {', '.join(BACKENDS)}")
     return "opentpu.vllm.platform.OpenTPUPlatform"
+
+
+def register_models() -> None:
+    """vLLM's general plugin hook: architectures openTPU runs that vLLM itself does not know
+    (BitNet b1.58), registered as stand-ins whose class vLLM only inspects -- the openTPU worker
+    builds its own engine and never instantiates them (opentpu/vllm/models.py)."""
+    if backend_name() is None:
+        return
+    from vllm import ModelRegistry
+    from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                         register_quantization_config)
+    if "BitNetForCausalLM" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("BitNetForCausalLM",
+                                     "opentpu.vllm.models:OpenTPUOnlyForCausalLM")
+    if "bitnet" not in QUANTIZATION_METHODS:
+        from .models import bitnet_quant_config
+        register_quantization_config("bitnet")(bitnet_quant_config())

@@ -75,6 +75,9 @@ def build_engine(path, backend: str, cap: int, slots: int, dev: str = "/dev/xdma
         from ..llm.bitnet import IMAGE, Weights
         W, kw = Weights(path), dict(IMAGE)
         slots = 1                           # (its MLP runs on one slice, one sequence)
+        if backend == "isa" and cfg is None:
+            from ..isasim import board_config
+            cfg = board_config(DRAM_BYTES=1 << 28)
     else:
         W = qwen3.load_weights(path)
         kw = dict(wformat=FM.auto(spec, wformat), head_format=head_format)

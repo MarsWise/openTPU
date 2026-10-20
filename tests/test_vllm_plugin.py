@@ -165,6 +165,31 @@ def test_preempted_requests_are_recomputed(ckpt, env, llm):
     del small
 
 
+def test_bitnet_through_vllm(env, tmp_path_factory):
+    """BitNet b1.58 (packed ternary checkpoint, quantization_config "bitnet"): vLLM accepts it
+    through the platform's registered stand-ins and the worker runs it as TMM's ternary image;
+    greedy tokens == the engine's."""
+    import sys
+    from pathlib import Path
+    from vllm import LLM
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_bitnet_engine import make_ckpt
+
+    from opentpu.vllm.worker import build_engine
+    d = make_ckpt(tmp_path_factory.mktemp("bitnet_vllm"))
+    llm = LLM(model=str(d), skip_tokenizer_init=True, max_model_len=128, max_num_seqs=1)
+    p = [1, 5, 9, 33, 64]
+    got, _ = _gen(llm, [p], max_tokens=6)
+    e, spec = build_engine(d, "isa", 128, 1)
+    assert spec.subln and e.image.wformat == "ternary"
+    lg, ref = e.prefill(p), []
+    for _ in range(6):
+        ref.append(int(np.argmax(lg)))
+        lg = e.step(ref[-1])
+    assert got[0] == ref
+    del llm
+
+
 def test_abort_frees_the_slot_and_refusals(llm, ckpt):
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
