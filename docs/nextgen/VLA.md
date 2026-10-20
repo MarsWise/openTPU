@@ -1,6 +1,8 @@
 # VLA: SmolVLA on openTPU (phase F1/F2 analysis, 2026-10-20)
 
-Status: **analysis; nothing implemented or run.** Source read: `huggingface/lerobot`
+Status (2026-10-20): **F2 first stage implemented and ISA-simulated on a random tiny SmolVLA;
+the real checkpoint and the card are prepared, not run.** See "F2 stage 1" below. (Original
+analysis status line: analysis; nothing implemented or run.) Source read: `huggingface/lerobot`
 `7abbc995ce478efff90ece53c9c759cb8854d241` (2026-10-19), `src/lerobot/policies/smolvla/`
 (Apache-2.0); paper arXiv:2506.01844. Checkpoint to use: `lerobot/smolvla_base` (HF; to be
 downloaded on the host, hash recorded then). Robot hardware is out of scope: inference is offline,
@@ -59,3 +61,26 @@ resolution as SmolVLA's own async inference allows, MXU utilisation, 8-bit vs 4-
 3. Board run, action error vs PyTorch on the recorded episode, latency per stage.
 Acceptance: actions within a tolerance of the PyTorch policy's on recorded frames (to be set from
 the int8 noise of the VLM stages), every operator's placement reported, no robot control.
+
+
+## F2 stage 1 (2026-10-20): the policy's own forward with its layers on the device
+
+`opentpu/torchdev.py` replaces each `nn.Linear` (and the SigLIP patch-embedding `nn.Conv2d`) of the
+LeRobot policy with a device kernel (`kernels/linear.py`: QACT-quantized activations, int8 MX
+weights, bias and output on the device; `kernels/conv.py` conv2d), runs
+`VLAFlowMatching.sample_actions` unchanged, and counts every multiply-accumulate by where it ran
+(a TorchFunctionMode sees the host's matmul / bmm / SDPA / conv). `tools/smolvla_run.py`:
+
+| Run | Policy | Backend | MACs on device | Actions vs float32 (same inputs, noise) |
+|---|---|---|---|---|
+| `--tiny` | random SmolVLA built offline (SmolVLM architecture: SigLIP 2 layers 64², Llama text 4 layers 128 wide, expert 0.75 wide, cross-attention + self-attention every 2nd layer; chunk 8, 10 Euler steps) | ISA simulator, D=128, MCOLS=4 | 96.07% (50.9 M of 53.0 M; host: attention matmuls 2.0 M, SDPA 0.07 M) | rel L2 0.0156, max abs 0.051 of range 3.0 |
+| `--tiny --wsplit` | same | same | same | rel L2 0.0130 |
+| `--policy lerobot/smolvla_base --backend board` | real checkpoint | card | NOT RUN (host script) | NOT RUN |
+
+Evidence class: ISA SIMULATED + framework comparison (tiny, random weights); the linear kernel is
+RTL = ISA bit-exact (`tests/test_torchdev.py::test_linear_rtl`). Limits of this stage: weights
+are written per call (no resident image yet), attention products and the Euler loop are host
+work, inputs are synthetic (a recorded LeRobot episode is the next input step). Next: attention
+on the device (the VLM prefix's KV cache resident, the expert's cross-attention against it with
+the existing attention kernels), then the whole policy as a resident program (as cnngraph.py
+did for YOLOX).

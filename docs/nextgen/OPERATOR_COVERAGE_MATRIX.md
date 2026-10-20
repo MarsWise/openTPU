@@ -11,13 +11,14 @@ For CNN, VLM and VLA no checkpoint has been selected, so their rows are a scope/
 | Transformer | GEMM, attention, norm, RoPE, KV, token sampling | Existing supported project paths documented in ISA/model docs; not newly audited for strict offload | No new regression run in this branch | No new fallback guarantees |
 | CNN/YOLO | Conv2D (std, 1x1, strided), depthwise, max pool, upsample | **FPGA** kernels (`kernels/conv.py`): conv on the MXU, the rest on the VPU | ISA vs float/torch, RTL = ISA (`tests/test_conv.py`) | YOLOX-Nano graph below |
 | VLM | Visual encoder/projector/fusion/LLM | No compatible checkpoint selected | NOT RUN | Unsupported for this branch |
-| VLA | Observation/state fusion/action head | No authentic pretrained policy selected | NOT RUN | Unsupported for this branch |
+| VLA | SmolVLA: SigLIP tower, connector, VLM prefix, action expert, Euler loop | **FPGA**: every nn.Linear (`kernels/linear.py`) and the patch-embedding conv (`kernels/conv.py`) via `opentpu/torchdev.py`; **host**: attention products / SDPA, norms, RoPE, softmax, pixel shuffle, time embedding, Euler update (counted per run) | `tools/smolvla_run.py --tiny`: 96.1% of MACs on the device, actions rel L2 0.016; `tests/test_torchdev.py` | host ops listed by Coverage; no silent fallback (unsupported convs raise) |
 | MoE | Router/expert residency/cache scheduling | Existing baseline retained; no changes | No new tests run | Existing documented behavior only |
-| vLLM | Platform, worker/model runner, KV allocator | No native vLLM backend implemented | NOT RUN | API exposure is not backend support |
+| vLLM | Platform, worker, KV accounting | `opentpu/vllm` (vLLM 0.32.0): every token on openTPU's Engine (Qwen3, Llama-likes, BitNet); host: sampling only | `tests/test_vllm_plugin.py` 7 passed (ISA) | unsupported features refused (HTTP 400 / load error) |
 
 The next coverage increment must be generated from a selected checkpoint's exported graph and
-runtime traces. Every host callback and unsupported node must be explicit; `--strict-fpga` has not
-been implemented or verified.
+runtime traces. Every host callback and unsupported node must be explicit. `--strict-fpga` exists for
+the CNN graph (`tools/yolox_graph.py`: unsupported nodes refused, host work limited to the input
+write, readout and NMS); not yet for the LLM / VLA paths.
 
 ## BitNet b1.58 2B4T (hybrid, `opentpu/bitnet_model.py`)
 

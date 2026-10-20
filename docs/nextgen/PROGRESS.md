@@ -74,7 +74,26 @@ Findings of the day:
   scheduler / continuous batching / OpenAI server drive openTPU's Engine; KV slots on the device,
   vLLM's blocks as their accounting. `tests/test_vllm_plugin.py` 6 passed on the ISA simulator
   (greedy == Engine with 5 requests on 2 slots, seeded sampling, preemption + recompute, abort,
-  refusals, `vllm serve` streaming + HTTP 400). Card: `tools/vllm_smoke.py` prepared, NOT RUN.
+  refusals, `vllm serve` streaming + HTTP 400) + BitNet b1.58 through vLLM (7 passed). Card:
+  `tools/vllm_smoke.py` prepared, NOT RUN.
+
+### VLA (2026-10-20)
+
+- SmolVLA (LeRobot) stage 1: `opentpu/torchdev.py` + `kernels/linear.py` run the policy's own
+  `sample_actions` with every Linear and the patch conv on the device; random tiny SmolVLA on the
+  ISA simulator: 96.1% of MACs on the device, actions rel L2 0.016 vs float32 (VLA.md).
+  `lerobot/smolvla_base` on the card: prepared in the host run script, NOT RUN.
+
+### Re-run of upstream suites on the merged tree (2026-10-20, container: 2 cores, no Verilator
+for these)
+
+| Suite | Result |
+|---|---|
+| test_minicpmv | 39 passed, 1 failed (upstream: fails on pristine `9bd4d83c` too) |
+| test_mtp | 38 passed, 4 skipped (Verilator) |
+| test_asic_flow, test_batch_steps, test_bitnet*, test_board, test_bpi_image | all passed (board: 133 skipped, no card) |
+| test_qwen3 (+ lfm2 / qwen35 / llama / bitnet_engine) | 134 passed, 46 skipped (models not downloaded) after the `getattr(spec, "subln")` fix |
+| test_autodecode, test_chatkv | not finished in 900 s each here; in the host's full run |
 
 ## Earlier record (through 2026-10-17)
 
