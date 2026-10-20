@@ -84,6 +84,15 @@ Findings of the day:
   bit-exact, results identical to plain TMM. RTL SIMULATED; needs a bitstream built with TPAIR
   (production stays TPAIR = 0). HETEROGENEOUS_CORE_DSE.md "C1 step 1".
 
+### RTL regression on `c7fb60de` (2026-10-20, container, Verilator 5.046)
+
+`tests/test_rtl.py` + `tests/test_mx.py`, 235 cases, one per pytest run (the container: 2 cores,
+~4.8 GB memory cap; Verilator with one make job and split C++ output): **230 passed, 1 skipped,
+4 not built** — `test_mlp_rtl[4]`, `test_attention_decode_rtl[4-8-4-45]` (four slices) and
+`test_collective_reads_held_behind_dma_reads[0,1]`: cc1plus killed by the memory cap (5.2 GB),
+no simulation ran; the host's full pytest covers them. Every TMM / TMM PAIR / edge case, the
+fuzzers, the board memory paths, AXI and TMEM suites passed.
+
 ### Strict FPGA mode for the LLM engines (2026-10-20)
 
 - `otpu-chat --strict-fpga` (`opentpu/llm/placement.py`): prints where each stage runs and exits
