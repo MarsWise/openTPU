@@ -1299,7 +1299,8 @@ class ConfigMismatch(RuntimeError):
 
 def device_config(info: dict, **kw):
     """The Config of the bitstream that `info` (Board.info()) describes: MCOLS and LANES come
-    from its VERSION register, PAIR from CAPS bit5, DSTEP from bit6 and STREAM from bit26, and
+    from its VERSION register, PAIR from CAPS bit5, DSTEP from bit6 and STREAM from bit26, TPAIR
+    from CAPS2 bit1 (with PAIR), and
     with register map 4 the slices, TMEM, IMEM, ACT RAM and DRAM sizes from its CFG_* registers
     and SEQ_WC (the sequencer's wait entries, EXPERIMENTAL) from CFG_UARCH bit24
     (before map 4: the YPCB-00338's, the current target's), so the card needs no OTPU_MCOLS /
@@ -1317,16 +1318,19 @@ def device_config(info: dict, **kw):
     caps = info.get("caps") or {}
     pair, dstep = bool(caps.get("pair")), bool(caps.get("dstep"))
     stream = bool(caps.get("stream"))
+    tpair = pair and bool((info.get("caps2") or {}).get("tpair"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
-                          ("STREAM", stream, "the stream engine (CAPS bit26)")):
+                          ("STREAM", stream, "the stream engine (CAPS bit26)"),
+                          ("TPAIR", tpair, "TMM PAIR (CAPS2 bit1, with CAPS bit5)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
                                  f"OTPU_{k}={env}: unset OTPU_{k} (the host follows the "
                                  f"bitstream)")
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
-    dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "DSTEP": dstep,
+    dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
+           "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
     if c:                                         # register map 4: the device says the rest
@@ -1393,6 +1397,8 @@ def check_hash(info: dict, cfg=None) -> None:
         sizes = {k: c[k] for k in ("S", "TMEM_WORDS", "IMEM_WORDS", "ACT_BLOCKS", "DRAM_BYTES")}
         cfg = board_config(D=info["D"], MCOLS=info["MCOLS"], LANES=info["LANES"],
                            PAIR=bool(caps.get("pair")), DSTEP=bool(caps.get("dstep")),
+                           TPAIR=bool(caps.get("pair"))
+                           and bool((info.get("caps2") or {}).get("tpair")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

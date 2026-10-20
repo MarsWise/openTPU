@@ -99,6 +99,39 @@ def test_tmm_rtl(have_verilator, KB, unit, acc):
     assert np.array_equal(tmems[0], ref.slices[0].tmem)
 
 
+@pytest.mark.parametrize("M,KB,unit,acc", [(1, 5, False, False), (2, 4, True, True),
+                                          (1, 1, False, True), (2, 7, False, False),
+                                          (1, 20, False, False)])
+def test_tmm_pair_rtl(have_verilator, M, KB, unit, acc):
+    """TMM PAIR (the ternary K-split by two) in the RTL against the ISA simulator, under random
+    port stalls: DUP'd ACT rows, the odd blocks in the high columns, the partners' integers
+    added before the epilogue; and the ISA's TMM PAIR is plain TMM's bit for bit
+    (test_ternary). Odd KB leaves the last advance's high block out."""
+    rng = np.random.default_rng(0x7A1 + 16 * M + KB)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
+    D, N = cfg.D, 9
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    wa, sa, oa, ia, ors = 0x100000, 0x200000, 4096, 0x280000, N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    prog = [I.ld(DATA, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+        I.qact(0, M, 0, KB, KB * D, dup=True),
+        I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4, unit=unit,
+              rsc=not unit, acc=acc, rmax=True, pair=True),
+        I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25,
+                                 seed=0x7A1 + KB)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
 @pytest.mark.parametrize("M", [3, 6])
 def test_tmm_rtl_row_offsets_past_the_window(have_verilator, M):
     # QACT gives each row its own per-group offsets da; a group whose da exceeds TMM's W = 11 drops

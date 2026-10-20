@@ -21,6 +21,7 @@ IMEM_WORDS = 32768
 DRAM_BYTES = 4294967296         # per slice: 32-bit DRAM addresses (2 GiB of each of its channels)
 LANES = 8
 PAIR = true
+TPAIR = false                    # TMM PAIR, the ternary K-split by two (CAPS2 bit1): production builds before it lack it
 DSTEP = true
 STREAM = true
 SEQ_WC = false                  # the sequencer's wait entries (WAITC, EXPERIMENTAL: docs/seq_vpu.md):

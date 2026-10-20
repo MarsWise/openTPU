@@ -26,6 +26,8 @@ class Config:
     IMEM_WORDS: int = 1 << 16   # 8 words per instruction
     LANES: int = 8           # VPU lanes == TMEM banks (timing only; results do not depend on it)
     PAIR: bool = False       # MM PAIR / QACT DUP: 4-bit MMs of M <= MCOLS/2 rows at full rate
+    TPAIR: bool = False      # TMM PAIR (with PAIR's QACT DUP): ternary MMs of M <= MCOLS/2 rows
+    #                          two K blocks an advance (the K-split by two; CAPS2 bit1)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
     STREAM: bool = False     # the stream engine runs STREAM's hardware subset (docs/stream.md)
     ACT_ROWS: int = 0        # ACT RAM rows == max stationary rows of one MM (0: MCOLS); more
@@ -71,6 +73,7 @@ def board_config(**kw) -> Config:
                 TMEM_WORDS=a["TMEM_WORDS"], IMEM_WORDS=a["IMEM_WORDS"],
                 DRAM_BYTES=a["DRAM_BYTES"],
                 PAIR=bool(int(env.get("OTPU_PAIR", 0))),
+                TPAIR=bool(int(env.get("OTPU_TPAIR", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
                 SEQ_WC=bool(int(env.get("OTPU_SEQ_WC", 0))))
@@ -554,9 +557,11 @@ class Slice:
         ors, M, ab = w[5] & 0xFFFF, (w[5] >> 16) & 0xFF, w[5] >> 24
         srs = w[6]
         unit, accf = bool(ins.flags & I.F_UNIT), bool(ins.flags & I.F_ACC)
-        rsc = bool(ins.flags & I.F_RSC)
-        if ins.flags & (I.F_PAIR | (3 << I.WF_SHIFT)):
-            raise SimError("TMM: PAIR and the MM weight-format field are reserved")
+        rsc, pair = bool(ins.flags & I.F_RSC), bool(ins.flags & I.F_PAIR)
+        if ins.flags & (3 << I.WF_SHIFT):
+            raise SimError("TMM: the MM weight-format field is reserved")
+        if pair and 2 * M > cfg.MCOLS:
+            raise SimError("TMM: PAIR needs 2*M <= MCOLS")
         if not N or not KB:
             raise SimError("TMM: N and KB must be at least 1")
         if D % 4 or not (0 < M <= cfg.act_rows) or ab + KB > cfg.ACT_BLOCKS:
@@ -585,11 +590,17 @@ class Slice:
         if not unit:
             sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(4)[None, :]
             sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32)
+        # the ACT row of each (output row, block): PAIR takes the odd blocks from row j + M
+        R = 2 * M if pair else M
+        kk = np.arange(KB)
+        rsel = np.arange(M)[:, None] + np.where(pair & (kk % 2 == 1), M, 0)[None, :]   # [M, KB]
+        all_scales = self.ascale[:R, ab:ab + KB]
+        if np.any(all_scales.view(np.uint32) !=
+                  all_scales[np.arange(R) % M][:, :1].view(np.uint32)):
+            raise SimError("TMM: the ACT rows' blocks hold different Sa (more than one QACT)")
         act_scales = self.ascale[:M, ab:ab + KB]
-        if np.any(act_scales.view(np.uint32) != act_scales[:, :1].view(np.uint32)):
-            raise SimError("TMM: an ACT row's blocks hold different Sa (more than one QACT)")
-        act = self.act[:M, ab * D:(ab + KB) * D].reshape(M, KB, D)
-        da = self.adoff[:M, ab:ab + KB]
+        act = self.act[:R, ab * D:(ab + KB) * D].reshape(R, KB, D)[rsel, kk[None, :]]
+        da = self.adoff[:R, ab:ab + KB][rsel, kk[None, :]]
         group = D // 4
         acc = np.zeros((M, N), dtype=np.int64)
         for k in range(KB):

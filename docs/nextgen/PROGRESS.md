@@ -77,6 +77,13 @@ Findings of the day:
   refusals, `vllm serve` streaming + HTTP 400) + BitNet b1.58 through vLLM (7 passed). Card:
   `tools/vllm_smoke.py` prepared, NOT RUN.
 
+### Matrix Engine 2.0: TMM PAIR (2026-10-20)
+
+- The ternary K-split by two on the existing PAIR machinery (`rtl/mxu/otpu_mxu.sv`, ISA, isasim,
+  compiler, CAPS2 bit1 / `Config.TPAIR`): TMM at M = 1 126 -> 248 MAC/cycle in the RTL, RTL = ISA
+  bit-exact, results identical to plain TMM. RTL SIMULATED; needs a bitstream built with TPAIR
+  (production stays TPAIR = 0). HETEROGENEOUS_CORE_DSE.md "C1 step 1".
+
 ### Strict FPGA mode for the LLM engines (2026-10-20)
 
 - `otpu-chat --strict-fpga` (`opentpu/llm/placement.py`): prints where each stage runs and exits

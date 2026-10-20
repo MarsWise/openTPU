@@ -148,7 +148,7 @@ module otpu_mxu
 `ifndef SYNTHESIS
   // a replayed row (M > MCOLS) must fit the FIFO: its chunks (4-bit: two blocks each)
   always @(posedge clk) if (!rst && start) begin
-    if (cmd_ternary && (D % 4 != 0 || cmd.flags[6] || (cmd.flags[0] == cmd.flags[7]) ||
+    if (cmd_ternary && (D % 4 != 0 || (cmd.flags[0] == cmd.flags[7]) ||
                         cmd.flags[5:4] != WF_W8))
       $fatal(1, "otpu_mxu: invalid TMM flags or D alignment");
     if (int'(cmd.w6[23:16]) > ROWS) $fatal(1, "otpu_mxu: M %0d > ROWS %0d", cmd.w6[23:16], ROWS);
@@ -158,7 +158,8 @@ module otpu_mxu
                                      int'(cmd.w4[23:16])) > DEPTH)
       $fatal(1, "otpu_mxu: a replayed row (M > MCOLS) must fit the FIFO: KB %0d, DEPTH %0d",
              cmd.w4[23:16], DEPTH);
-    if (cmd.flags[6] && cmd.flags[5:4] != WF_W8 && 2 * int'(cmd.w6[23:16]) > MCOLS)
+    if (cmd.flags[6] && (cmd.flags[5:4] != WF_W8 || cmd_ternary) &&
+        2 * int'(cmd.w6[23:16]) > MCOLS)
       $fatal(1, "otpu_mxu: PAIR needs 2*M <= MCOLS");
   end
 `endif
@@ -184,8 +185,10 @@ module otpu_mxu
   logic [TDW:0] tg_n;                       // port A requests in flight
 
   // ================================================================== command queue (2)
-  // PAIR: 4-bit only; a row is ceil(KB/2) advances of one chunk each. KB is 8 bits, k0 above it
-  wire        cmd_pair = !cmd_ternary && cmd.flags[6] && cmd.flags[5:4] != WF_W8;
+  // PAIR: 4-bit, a row is ceil(KB/2) advances of one chunk each; TMM PAIR (K-split by two): a
+  // ternary chunk's four blocks in two advances of two (columns j < M the even block, j + M the
+  // odd one), ceil(KB/2) advances a row. KB is 8 bits, k0 above it
+  wire        cmd_pair = cmd.flags[6] && (cmd_ternary || cmd.flags[5:4] != WF_W8);
   wire [7:0]  cmd_KB8 = cmd.w4[23:16];
   wire [15:0] cmd_KBa = cmd_pair ? (16'(cmd_KB8) + 16'd1) >> 1 : 16'(cmd_KB8);
   wire [31:0] cmd_total = 32'(cmd.w4[15:0]) * 32'(cmd_KBa);   // advances (chunk requests)
@@ -351,9 +354,9 @@ module otpu_mxu
   wire more     = p_act && !c_lz;
   // the chunk of advance ck (4-bit without PAIR: two advances a chunk) and whether the advance
   // finishes it
-  wire [15:0] ckc = c_ternary ? {2'b0, ck[15:2]} :
+  wire [15:0] ckc = c_ternary ? (c_pair ? {1'b0, ck[15:1]} : {2'b0, ck[15:2]}) :
                     (c_w4 && !c_pair) ? {1'b0, ck[15:1]} : ck;
-  wire cdone    = c_ternary ? (&ck[1:0] || last_k) :
+  wire cdone    = c_ternary ? (c_pair ? (ck[0] || last_k) : (&ck[1:0] || last_k)) :
                   (!c_w4 || c_pair || ck[0] || last_k);
   // advance ck's chunk and scale entry are in the FIFOs: the next entries (one group), or entry
   // ckc of the row (group 0 of several; the later groups find the whole row)
@@ -364,7 +367,8 @@ module otpu_mxu
   // last group). A row's first advance pops only once all of the row's chunks and scale entries
   // are in the FIFOs (a later group finds them there), so a row never stalls in its middle: a
   // cycle without a pop is a bubble between rows
-  wire [15:0] c_rch = c_ternary ? 16'((32'(c_KBa) + 3) / 4) :
+  wire [15:0] c_rch = c_ternary ? (c_pair ? 16'((32'(c_KBa) + 1) / 2) :
+                                           16'((32'(c_KBa) + 3) / 4)) :
                       (c_w4 && !c_pair) ? 16'((32'(c_KBa) + 1) / 2) : c_KBa;
   wire row_in   = cg != 0 ||
                   (32'(f_count) >= 32'(c_rch) && (c_unit || 32'(s_count) >= 32'(c_rch)));
@@ -387,7 +391,8 @@ module otpu_mxu
   // odd one's chunk is already on its way, so it needs no FIFO slot) and every PAIR chunk; a scale
   // line request with each advance (RSC: with each chunk), and the row's Sw line first when it is
   // in neither neighbour's line (i_sws: a cycle of its own, port A only).
-  wire adv_b    = i_ternary ? (i_k[1:0] == 2'b00) : (!i_w4 || i_pair || !i_k[0]);
+  wire adv_b    = i_ternary ? (i_pair ? !i_k[0] : (i_k[1:0] == 2'b00)) :
+                               (!i_w4 || i_pair || !i_k[0]);
   wire need_b   = !i_sws && adv_b;
   wire need_a   = !i_unit && (i_sws || !i_rsc || adv_b);
   wire want_iss = i_act && (!need_b || occ < (PW+1)'(DEPTH)) && (!need_a || !tg_n[TDW]);
@@ -660,7 +665,7 @@ module otpu_mxu
       m0.first <= (ck == 16'd0);
       m0.h <= c_w4 && !c_pair && ck[0];
       m0.o <= c_pair && !(last_k && c_KB[0]);
-      m0.ts <= ck[1:0];
+      m0.ts <= c_pair ? {ck[0], 1'b0} : ck[1:0];     // TMM PAIR: the low of the two
     end
     cu0 <= c_unit;
     rs0 <= c_rsc;
@@ -782,7 +787,7 @@ module otpu_mxu
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
   always_ff @(posedge clk)
     for (int i = 0; i < D; i++)
-      wd[i] <= {wsel(w0, i, 1'b1, wf0, m0.ternary, m0.ts),
+      wd[i] <= {wsel(w0, i, 1'b1, wf0, m0.ternary, pr0 ? {m0.ts[1], 1'b1} : m0.ts),
                 wsel(w0, i, m0.h, wf0, m0.ternary, m0.ts)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
@@ -1585,7 +1590,7 @@ module otpu_mxu
             i_k <= i_k + 1;
             i_klast <= (i_k + 16'd2 == i_KB);
             // 4-bit: two blocks per chunk (PAIR: both in one advance)
-            if (i_ternary ? (&i_k[1:0] || i_klast) :
+            if (i_ternary ? (i_pair ? (i_k[0] || i_klast) : (&i_k[1:0] || i_klast)) :
                 (!i_w4 || i_pair || i_k[0])) chunk_addr <= chunk_addr + D;
             scale_addr <= sa;
             i_swn <= same_line(sa, srow_next);
@@ -1827,9 +1832,15 @@ module otpu_mxu
     if (start && q_n >= 2'd2) $fatal(1, "otpu_mxu: start with %0d commands queued", q_n);
     if (start && (i_act || i_ini)) $fatal(1, "otpu_mxu: start while the issuer streams");
     if (pop && c_ternary)
-      for (int i = 0; i < D; i++)
-        if (w0[2 * (int'(ck[1:0]) * D + i) +: 2] == 2'b11)
-          $fatal(1, "otpu_mxu: reserved TMM symbol at K block %0d, element %0d", ck, i);
+      for (int i = 0; i < D; i++) begin
+        int q0;
+        q0 = c_pair ? 2 * int'(ck[0]) : int'(ck[1:0]);
+        if (w0[2 * (q0 * D + i) +: 2] == 2'b11)
+          $fatal(1, "otpu_mxu: reserved TMM symbol at advance %0d, element %0d", ck, i);
+        if (c_pair && !(last_k && c_KB[0]) && w0[2 * ((q0 + 1) * D + i) +: 2] == 2'b11)
+          $fatal(1, "otpu_mxu: reserved TMM symbol at advance %0d (odd block), element %0d",
+                 ck, i);
+      end
     if (q_n != 0 && !cl_ld && pop_q != (pn ? n : h))
       $fatal(1, "otpu_mxu: pop_q is not the pop head's entry");
     if (32'(tg_n) > TD) $fatal(1, "otpu_mxu: %0d port A requests in flight", tg_n);

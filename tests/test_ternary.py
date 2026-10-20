@@ -219,3 +219,52 @@ def test_compiler_dot_lowers_scaled_ternary_weight_with_rsc():
     builder.dot(activations, weights)
     tmm = next(ins for ins in builder.root if ins.op == I.TMM)
     assert not tmm.flags & I.F_UNIT and tmm.flags & I.F_RSC
+
+
+def test_tmm_pair_is_tmm_bit_for_bit_on_the_isa():
+    """TMM PAIR (Config.TPAIR, the K-split by two): the ACT rows DUP'd into rows M..2M-1, the odd
+    K blocks from those; the sums are the same exact integers, so every output, RMAX and ACC
+    included, is plain TMM's bit for bit (odd KB, unit and row-scaled weights)."""
+    from opentpu.isasim import Machine, SimError
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16, DRAM_BYTES=1 << 20)
+    D = cfg.D
+    for M, N, KB, unit, acc in [(1, 7, 5, False, False), (2, 9, 4, True, True),
+                                (1, 5, 1, False, True), (2, 6, 7, False, False)]:
+        rng = np.random.default_rng(M * 100 + KB)
+        x = rng.standard_normal((M, KB * D), dtype=np.float32)
+        w = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(w, D)
+        wa, sa, oa, ia, ors = 0x40000, 0x60000, 4096, 0x70000, N + 1
+        img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+        img[:x.nbytes] = x.view(np.uint8).reshape(-1)
+        img[wa:wa + packed.size] = packed.reshape(-1)
+        img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+        init = rng.standard_normal((M, ors), dtype=np.float32)
+        img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+        outs = []
+        for pair in (False, True):
+            prog = [I.ld(0, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+                I.qact(0, M, 0, KB, KB * D, dup=pair),
+                I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4,
+                      unit=unit, rsc=not unit, acc=acc, rmax=True, pair=pair), I.halt()]
+            m = Machine(cfg, [prog], [img.copy()]).run()
+            outs.append(m.slices[0].tmem[oa:oa + M * ors + M].copy())
+        assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
+    bad = [I.qact(0, 3, 0, 1, D),
+           I.tmm(wa, sa, oa, 2, 1, D, 3, 3, 0, 4, rsc=True, pair=True), I.halt()]
+    with pytest.raises(SimError, match="2\\*M"):
+        Machine(cfg, [bad], [img.copy()]).run()
+
+
+def test_compiler_emits_tmm_pair_with_tpair():
+    """With PAIR and TPAIR a ternary dot of M <= MCOLS/2 rows lowers to TMM PAIR on DUP'd ACT
+    rows; without TPAIR (a bitstream before it) to plain TMM."""
+    for tpair in (False, True):
+        cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4,
+                     PAIR=True, TPAIR=tpair)
+        builder = Builder(cfg, 0)
+        activations = builder.alloc((1, 7 * cfg.D))
+        builder.dot(activations, QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D))
+        tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+        qact = next(ins for ins in builder.root if ins.op == I.QACT)
+        assert bool(tmm.flags & I.F_PAIR) == tpair and qact.flags & I.F_DUP

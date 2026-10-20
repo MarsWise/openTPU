@@ -25,7 +25,8 @@ WF_SHIFT = 4
 W8, W4I, W4F, WNV = 0, 1, 2, 3
 WFORMATS = {"int8": W8, "int4": W4I, "fp4": W4F, "nvfp4": WNV}
 MX_W = {W8: 16, W4I: 11, W4F: 11, WNV: 13}   # the shift window W of each format
-F_PAIR = 0x40                   # MM, 4-bit only: column reuse, two K-blocks per cycle and row
+F_PAIR = 0x40                   # MM, 4-bit only: column reuse, two K-blocks per cycle and row;
+#                                 TMM PAIR (Config.TPAIR): the same, a ternary chunk in two advances
 F_RSC = 0x80                    # MM: row scales only (each scale row is Sw[n]; dw 0, m 1)
 F_ROW, F_CSCALE, F_RSCALE = 0x1, 0x2, 0x4   # QACT (QST: F_ROW)
 F_DUP = 0x8                     # QACT: also write the rows to ACT rows rows..2*rows-1 (PAIR)
@@ -416,14 +417,17 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
 
 
 def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
-        ascale=None, rsc=False, ra=0, rb=0, rc=0, comment=""):
+        ascale=None, rsc=False, pair=False, ra=0, rb=0, rc=0, comment=""):
     """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
 
     Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
     fp32 scale (RSC); its row stride is `srs`. The MXU applies the normal QACT activation
     scale/offset epilogue and the TMM's fixed 2^-11 weight exponent. `ascale` has MM's UNIT+ACC
     requirements. The packed operand starts at `sa`; K must begin on a four-block boundary when
-    a compiler splits it into multiple TMM commands.
+    a compiler splits it into multiple TMM commands. `pair` (TMM PAIR, the K-split by two; a
+    bitstream with Config.TPAIR): 2M <= MCOLS, the operand's rows also in ACT rows M..2M-1
+    (QACT DUP); columns j take the even K blocks, j + M the odd ones, two blocks an advance
+    (KB/2 cycles a weight row instead of KB), the same exact integer sums.
     """
     _check(0 < n < 65536 and 0 < kb < 256 and 0 < m < 256 and 0 <= ab < 256
            and 0 <= ors < 65536,
@@ -435,7 +439,7 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
         _check(unit and acc, "TMM: ASCALE needs UNIT and ACC")
         ssa = ascale
     fl = (F_UNIT if unit else 0) | (F_ACC if acc else 0) | (F_RMAX if rmax else 0) | \
-        (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0)
+        (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0) | (F_PAIR if pair else 0)
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
                  w=_w(sa, ssa, out, n | (kb << 16), rs,
                       ors | (m << 16) | (ab << 24), srs), comment=comment)

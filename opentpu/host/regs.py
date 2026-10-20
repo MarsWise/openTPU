@@ -75,13 +75,14 @@ CAPS2_SINCE, R_CAPS2 = 5, 0x5C
 # on a GATHER, and the host refuses to load a program with one (Board.load_program). Every
 # bitstream before version 5 has GATHER.
 CAP2_GATHER = 1
+CAP2_TPAIR = 2          # TMM PAIR: the K-split by two of ternary MMs (otpu_mxu, docs/isa.md TMM)
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
-        return {"gather": True}
-    return {"gather": bool(v & CAP2_GATHER)}
+        return {"gather": True, "tpair": False}
+    return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

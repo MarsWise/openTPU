@@ -1985,13 +1985,16 @@ class Builder:
             m0 = 0
             for ab, mc in st.chunks:
                 if w.ternary:
+                    tpair = st.pair and getattr(self.cfg, "TPAIR", False)
                     ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa,
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
-                                w.srs, unit=unit, rsc=not unit, acc=acc is not None or not first,
+                                w.srs, unit=unit, rsc=not unit, pair=tpair,
+                                acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
                                 comment=f"tmm {M}x{K} . {N}x{K}^T"
+                                + (" pair" if tpair else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")
                                 + (" acc*=scale" if acc_scale is not None and first else ""))

@@ -18,6 +18,7 @@ IMEM_WORDS = 8192
 DRAM_BYTES = 268435456
 LANES = 4
 PAIR = false
+TPAIR = false                    # TMM PAIR, the ternary K-split by two (CAPS2 bit1): production builds before it lack it
 DSTEP = false
 STREAM = false
 SEQ_WC = false                  # the sequencer's wait entries (WAITC, EXPERIMENTAL: docs/seq_vpu.md):

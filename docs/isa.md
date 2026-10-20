@@ -236,8 +236,13 @@ Four consecutive D-element K blocks are packed into one D-byte DRAM chunk; the l
 chunk is zero padded. Thus each packed row occupies `ceil(KB/4)*D` payload bytes, `sa` and `rs`
 are D-byte aligned, and `rs` covers the payload and is D-byte aligned. `D` must be divisible by
 four. The scale row is exactly one fp32 `Sw[n]` at `ssa+n*srs` (`RSC`); alternatively `UNIT`
-implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `PAIR` and
-`WF` bits 5:4 are reserved and zero. `srs` is a multiple of four. TMM `ASCALE` has MM's
+implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `WF` bits 5:4
+are reserved and zero. `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
+in CAPS2 bit1, `Config.TPAIR`) needs `2M <= MCOLS` and the operand's rows also in ACT rows
+`M..2M-1` (QACT `DUP`): column `j` takes the even K blocks from row `j`, column `j + M` the odd
+ones from row `j + M`, two blocks an advance (`ceil(KB/2)` cycles a weight row instead of `KB`),
+and the two columns' exact integers are added before the epilogue — the result is plain TMM's bit
+for bit. With an odd `KB` the last advance's odd block is not consumed. `srs` is a multiple of four. TMM `ASCALE` has MM's
 `UNIT+ACC` requirements.
 
 The TMM MXU uses the existing QACT activation scales and offsets and the same fp32 epilogue as

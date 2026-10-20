@@ -102,3 +102,26 @@ def test_engine_matches_transformers(ckpt):
     dev = np.array([eng.step(t) for t in TOKS])
     c = _cos(dev, hf)
     assert c.min() > 0.99, c
+
+
+def test_tmm_pair_engine_is_bit_identical(ckpt, monkeypatch):
+    """On a configuration with TMM PAIR (Config.TPAIR, the ternary K-split by two) every
+    single-row projection of the decode program is a TMM PAIR, and the logits are those of the
+    plain-TMM configuration bit for bit."""
+    from opentpu import isa as I
+    spec, W = load_spec(ckpt), Weights(ckpt)
+    pairs = []
+    tmm = I.tmm
+
+    def counting(*a, **kw):
+        pairs.append(bool(kw.get("pair")))
+        return tmm(*a, **kw)
+    monkeypatch.setattr(I, "tmm", counting)
+    out = []
+    for tp in (False, True):
+        pairs.clear()
+        cfg = board_config(DRAM_BYTES=1 << 26, PAIR=tp, TPAIR=tp)
+        eng = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, **IMAGE)
+        out.append(np.array([eng.step(t) for t in TOKS[:4]]))
+        assert pairs and all(p == tp for p in pairs)
+    assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))

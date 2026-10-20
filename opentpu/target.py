@@ -242,10 +242,12 @@ def arch_hash(cfg) -> int:
     programs compiled for one Config run on any device whose Config hashes the same). SEQ_WC
     (EXPERIMENTAL, the sequencer's wait entries) is in it only when on: the hash of every
     build without it stays, and a host that writes no entries refuses a build with it (its
-    hash leaves it out: opentpu/host/board.py check_hash)."""
+    hash leaves it out: opentpu/host/board.py check_hash). TPAIR (TMM PAIR) likewise: in it only
+    when on, so the bitstreams built before it keep their hashes."""
     d = dict(dataclasses.asdict(cfg), NUMERICS=NUMERICS)
-    if not d.get("SEQ_WC"):
-        d.pop("SEQ_WC", None)
+    for k in ("SEQ_WC", "TPAIR"):
+        if not d.get(k):
+            d.pop(k, None)
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
                    separators=(",", ":"))
     return int.from_bytes(hashlib.sha256(s.encode()).digest()[:4], "big")
@@ -285,7 +287,7 @@ def rtl_params(t: Target | str | None = None) -> dict:
         "VPU_CL": u["VPU_CL"], "ULANES": u["ULANES"], "TMEM_IMPL": u["TMEM_IMPL"],
         "RPB": u["RPB"] or NRP * a["LANES"], "WPB": u["WPB"], "WIN": u["WIN"],
         "FIFO_DEPTH": u["FIFO_DEPTH"], "TRACE_DEPTH": u["TRACE_DEPTH"], "PQ_WIN": u["PQ_WIN"],
-        "CHASH": int(u["CHASH"]), "SEQ_WC": int(a["SEQ_WC"]),
+        "CHASH": int(u["CHASH"]), "SEQ_WC": int(a["SEQ_WC"]), "TPAIR": int(a["TPAIR"]),
         "DDR_MTS": int(p.get("mem_mts", 0)),
         "NCH": p["channels_per_slice"],
         "CH_LOG2": (p["channel_bytes"] - 1).bit_length(),
@@ -322,6 +324,8 @@ def build_config(t: Target | str | None = None, **knobs):
         a["DSTEP"] = a["STREAM"] = bool(int(knobs["DSTEP"]))
     if knobs.get("SEQ_WC") is not None:
         a["SEQ_WC"] = bool(int(knobs["SEQ_WC"]))
+    if knobs.get("TPAIR") is not None:
+        a["TPAIR"] = bool(int(knobs["TPAIR"]))
     return config(t, **a)
 
 

@@ -24,7 +24,7 @@ resource estimate or synthesis report, timing status, and the add-vs-share accep
 Keep modeled, RTL-simulated, synthesis-estimated and user-measured physical results in separate
 columns. Never populate physical results from source estimates.
 
-## C1: TMM K-split for single-row decode (design, 2026-10-20; not implemented)
+## C1: TMM K-split for single-row decode (design 2026-10-20; step 1, TMM PAIR = K-split by two, implemented: see "C1 step 1" below)
 
 **Bottleneck.** A TMM DRAM chunk (D bytes) carries four D-element K blocks (2 bits a weight); the
 MXU consumes one block per advance per column, every column the same block of the weight row
@@ -75,3 +75,56 @@ at 133.33 MHz); BitNet decode TMM time per token <= 35 ms. **Precondition:** the
 hybrid BitNet model must show TMM as the decode bottleneck; if the 210 host launches a token
 dominate, moving a whole layer on the device (BitNet as a resident-program Spec, like the Qwen3
 engine) comes first.
+
+
+## C1 step 1 (2026-10-20): TMM PAIR, the K-split by two — RTL SIMULATED
+
+The MXU already had MM PAIR for 4-bit weights: a chunk's two blocks in one advance, columns
+`j < M` the even block from ACT row `j`, columns `j + M` the odd one from row `j + M` (QACT DUP),
+the partners' integers added before the result FIFO. Its PEs take two weight streams (lo / hi)
+and a per-column select, and their ternary path (add / sub / skip) already honours the select.
+TMM PAIR reuses all of it: a ternary chunk (four blocks) is consumed in two advances of two
+blocks instead of four advances of one. No new datapath, no new register stage:
+
+| Change | Where |
+|---|---|
+| TMM accepts flags bit 6 (PAIR) with `2M <= MCOLS` | `rtl/mxu/otpu_mxu.sv` (command checks, `cmd_pair`) |
+| advances a row `ceil(KB/2)`; chunk index `ck >> 1`, chunk done every 2nd advance; chunk requests every 2nd advance | `ckc`, `cdone`, `c_rch`, `adv_b`, the issuer's `chunk_addr` step |
+| the low stream decodes quarter `2*(ck mod 2)`, the high stream the next one | `m0.ts`, the `wd` decode |
+| reserved-symbol assertion covers both quarters (not past an odd KB) | simulation check |
+| CAPS2 bit1 TPAIR (a build parameter, reported) | `rtl/shell/otpu_ctrl.sv`, `otpu_board.sv`, `opentpu/host/regs.py`, `board.device_config` |
+| `Config.TPAIR` (in CFG_HASH only when on: earlier bitstreams keep their hashes) | `opentpu/isasim.py`, `opentpu/target.py`, `targets/*.toml` (false: production bitstreams predate it) |
+| ISA: `I.tmm(pair=)`, isasim TMM PAIR (rows j / j + M by block parity) | `opentpu/isa.py`, `opentpu/isasim.py`, `docs/isa.md` |
+| compiler: a ternary dot of `M <= MCOLS/2` rows on DUP'd ACT rows emits TMM PAIR when `cfg.TPAIR` | `opentpu/compiler.py` |
+
+**Measured (Verilator 5.046, `tools/tmm_cycles.py`, D = 128, MCOLS = 4, N = 128, K = 2560, cycles
+of the TMM alone):**
+
+| M | plain TMM | TMM PAIR | MAC/cycle plain -> PAIR |
+|---|---|---|---|
+| 1 | 2,601 | **1,321** | 126.0 -> 248.1 |
+| 2 | 2,602 | **1,322** | 251.9 -> 495.7 |
+| 4 | 2,604 | (2M > MCOLS: n/a) | 503.3 |
+
+Correctness: `tests/test_rtl.py::test_tmm_pair_rtl` (M 1 / 2, KB 1, 4, 5, 7, 20, UNIT and RSC,
+ACC, RMAX, AXI port stalls 25%): RTL = ISA bit-exact, DRAM and TMEM; `tests/test_ternary.py`: the
+ISA's TMM PAIR = plain TMM bit for bit, the compiler's lowering by `Config.TPAIR`;
+`tests/test_bitnet_engine.py::test_tmm_pair_engine_is_bit_identical`: the BitNet engine's decode
+programs are all TMM PAIR with TPAIR and its logits equal plain TMM's bit for bit.
+
+Effect (cycle model of section C1 with the measured rate): BitNet b1.58 2B4T decode TMM time
+122 -> ~61 ms/token at 133.33 MHz (the DRAM bound stays 30.5 ms). Step 2 (K-split by four: four
+weight streams through the array, 4x) needs a wider hop register or per-column decode: not done.
+
+Evidence class: **RTL SIMULATED**. Not synthesized: the change adds no register stage or wide
+datapath (one more 2:1 select of the decoded quarter, TMM terms in the chunk-count / done /
+request logic), but timing (WNS +0.011 ns on r3) and resources are unverified until a Vivado
+build; production bitstreams report CAPS2 bit1 = 0 and the host never emits TMM PAIR to them.
+
+**Building a TPAIR bitstream** (not run: needs Vivado on the Windows host, separately
+authorized): `TPAIR=1 boards/ypcb-00338/run_vivado.sh ...` (or `TPAIR = true` in the target's
+[arch]) sets otpu_board's `TPAIR` generic, so CAPS2 bit1 reads 1 and CFG_HASH includes TPAIR
+(ypcb-00338 m4 r3 knobs: 4ffd1e17 without, 39fc485e with); the host's `device_config` then turns
+on `Config.TPAIR` and the compiler emits TMM PAIR. Acceptance on the card: TMM at M = 1 >= 240
+MAC/cycle (`tools/tmm_cycles.py`'s workload as a board run), WNS >= 0 at 133.33 MHz, BitNet
+engine logits identical to a TPAIR = 0 run.
