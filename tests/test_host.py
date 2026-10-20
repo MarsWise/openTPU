@@ -106,7 +106,7 @@ def test_caps2_gather_and_the_load_refusal():
     gather = I.assemble([I.gather(0, 256, 4, 64, 256, 64, 0), I.halt()])
     bar = I.assemble([I.bar(), I.halt()])
     b = Board(FakeTransport(devname=None, regmap=5, gather=False))
-    assert b.info()["caps2"] == {"gather": False} and not b.gather
+    assert b.info()["caps2"] == {"gather": False, "tpair": False} and not b.gather
     with pytest.raises(NoGather, match="instruction 0"):
         b.load_program(4096, gather)
     with pytest.raises(NoGather, match="slice 0"):
@@ -116,14 +116,16 @@ def test_caps2_gather_and_the_load_refusal():
     for t in (FakeTransport(devname=None, regmap=5), FakeTransport(devname=None, regmap=4),
               FakeTransport(devname=None)):
         ok = Board(t)
-        assert ok.gather and ok.info()["caps2"] == {"gather": True}
+        assert ok.gather and ok.info()["caps2"]["gather"]
         ok.load_program(4096, gather)
         assert t.reg_read(R.R_PROG_N) == 2
     cfg = board_config()
     names = {n for g, n, _ in op_checks(cfg)}
     assert "GATHER" in names
     assert names - {n for g, n, _ in op_checks(cfg, gather=False)} == {"GATHER"}
-    assert R.caps2(None) == {"gather": True} and R.caps2(0) == {"gather": False}
+    assert R.caps2(None) == {"gather": True, "tpair": False}
+    assert R.caps2(0) == {"gather": False, "tpair": False}
+    assert R.caps2(R.CAP2_GATHER | R.CAP2_TPAIR) == {"gather": True, "tpair": True}
 
 
 def test_ddr_rate(monkeypatch, capsys):
