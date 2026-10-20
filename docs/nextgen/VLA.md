@@ -84,3 +84,26 @@ work, inputs are synthetic (a recorded LeRobot episode is the next input step). 
 on the device (the VLM prefix's KV cache resident, the expert's cross-attention against it with
 the existing attention kernels), then the whole policy as a resident program (as cnngraph.py
 did for YOLOX).
+
+
+## F2 stage 2 (2026-10-20): attention on the device
+
+`kernels/sdpa.py`: unmasked GQA attention of activations — the keys and values quantized on the
+device into a K / V^T scratch in the KV-cache layout (`vit_append`), each head's queries through
+the existing flash attention (`attention._attend_heads`: q.K^T and P.V on the MXU, the online
+softmax on the VPU). `torchdev.DeviceAttention`: a mask whose rows each see a prefix of the keys
+runs as one device call per distinct prefix — every SmolVLA mask has that form (the VLM prefix:
+image + language tokens see each other, the state token all of them; the expert's self-attention
+and cross-attention) — and any other mask raises. It replaces SmolVLA's
+`eager_attention_forward` and, as a transformers attention function, the SigLIP tower's.
+
+| Run | MACs on the device | Host work | Actions vs float32 |
+|---|---|---|---|
+| `--tiny` (stage 2) | **100%** (52.8 M: linear 50.1 M, attention 1.9 M, patch conv 0.8 M) | elementwise / norm / reduction ops only: 0.81 M output elements (mul, SiLU, pow of RMSNorm, residual adds, RoPE sin/cos, the Euler update) | rel L2 0.0205, max abs 0.051 of 3.0 |
+| `--tiny --host-attention` (stage 1) | 96.1% | + attention products and SDPA | rel L2 0.0156 |
+
+`tests/test_torchdev.py`: sdpa ISA vs float (4 shapes incl. 15 heads / 5 KV heads / 300 keys),
+RTL = ISA bit-exact, the prefix-mask decomposition against torch's masked softmax, the tiny
+SmolVLA with no host MACs. Next: the elementwise stages (RMSNorm, RoPE, residuals, SiLU / GELU,
+the Euler update) as device kernels (they exist in `kernels/lib.py` for the LLM engine), then
+one resident program per denoising step.

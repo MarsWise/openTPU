@@ -98,6 +98,8 @@ def main():
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--host-attention", action="store_true",
+                    help="the attention products on the host (stage 1)")
     a = ap.parse_args()
     if not (a.tiny or a.policy):
         ap.error("--tiny or --policy")
@@ -120,6 +122,11 @@ def main():
     runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa)
     cov = TD.Coverage()
     n = TD.to_device(dev, runner, cov, wsplit=a.wsplit)
+    vwe = dev.model.vlm_with_expert
+    if not a.host_attention:                # SmolVLA's attention (its eager path) on the device
+        att = TD.DeviceAttention(runner, cov, vwe.num_attention_heads, vwe.num_key_value_heads)
+        vwe.eager_attention_forward = att           # the VLM / expert layers (prefix masks)
+        TD.hf_attention(vwe.vlm.model.vision_model, att)    # the SigLIP tower (no mask)
     print(f"{n} nn.Linear / nn.Conv2d layers on the device ({a.backend}, D={runner.cfg.D}, "
           f"MCOLS={runner.cfg.MCOLS}{', wsplit' if a.wsplit else ''})")
     with torch.no_grad(), TD.host_counter(cov):

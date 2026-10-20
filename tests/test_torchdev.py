@@ -43,6 +43,65 @@ def test_linear_rtl(have_verilator):
                       run(comp, [i.copy() for i in imgs], "rtl"))
 
 
+def _sdpa_case(D, H, KVH, Lq, Lk, dv, seed=0):
+    from opentpu.kernels import sdpa as A
+    rng = np.random.default_rng(seed)
+    dp = A.up(dv, D)
+
+    def mk(n):
+        a = np.zeros((n, dp), np.float32)
+        a[:, :dv] = rng.standard_normal((n, dv))
+        return a
+    q, k, v = mk(H * Lq), mk(KVH * Lk), mk(KVH * Lk)
+    cfg = Config(S=1, D=D, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, DRAM_BYTES=1 << 26)
+    args = dict(q=Input(q), k=Input(k), v=Input(v), o=Output((Lq, H * dv)),
+                kv=Input(np.zeros(A.kv_words(KVH, Lk, dv, D), np.float32)), H=H, KVH=KVH,
+                Lq=Lq, Lk=Lk, dv=dv, scale=dv ** -0.5)
+    return cfg, args, A.reference(q, k, v, H, KVH, Lq, Lk, dv, dv ** -0.5)
+
+
+@pytest.mark.parametrize("D, H, KVH, Lq, Lk, dv", [(32, 2, 1, 5, 9, 16), (32, 4, 2, 13, 40, 32),
+                                                  (128, 4, 2, 50, 113, 64),
+                                                  (128, 15, 5, 8, 300, 64)])
+def test_sdpa_isa_vs_float(D, H, KVH, Lq, Lk, dv):
+    from opentpu.kernels import sdpa as A
+    cfg, args, want = _sdpa_case(D, H, KVH, Lq, Lk, dv)
+    got = run(*compile_kernel(A.sdpa, cfg, **args), "isa").outputs["o"]
+    assert rel(got, want) < 0.03, rel(got, want)
+
+
+def test_sdpa_rtl(have_verilator):
+    from opentpu.kernels import sdpa as A
+    cfg, args, _ = _sdpa_case(32, 4, 2, 6, 37, 32, seed=2)
+    comp, imgs = compile_kernel(A.sdpa, cfg, **args)
+    assert_same_state(run(comp, [i.copy() for i in imgs], "isa"),
+                      run(comp, [i.copy() for i in imgs], "rtl"))
+
+
+def test_key_prefix_masks_attention():
+    """A prefix-LM mask (rows 0-5 see keys 0-5, row 6 all 7, rows 7-9 all 10) runs as three
+    device calls and equals torch's masked softmax attention."""
+    torch = pytest.importorskip("torch")
+    from opentpu import torchdev as TD
+    Lq = Lk = 10
+    n = np.array([6] * 6 + [7] + [10] * 3)
+    mask = np.arange(Lk)[None, :] < n[:, None]
+    assert [k for k, _ in TD.key_prefixes(mask)] == [6, 7, 10]
+    assert TD.key_prefixes(~mask) is None
+    g = torch.Generator().manual_seed(0)
+    q, k, v = (torch.randn(1, Lq, 4, 32, generator=g), torch.randn(1, Lk, 2, 32, generator=g),
+               torch.randn(1, Lk, 2, 32, generator=g))
+    r, cov = TD.Runner("isa", cfg=Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16,
+                                         DRAM_BYTES=1 << 24)), TD.Coverage()
+    att = TD.DeviceAttention(r, cov, 4, 2)
+    got = att(torch.from_numpy(mask)[None], 1, 32, q, k, v)[0].numpy()
+    kk, vv = k.repeat_interleave(2, 2), v.repeat_interleave(2, 2)
+    s = torch.einsum("lhd,mhd->hlm", q[0], kk[0]) * 32 ** -0.5
+    s = s.masked_fill(~torch.from_numpy(mask)[None], float("-inf")).softmax(-1)
+    want = torch.einsum("hlm,mhd->lhd", s, vv[0]).reshape(Lq, -1).numpy()
+    assert rel(got, want) < 0.03 and r.stats["runs"] == 3
+
+
 def test_torch_module_on_the_device():
     torch = pytest.importorskip("torch")
     from opentpu import torchdev as TD
@@ -87,8 +146,12 @@ def test_tiny_smolvla_actions():
     dev = copy.deepcopy(pol)
     r, cov = TD.Runner("isa"), TD.Coverage()
     TD.to_device(dev, r, cov)
+    vwe = dev.model.vlm_with_expert
+    att = TD.DeviceAttention(r, cov, vwe.num_attention_heads, vwe.num_key_value_heads)
+    vwe.eager_attention_forward = att
+    TD.hf_attention(vwe.vlm.model.vision_model, att)
     with torch.no_grad(), TD.host_counter(cov):
         got = dev.model.sample_actions(*x[:5], noise=x[5].clone())
     a, b = got.numpy()[0, :, :6], ref.numpy()[0, :, :6]
     assert rel(a, b) < 0.05
-    assert cov.total("device") > 0.9 * (cov.total("device") + cov.total("host"))
+    assert cov.total("host") == 0 and cov.total("device") > 0     # every MAC on the device

@@ -87,6 +87,8 @@ Findings of the day:
 - SmolVLA (LeRobot) stage 1: `opentpu/torchdev.py` + `kernels/linear.py` run the policy's own
   `sample_actions` with every Linear and the patch conv on the device; random tiny SmolVLA on the
   ISA simulator: 96.1% of MACs on the device, actions rel L2 0.016 vs float32 (VLA.md).
+- Stage 2: attention on the device (`kernels/sdpa.py`, prefix-mask decomposition): 100% of MACs
+  on the device, host = elementwise ops; actions rel L2 0.021.
   `lerobot/smolvla_base` on the card: prepared in the host run script, NOT RUN.
 
 ### Re-run of upstream suites on the merged tree (2026-10-20, container: 2 cores, no Verilator

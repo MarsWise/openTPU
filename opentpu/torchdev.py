@@ -73,17 +73,17 @@ class Runner:
         self.device_s = 0.0
         self.mismatch = 0
 
-    def run(self, kernel, **args) -> np.ndarray:
+    def run(self, kernel, out: str = "y", **args) -> np.ndarray:
         from .runtime import compile_kernel, run
         comp, imgs = compile_kernel(kernel, self.cfg, **args)
         t0 = time.perf_counter()
         if self.board is None:
-            y = run(comp, imgs, "isa").outputs["y"]
+            y = run(comp, imgs, "isa").outputs[out]
         else:
-            y, st = run_on_board(self.board, comp, imgs[0])
+            y, st = run_on_board(self.board, comp, imgs[0], out)
             self.cycles += int((st or {}).get("cycles") or 0)
             if self.check_isa:
-                z = run(comp, imgs, "isa").outputs["y"]
+                z = run(comp, imgs, "isa").outputs[out]
                 if not np.array_equal(y.view(np.uint32), z.view(np.uint32)):
                     self.mismatch += 1
                     raise RuntimeError(f"{kernel.__name__}: card != ISA simulator "
@@ -100,6 +100,7 @@ class Coverage:
     def __init__(self):
         self.macs = collections.Counter()
         self.calls = collections.Counter()
+        self.elems = collections.Counter()      # host elementwise / reduction ops: outputs
 
     def add(self, where: str, op: str, macs: int) -> None:
         self.macs[where, op] += int(macs)
@@ -113,6 +114,10 @@ class Coverage:
         lines = [f"MACs on the device {d:,} ({100 * d / max(d + h, 1):.2f}%), host {h:,}"]
         for (w, op), v in sorted(self.macs.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {w:6s} {op:28s} {v:>16,} MACs in {self.calls[w, op]} calls")
+        if self.elems:
+            top = ", ".join(f"{k} {v:,}" for k, v in self.elems.most_common(8))
+            lines.append(f"host elementwise / norm / reduction outputs {sum(self.elems.values()):,}"
+                         f" elements (no MACs; {top})")
         return "\n".join(lines)
 
 
@@ -124,6 +129,16 @@ def host_counter(cov: Coverage):
 
     def numel(t):
         return int(t.numel()) if isinstance(t, torch.Tensor) else 0
+
+    moves = {"reshape", "view", "transpose", "permute", "expand", "to", "contiguous", "clone",
+             "__getitem__", "__setitem__", "split", "chunk", "stack", "cat", "size", "dim",
+             "flatten", "unsqueeze", "squeeze", "repeat", "expand_as", "view_as", "type",
+             "float", "bfloat16", "half", "detach", "cpu", "zeros_like", "ones_like",
+             "empty_like", "narrow", "select", "unbind", "masked_fill", "where", "copy_",
+             "__get__", "numel", "shape", "item", "tolist", "__len__", "__eq__", "__ne__",
+             "__lt__", "__gt__", "__le__", "__ge__", "__bool__", "__and__", "__or__",
+             "__invert__", "arange", "full", "zeros", "ones", "empty", "tensor", "from_numpy",
+             "cumsum", "sum_bool", "long", "bool", "int", "argmax", "max", "min"}
 
     class Count(TorchFunctionMode):
         def __torch_function__(self, func, types, args=(), kwargs=None):
@@ -153,7 +168,16 @@ def host_counter(cov: Coverage):
                     return out
             except Exception:                       # counting must never change the run
                 pass
-            return func(*args, **kwargs)
+            out = func(*args, **kwargs)
+            try:
+                if name not in moves and name not in ("matmul", "bmm", "mm", "__matmul__",
+                                                      "linear", "scaled_dot_product_attention",
+                                                      "einsum") \
+                        and isinstance(out, torch.Tensor) and out.is_floating_point():
+                    cov.elems[name] += out.numel()
+            except Exception:
+                pass
+            return out
     return Count()
 
 
@@ -241,6 +265,107 @@ class DeviceConv2d:
             self.cov.add("device", "conv2d", OH * OW * self.Cout * self.Cin * self.K * self.K)
             outs.append(y.reshape(OH, OW, self.Cout).transpose(2, 0, 1))
         return torch.from_numpy(np.ascontiguousarray(np.stack(outs))).to(dt)
+
+
+def key_prefixes(mask):
+    """A boolean attention mask [Lq, Lk] whose every row sees a prefix of the keys, as
+    [(n, rows)]: the distinct prefix lengths and the query rows of each; None if some row's
+    keys are not a prefix (then the mask is not one DeviceAttention runs)."""
+    m = np.asarray(mask, bool)
+    n = m.sum(1)
+    pre = np.arange(m.shape[1])[None, :] < n[:, None]
+    if not np.array_equal(m, pre):
+        return None
+    return [(int(k), np.nonzero(n == k)[0]) for k in np.unique(n)]
+
+
+class DeviceAttention:
+    """Masked multi-head attention on the device (kernels/sdpa.py) for masks whose rows each
+    see a prefix of the keys -- SmolVLA's prefix-LM, causal-block and cross-attention masks:
+    one device run per distinct prefix, its query rows against those keys. Called as SmolVLA's
+    eager_attention_forward(attention_mask [B, Lq, Lk], batch_size, head_dim, q [B, Lq, H, d],
+    k [B, Lk, KVH, d], v [B, Lk, KVH, d]) -> [B, Lq, H * d]. A mask of another form raises
+    (allow_host: it runs on the host instead, counted there)."""
+
+    def __init__(self, runner: Runner, cov: Coverage, n_heads: int, n_kv_heads: int,
+                 host_fn=None, allow_host: bool = False):
+        self.runner, self.cov, self.H, self.KVH = runner, cov, n_heads, n_kv_heads
+        self.host_fn, self.allow_host = host_fn, allow_host
+
+    def hf(self, module, query, key, value, attention_mask, dropout: float = 0.0,
+           scaling: float | None = None, **kwargs):
+        """As a transformers attention function (AttentionInterface: query [B, H, Lq, d], key /
+        value [B, KVH, Lk, d], an additive or boolean mask or None) -> ([B, Lq, H, d], None)."""
+        import torch
+        B, H, Lq, d = query.shape
+        Lk = key.shape[2]
+        if attention_mask is None:
+            m = torch.ones(B, Lq, Lk, dtype=torch.bool)
+        else:
+            am = attention_mask[:, 0] if attention_mask.dim() == 4 else attention_mask
+            m = am if am.dtype == torch.bool else (am == 0)
+            m = m.expand(B, Lq, Lk)
+        y = self(m, B, d, query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
+                 heads=(H, key.shape[1]), scale=scaling)
+        return y.reshape(B, Lq, H, d), None
+
+    def __call__(self, attention_mask, batch_size, head_dim, query_states, key_states,
+                 value_states, heads=None, scale=None):
+        import torch
+        from .kernels import sdpa as A
+        from .runtime import Input, Output
+        D, dv = self.runner.cfg.D, head_dim
+        H, KVH = heads or (self.H, self.KVH)
+        scale = dv ** -0.5 if scale is None else float(scale)
+        dp = A.up(dv, D)
+        outs = []
+        for b in range(batch_size):
+            mask = attention_mask[b].detach().cpu().numpy()
+            segs = key_prefixes(mask)
+            if segs is None:
+                if not self.allow_host or self.host_fn is None:
+                    raise NotImplementedError("attention mask rows are not key prefixes")
+                return self.host_fn(attention_mask, batch_size, head_dim, query_states,
+                                    key_states, value_states)
+            q = query_states[b].detach().float().cpu().numpy()      # [Lq, H, d]
+            k = key_states[b].detach().float().cpu().numpy()        # [Lk, KVH, d]
+            v = value_states[b].detach().float().cpu().numpy()
+            Lq = q.shape[0]
+            o = np.zeros((Lq, H * dv), np.float32)
+            for n, rows in segs:
+                if n == 0:
+                    raise NotImplementedError("a query row that sees no key")
+                qq = np.zeros((H, len(rows), dp), np.float32)
+                qq[:, :, :dv] = q[rows].transpose(1, 0, 2)
+                kk = np.zeros((KVH, n, dp), np.float32)
+                vv = np.zeros((KVH, n, dp), np.float32)
+                kk[:, :, :dv] = k[:n].transpose(1, 0, 2)
+                vv[:, :, :dv] = v[:n].transpose(1, 0, 2)
+                y = self.runner.run(A.sdpa, out="o", q=Input(qq.reshape(-1, dp)),
+                                    k=Input(kk.reshape(-1, dp)), v=Input(vv.reshape(-1, dp)),
+                                    o=Output((len(rows), H * dv)),
+                                    kv=Input(np.zeros(A.kv_words(KVH, n, dv, D), np.float32)),
+                                    H=H, KVH=KVH, Lq=len(rows), Lk=n, dv=dv,
+                                    scale=scale)
+                o[rows] = y
+                self.cov.add("device", "attention", 2 * H * len(rows) * n * dv)
+            outs.append(o)
+        return torch.from_numpy(np.stack(outs)).to(query_states.dtype)
+
+
+def hf_attention(model, att: DeviceAttention, name: str = "opentpu") -> int:
+    """Every transformers sub-model of `model` whose config names an attention implementation
+    runs its attention through `att` (registered as transformers attention function `name`).
+    Returns the number of configs switched."""
+    from transformers import AttentionInterface
+    AttentionInterface.register(name, att.hf)
+    n = 0
+    for m in model.modules():
+        c = getattr(m, "config", None)
+        if c is not None and getattr(c, "_attn_implementation", None) not in (None, name):
+            c._attn_implementation = name
+            n += 1
+    return n
 
 
 def to_device(model, runner: Runner, cov: Coverage, select=None, wsplit: bool = False,
