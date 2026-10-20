@@ -76,6 +76,41 @@ C1): decode is TMM-bound at M = 1, the case TMM PAIR halves (RTL-simulated, need
 bitstream). The engine's step (145.8 ms) is TMM + everything else on the card; its wall time
 (271.5 ms) is ~126 ms of host / PCIe per token (Gen2 x4 here) — the next item.
 
+## Host overhead: resident decode and the generate loop on the card (2026-10-20) — ISA SIMULATED
+
+The engine run above drove the card one position at a time with `pipeline=False`: each step
+traced and assembled a 30-layer program on the host for that position, wrote the embedding and
+RoPE rows, ran, read the 128,256 fp32 logits and took the argmax on the host. That is the ~126 ms
+of host / PCIe per token (1 layer: 51.1 ms wall vs 24.5 ms card; 30 layers: 271.5 vs 145.8 — the
+overhead grows with the layers, i.e. with the program the host builds).
+
+The upstream engine already has what removes it (Qwen3's path), and BitNet now uses it:
+- **resident decode** (`Engine(resident=True)`): one program per 256-position attention bucket,
+  compiled once and kept in IMEM; the token and position are run arguments (CAPS bit25), the
+  token's embedding and RoPE rows come from tables in the image (`Image(lookup=True)`: the fp32
+  embedding, 1.25 GiB for 2B4T; the image grows from 845 to 2,106 MiB of the card's 4 GiB). A step
+  writes no inputs and compiles nothing.
+- **the generate loop on the card** (`Engine.generate_card`, CAPS bit30 GEN, set in every build
+  incl. r3): ARGMAX on the device, the token fed back, HALT CHAIN to the next bucket's program —
+  one device run for all the tokens, the host reads only the token ids.
+- **prompt runs** (`prompt_runs=True`): the prompt in runs of up to ACT_ROWS rows (each weight
+  streamed once a run) instead of one step a token.
+
+Found and fixed on the way (commit after `d5ba1628`): `qwen3._attention_rows` (a run of several
+rows: `Engine.prefill_chunks`, the vLLM worker's prompts) left out BitNet's attn_sub_norm, so
+multi-row prompts gave wrong logits for BitNet (tiny checkpoint: max|d| 29 vs token-by-token).
+The board's engine measurement fed the prompt token by token and was not affected. The tiled
+prompt kernels (`tiled.py`) split W_o / W_down into output parts the sub-norms cannot span, so
+BitNet takes the untiled runs (`tiled.family` is None for it).
+
+Verified (ISA simulator, 2-layer checkpoint in the real layout, `tests/test_bitnet_engine.py`):
+multi-row prompts with and without prompt runs bit-identical to token-by-token; resident steps
+and `generate_card` give the host's greedy tokens; the vLLM worker (now resident + prompt runs for
+BitNet) against a token-by-token reference (8 passed). `tools/bitnet_engine.py --mode
+step|pipeline|resident|generate` gives the same tokens in every mode (ISA). Board timing: next
+run (`claude_run.sh` v10). Expected: wall time close to the card's 145.8 ms/token (~6.9 tokens/s)
+on r3, and with a TMM QUAD bitstream the card time itself drops (HETEROGENEOUS_CORE_DSE.md C1).
+
 ## Not verified / not implemented
 
 - (Done 2026-10-20, above: the whole model on the board, hybrid and engine.)

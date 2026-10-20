@@ -36,6 +36,9 @@ def main():
     ap.add_argument("--cap", type=int, default=512)
     ap.add_argument("--layers", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--head-format", default=None, choices=("int8", "fp4", "int4", "nvfp4"),
+                    help="the LM head's weight format (default int8: the image's; 4-bit takes "
+                         "MM PAIR at M = 1 on a bitstream with CAPS bit5, half the head's time)")
     ap.add_argument("--mode", default="generate",
                     choices=("step", "pipeline", "resident", "generate"))
     a = ap.parse_args()
@@ -69,9 +72,12 @@ def main():
     resident = a.mode in ("resident", "generate")
     eng = Engine(spec, W, cap=a.cap, cfg=cfg, backend=backend,
                  pipeline=None if a.mode != "step" else False, resident=resident,
-                 prompt_runs=resident, **IMAGE)
+                 prompt_runs=resident,
+                 **{**IMAGE, **({"head_format": a.head_format} if a.head_format else {})})
     print(f"image built and written in {time.time() - t0:.0f}s ({eng.image.nbytes / 2**20:.0f} MiB)"
-          f"; mode {a.mode}: resident {eng.resident}, generate loop {eng.can_generate}")
+          f"; mode {a.mode}: resident {eng.resident}, generate loop {eng.can_generate}; "
+          f"weights {eng.image.wformat}, head {eng.image.head_format}, PAIR {cfg.PAIR}, "
+          f"TPAIR {getattr(cfg, 'TPAIR', False)}, TQUAD {getattr(cfg, 'TQUAD', False)}")
     if a.mode == "generate" and not eng.can_generate:
         raise SystemExit("--mode generate: the backend does not run the generate loop "
                          "(CAPS GEN) or the image has no resident tables")

@@ -140,6 +140,20 @@ for these)
 | test_serve_api / batching / mtp / scheduler | 12 / 7 / 5 / 8 passed |
 | test_mtp_moe | not finished in 2400 s here; in the host's full run |
 
+### BitNet speed: host overhead and TMM QUAD (2026-10-20, evening)
+
+Why BitNet 2B ran no faster than an int8 2B model: at M = 1 the MXU takes one K block a cycle
+whatever the format (a ternary chunk's four blocks in four cycles), so decode was TMM-bound at
+the same parameter count; and ~126 ms a token were host / PCIe (a program traced per position).
+- **Host overhead** (BITNET_COMPAT.md): BitNet now takes the engine's resident decode, the
+  generate loop on the card and prompt runs (`tools/bitnet_engine.py --mode`, `otpu-chat --model
+  <bitnet dir>`, the vLLM worker). ISA SIMULATED; the board run is in `claude_run.sh` v10.
+- **Bug** found on the way: multi-row prompts (`qwen3_rows`) left out BitNet's attn_sub_norm
+  (vLLM's BitNet prompts were wrong; the token-by-token board measurement was not). Fixed, tested.
+- **TMM QUAD** (HETEROGENEOUS_CORE_DSE.md C1 step 2): the ternary K-split by four, QACT DUP4;
+  RTL = ISA bit-exact, M = 1 at 481 MAC/cycle (plain 126, PAIR 248). RTL SIMULATED; needs a
+  bitstream with TQUAD (Vivado, separately authorized).
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published

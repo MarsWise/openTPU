@@ -1103,7 +1103,16 @@ def main(argv=None):
                          f"feed the turns' text as is")
     tokenizer = load_tokenizer(path)        # (on a thread, while the model loads)
     spec = load_spec(path)
-    wformat = FM.auto(spec, a.wformat)
+    bitnet = getattr(spec, "subln", False)  # BitNet b1.58 (opentpu/llm/bitnet.py): its own image
+    if bitnet:                              # formats, every projection a TMM
+        from opentpu.llm.bitnet import IMAGE
+        if a.wformat not in (FM.AUTO, IMAGE["wformat"]):
+            raise SystemExit(f"otpu-chat: {path.name} is BitNet b1.58: its weights are "
+                             f"{IMAGE['wformat']} (--wformat {a.wformat})")
+        wformat = IMAGE["wformat"]
+        a.head_format = a.head_format or IMAGE["head_format"]
+    else:
+        wformat = FM.auto(spec, a.wformat)
     streams = ST.streams(spec)          # a MoE: its experts streamed (opentpu/host/streamed.py)
     if streams:
         if a.backend not in ("isa", "board") or a.per_position:
@@ -1157,7 +1166,10 @@ def main(argv=None):
                              prog_cache=not a.no_prog_cache, prompt_runs=not a.no_prompt_runs,
                              snapshots=SNAPSHOTS)
         else:
-            eng = Engine(spec, load_weights(path), cap=a.cap, cfg=cfg, backend=backend,
+            if bitnet:
+                from opentpu.llm.bitnet import Weights as BitNetWeights
+            eng = Engine(spec, BitNetWeights(path) if bitnet else load_weights(path), cap=a.cap,
+                         cfg=cfg, backend=backend,
                          wformat=wformat, head_format=a.head_format,
                          resident=not a.per_position, prog_cache=not a.no_prog_cache,
                          prompt_runs=not a.no_prompt_runs, snapshots=SNAPSHOTS)
