@@ -107,3 +107,15 @@ Target supplied by the user: `nvx@192.168.0.156`.
 | PCIe endpoint enumeration and driver binding | **NOT RUN** |
 | XDMA device readiness / DMA functionality | **NOT RUN** |
 | openTPU runtime execution / AI inference | **NOT RUN** |
+
+## 2026-10-20: power loss and recovery
+
+The board lost power (accidental). Recovery, run by the user from `C:\myOpenTPU\_claude`:
+1. `recover_1_jtag.cmd` (Vivado 2024.2 batch, `recover_r3.tcl`): JTAG target
+   `localhost:3121/xilinx_tcf/Digilent/210299A88B38`, one device xc7k480t_0, the r3 `otpu.bit`
+   loaded (volatile), end of startup HIGH, DONE = 1.
+2. `recover_2_pcie.cmd`: `sudo opentpu/host/setup_pcie.sh --rescan` on NVX-LPS, then the checks
+   (`recover_check.sh`): card 0000:04:00.0 10ee:7028, link 5.0 GT/s **x4** (max x8),
+   `/dev/xdma0_*` present, firmware contract build 0xe9727303 D=128 MCOLS=4 LANES=8,
+   `otpu-selftest` **ALL PASS** (link, config, calib, scrub 4 GiB, regs, addr, pattern,
+   bandwidth host->card 1.67 GB/s / card->host 1.49 GB/s, kernel, vops, stream, tmm, ecc 0/0).
