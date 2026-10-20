@@ -77,6 +77,11 @@ Findings of the day:
   refusals, `vllm serve` streaming + HTTP 400) + BitNet b1.58 through vLLM (7 passed). Card:
   `tools/vllm_smoke.py` prepared, NOT RUN.
 
+### Strict FPGA mode for the LLM engines (2026-10-20)
+
+- `otpu-chat --strict-fpga` (`opentpu/llm/placement.py`): prints where each stage runs and exits
+  if the host would compute any of it; `tests/test_placement.py` 2 passed.
+
 ### VLA (2026-10-20)
 
 - SmolVLA (LeRobot) stage 1: `opentpu/torchdev.py` + `kernels/linear.py` run the policy's own

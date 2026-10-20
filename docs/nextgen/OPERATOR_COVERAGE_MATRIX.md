@@ -18,7 +18,12 @@ For CNN, VLM and VLA no checkpoint has been selected, so their rows are a scope/
 The next coverage increment must be generated from a selected checkpoint's exported graph and
 runtime traces. Every host callback and unsupported node must be explicit. `--strict-fpga` exists for
 the CNN graph (`tools/yolox_graph.py`: unsupported nodes refused, host work limited to the input
-write, readout and NMS); not yet for the LLM / VLA paths.
+write, readout and NMS) and for the LLM engines (`otpu-chat --strict-fpga`,
+`opentpu/llm/placement.py`: every stage reported as device / host-move (stored bytes only: a
+host-kept table's rows, streamed expert weights) / host; host computation — per-position inputs
+without the image's tables, token selection the device loop does not take — is refused;
+`tests/test_placement.py`). Not yet for the VLA path (its host attention is reported by
+`opentpu/torchdev.py` Coverage instead).
 
 ## BitNet b1.58 2B4T (hybrid, `opentpu/bitnet_model.py`)
 

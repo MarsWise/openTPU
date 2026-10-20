@@ -1033,6 +1033,10 @@ def main(argv=None):
     ap.add_argument("--repetition-penalty", type=float)
     ap.add_argument("--seed", type=int)
     ap.add_argument("--max-new", type=int, default=1024, help="tokens per reply at most")
+    ap.add_argument("--strict-fpga", action="store_true",
+                    help="refuse a configuration in which the host computes part of the model "
+                         "(per-position inputs, sampling the device's loop does not take): "
+                         "print where each stage runs (opentpu/llm/placement.py)")
     ap.add_argument("--wformat", default=FM.AUTO,
                     choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", FM.MIX],
                     help="weight format of the layers (docs/quant.md; fp4 needs a bitstream "
@@ -1182,6 +1186,13 @@ def main(argv=None):
     if a.mtp and not chat.use_mtp:
         print("otpu-chat: --mtp: these sampling settings stay on the host; plain decode",
               flush=True)
+    if a.strict_fpga:
+        from opentpu.llm import placement as PL
+        print("placement:\n" + PL.report(eng, chat.on_card), flush=True)
+        bad = PL.strict_errors(eng, chat.on_card)
+        if bad:
+            raise SystemExit("otpu-chat: --strict-fpga: the host would compute: "
+                             + "; ".join(bad))
     chat.max_slices = a.max_slices
     if not chat.use_mtp:                # the decode loop's bucket programs ahead, in the
         from opentpu.host import gen_warm as GW     # background (opentpu/host/gen_warm.py)
