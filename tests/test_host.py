@@ -2203,3 +2203,38 @@ def test_dma_lock_is_reentrant_in_its_thread(tmp_path, monkeypatch):
     th.join(10)
     assert order == ["holder", "other"]
     assert ops == [board.fcntl.LOCK_EX, board.fcntl.LOCK_UN] * 2
+
+
+def test_selftest_tmm_stage_covers_pair_and_quad():
+    """otpu-selftest's tmm stage adds TMM PAIR / QUAD programs (QACT DUP / DUP4 rows) on a
+    bitstream that reports them (CAPS2 bit1 / bit2); here a board that is the ISA simulator, so
+    every program runs and its plain results meet the float reference."""
+    import dataclasses as dc
+    from opentpu.host import checks as CK
+    from opentpu.isasim import Machine, board_config
+
+    class SimBoard:
+        def __init__(self, cfg):
+            self.cfg, self.dram, self.prog = cfg, np.zeros(1 << 23, np.uint8), None
+
+        def write(self, addr, data):
+            data = np.asarray(data).view(np.uint8).reshape(-1)
+            self.dram[addr:addr + data.size] = data
+
+        def load(self, addr, prog):
+            self.prog = prog
+
+        def run(self, timeout=None):
+            sl = Machine(dc.replace(self.cfg, DRAM_BYTES=self.dram.size), [self.prog],
+                         [self.dram.copy()]).run().slices[0]
+            self.dram[:] = sl.dram[:self.dram.size]
+            return {"instructions": [sl.icount], "cycles": 0}
+
+        def read(self, addr, n):
+            return self.dram[addr:addr + n].copy()
+
+    for tp, tq, want in ((False, False, 4), (True, True, 9)):
+        cfg = board_config(PAIR=True, TPAIR=tp, TQUAD=tq, DRAM_BYTES=1 << 23)
+        ok, msg = CK.tmm_check(SimBoard(cfg), cfg)
+        assert ok and msg.startswith(f"{want} ternary TMM programs"), msg
+        assert ("QUAD KB=7" in msg) == tq and ("PAIR KB=5" in msg) == tp

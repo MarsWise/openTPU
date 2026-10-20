@@ -79,7 +79,8 @@ class FakeTransport:
                  args: bool = False, stream: bool = False, gen: bool = False,
                  chash: bool = False, calib: tuple = (True, True), ecc_ded: bool = False,
                  cfg: dict | None = None, act_rows: int | None = None, mx: bool = True,
-                 gather: bool = True, seq_wc: bool = False):
+                 gather: bool = True, seq_wc: bool = False, tpair: bool = False,
+                 tquad: bool = False):
         self.ch = [np.zeros(ch_bytes, np.uint8) for _ in range(2)]
         self.v, self.devname, self.dev = regmap, devname, devname and f"/dev/{devname}"
         self.run_s, self.cycles_per_run = run_s, cycles
@@ -113,6 +114,7 @@ class FakeTransport:
         self.chash = chash              # CAPS bit7: the hashed channel interleave
         self.mx = mx                    # CAPS bit29: the MX numerics (every bitstream of this tree)
         self.gather = gather            # CAPS2 bit0 (register map 5): the collective's GATHER
+        self.tpair, self.tquad = tpair, tquad   # CAPS2 bit1 / bit2: TMM PAIR / QUAD
         self.calib = list(calib)        # STATUS CALIB0 / CALIB1
         self.ecc_ded = ecc_ded          # STATUS ECC_DED
         self.regs = {R.R_CTRL: 0, R.R_PROG_ADDR: 0, R.R_PROG_N: 0, R.R_SCRATCH: 0,
@@ -230,7 +232,8 @@ class FakeTransport:
         if self.v >= R.CFG_SINCE and off in R.CFG_REGS:
             return self.cfg_words[R.CFG_REGS.index(off)]
         if self.v >= R.CAPS2_SINCE and off == R.R_CAPS2:
-            return R.CAP2_GATHER if self.gather else 0
+            return (R.CAP2_GATHER if self.gather else 0) | (R.CAP2_TPAIR if self.tpair else 0) \
+                | (R.CAP2_TQUAD if self.tquad else 0)
         if off == R.R_CAPS:
             return (R.CAP_TRACE | R.CAP_TEMP | (R.CAP_I2C if self.i2c else 0)
                     | (R.CAP_DDR if self.ddr_mts else 0) | (R.CAP_W4 if self.w4 else 0)

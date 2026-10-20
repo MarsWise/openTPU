@@ -137,13 +137,21 @@ def tmm_check(board, cfg) -> tuple[bool, str]:
     """otpu-selftest's tmm stage: packed ternary TMM programs (unit and per-row scale, with and
     without accumulate, several K blocks) against the ISA simulator, from the same DRAM image."""
     from opentpu.quant import pack_ternary_mxu
-    cases = [(1, False, False), (3, True, False), (4, False, True), (5, True, True)]
+    cases = [(1, False, False, "plain"), (3, True, False, "plain"), (4, False, True, "plain"),
+             (5, True, True, "plain")]
+    # a bitstream with TMM PAIR / QUAD (CAPS2 bit1 / bit2): their K-splits too, on QACT DUP /
+    # DUP4 rows (2M / 4M <= MCOLS), KB not a multiple of their split among them
+    if getattr(cfg, "TPAIR", False) and cfg.MCOLS >= 2:
+        cases += [(5, False, False, "pair"), (4, True, True, "pair")]
+    if getattr(cfg, "TQUAD", False) and cfg.MCOLS >= 4:
+        cases += [(5, False, False, "quad"), (7, True, False, "quad"), (4, False, True, "quad")]
     cases = [c for c in cases if c[0] <= cfg.ACT_BLOCKS]
     done = []
     errs = []
-    for KB, unit, acc in cases:
+    for KB, unit, acc, mode in cases:
         rng = np.random.default_rng(0x7E2 + KB)
-        D, M, N = cfg.D, min(6, cfg.ACT_ROWS), 7
+        split = {"pair": 2, "quad": 4}.get(mode, 1)
+        D, M, N = cfg.D, min(6, cfg.ACT_ROWS, cfg.MCOLS // split if split > 1 else 6), 7
         values = rng.standard_normal((M, KB * D), dtype=np.float32)
         weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
         packed = pack_ternary_mxu(weights, D)
@@ -161,14 +169,15 @@ def tmm_check(board, cfg) -> tuple[bool, str]:
         prog = [I.ld(0, 0, M * KB * D)]
         if acc:
             prog.append(I.ld(init_at, out_at, M * ostride))
-        prog += [I.qact(0, M, 0, KB, KB * D),
+        prog += [I.qact(0, M, 0, KB, KB * D, dup=mode != "plain", dup4=mode == "quad"),
                  I.tmm(weight_at, 0 if unit else scale_at, out_at, N, KB, stride, ostride, M, 0,
-                       4, unit=unit, acc=acc, rsc=not unit),
+                       4, unit=unit, acc=acc, rsc=not unit, pair=mode == "pair",
+                       quad=mode == "quad"),
                  I.st(0x50000, out_at, M * ostride),
                  I.halt()]
         ok, msg, _ = run_demo(board, cfg, prog, img)
         if not ok:
-            return False, f"TMM KB={KB} unit={unit} acc={acc}: {msg}"
+            return False, f"TMM {mode} KB={KB} unit={unit} acc={acc}: {msg}"
         if not acc:
             # independent float reference: bit-exactness to the simulator alone would not catch
             # a shared misreading of the ternary semantics
@@ -176,10 +185,10 @@ def tmm_check(board, cfg) -> tuple[bool, str]:
             want = values @ weights.T.astype(np.float32) * (1.0 if unit else sc)
             err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
             if not err < 0.03:
-                return False, f"TMM KB={KB} unit={unit}: result differs from float reference " \
+                return False, f"TMM {mode} KB={KB} unit={unit}: result differs from float reference " \
                               f"(rel {err:.4f})"
             errs.append(err)
-        done.append(f"KB={KB}")
+        done.append(f"KB={KB}" if mode == "plain" else f"{mode.upper()} KB={KB}")
     return True, (f"{len(done)} ternary TMM programs match the ISA simulator "
                   f"({', '.join(done)}); max rel err vs float {max(errs):.4f}")
 
