@@ -29,6 +29,11 @@ otpu-i2c = "opentpu.host.i2c:main"
 otpu-memcal = "opentpu.host.memcal:main"
 otpu-ddr4 = "opentpu.host.ddr4:main"
 
+# vLLM (pinned 0.32.0) finds the openTPU platform here; it activates only with OTPU_VLLM_BACKEND
+# set (opentpu/vllm/__init__.py, docs/nextgen/VLLM_INTEGRATION.md)
+[project.entry-points."vllm.platform_plugins"]
+opentpu = "opentpu.vllm:platform_plugin"
+
 [tool.setuptools.packages.find]
 include = ["opentpu*"]
 

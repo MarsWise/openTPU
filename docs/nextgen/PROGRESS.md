@@ -68,6 +68,14 @@ Findings of the day:
 - Known upstream failure, not from NextGen: `test_minicpmv.py::test_warm_entries_are_found_by_
   the_first_start` fails identically on pristine `9bd4d83c` (disk hits 26 vs expected 13).
 
+### Native vLLM (2026-10-20)
+
+- `opentpu/vllm/` (vLLM 0.32.0 out-of-tree platform + worker; VLLM_INTEGRATION.md): vLLM's
+  scheduler / continuous batching / OpenAI server drive openTPU's Engine; KV slots on the device,
+  vLLM's blocks as their accounting. `tests/test_vllm_plugin.py` 6 passed on the ISA simulator
+  (greedy == Engine with 5 requests on 2 slots, seeded sampling, preemption + recompute, abort,
+  refusals, `vllm serve` streaming + HTTP 400). Card: `tools/vllm_smoke.py` prepared, NOT RUN.
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published
