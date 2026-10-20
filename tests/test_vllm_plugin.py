@@ -119,6 +119,26 @@ def test_platform_activates_only_when_asked(monkeypatch):
         OV.platform_plugin()
 
 
+def test_cpu_only_torch_shutdown(monkeypatch):
+    """On a CPU-only torch (no torch.accelerator) vLLM's shutdown would raise in
+    torch.accelerator.empty_cache (the host's run 2): the plugin makes those calls no-ops then,
+    and leaves a torch with an accelerator alone."""
+    import torch
+    calls = []
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: calls.append(1))
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: "cuda")
+    OV._no_accelerator_cache()
+    torch.accelerator.empty_cache()
+    assert calls == [1]
+
+    def raising():
+        raise RuntimeError("Cannot access accelerator device when none is available.")
+    monkeypatch.setattr(torch.accelerator, "empty_cache", raising)
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: None)
+    OV._no_accelerator_cache()
+    torch.accelerator.empty_cache()             # no longer raises
+
+
 def test_greedy_tokens_are_the_engines_with_requests_batched(llm, ckpt):
     from vllm.platforms import current_platform
     assert current_platform.device_name == "opentpu" and not current_platform.is_cuda()

@@ -28,7 +28,24 @@ def platform_plugin() -> str | None:
         return None
     if b not in BACKENDS:
         raise ValueError(f"{ENV_BACKEND}={b!r}: one of {', '.join(BACKENDS)}")
+    _no_accelerator_cache()
     return "opentpu.vllm.platform.OpenTPUPlatform"
+
+
+def _no_accelerator_cache() -> None:
+    """vLLM's shutdown (cleanup_dist_env_and_memory) empties torch.accelerator's caches on every
+    platform but CPU; on a CPU-only torch (the host's 2.14.1+cpu) that raises "Cannot access
+    accelerator device when none is available" (board run 2, 2026-10-20). openTPU's tensors are
+    host tensors: with no torch accelerator, those calls become no-ops."""
+    try:
+        import torch
+        if torch.accelerator.current_accelerator() is not None:
+            return
+    except Exception:           # (a torch without torch.accelerator: nothing calls it)
+        return
+    torch.accelerator.empty_cache = lambda: None
+    if hasattr(torch.accelerator, "empty_host_cache"):
+        torch.accelerator.empty_host_cache = lambda: None
 
 
 def register_models() -> None:

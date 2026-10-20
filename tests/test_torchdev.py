@@ -36,6 +36,23 @@ def test_linear_isa_vs_float(D, M, K, N, act):
     assert got.shape == want.shape and rel(got, want) < 0.02, rel(got, want)
 
 
+def test_linear_wide_k_fits_tmem():
+    """K = 12,288 (SmolVLA base's connector): ACT_ROWS rows of it do not fit TMEM's 64 K words,
+    so the kernel takes fewer rows a tile (the board's run 2 failed with TMEM exhausted)."""
+    rng = np.random.default_rng(5)
+    D, M, K, N = 128, 40, 12288, 960
+    x = rng.standard_normal((M, K)).astype(np.float32)
+    w = (rng.standard_normal((N, K)) / np.sqrt(K)).astype(np.float32)
+    b = (0.1 * rng.standard_normal(N)).astype(np.float32)
+    cfg = Config(S=1, D=D, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=128, TMEM_WORDS=65536,
+                 DRAM_BYTES=1 << 27)
+    got = run(*compile_kernel(L.linear, cfg, x=Input(L.pad_rows(x, D)),
+                              w=Weight(L.pack_weight(w, D)), b=Input(b), y=Output((M, N)),
+                              M=M, K=K, N=N), "isa").outputs["y"]
+    want = L.reference(x, w, b)
+    assert rel(got, want) < 0.02, rel(got, want)
+
+
 def test_linear_rtl(have_verilator):
     cfg, args, _ = _case(32, 19, 72, 40, "silu", seed=3)
     comp, imgs = compile_kernel(L.linear, cfg, **args)

@@ -154,6 +154,22 @@ the same parameter count; and ~126 ms a token were host / PCIe (a program traced
   RTL = ISA bit-exact, M = 1 at 481 MAC/cycle (plain 126, PAIR 248). RTL SIMULATED; needs a
   bitstream with TQUAD (Vivado, separately authorized).
 
+### Host run 2 (2026-10-20, `claude_run.sh` v9, tree `03641c9e`, card r3)
+
+Three copies of the run were started (15:41, 15:47, 15:54) and ran at once, sharing the card
+(the device lock refused the second user, `DeviceBusy`): several steps failed for that reason
+and their files are empty; the run script now holds a lock (v10).
+- **YOLOX-Nano COCO val2017, 500 images: card mAP50-95 0.2821 (0.44 s/image), card --wsplit
+  0.2852 (0.41 s/image) vs float 0.2844** — PHYSICAL FPGA VERIFIED, the float model's accuracy.
+- **SmolVLA tiny on the card**: card = ISA for all 553 kernel runs, 100% of MACs on the device,
+  actions rel L2 0.0205 vs float32 — PHYSICAL FPGA VERIFIED.
+- Failed, fixed: SmolVLA base (TMEM exhausted in a 12,288-wide linear: the kernel now takes
+  fewer rows a tile, freeing each tile's ACT blocks); vLLM tests (CPU-only torch's
+  `torch.accelerator.empty_cache` at shutdown: no-ops without an accelerator); vLLM on the card
+  (XDMA node check `/dev/xdma0` -> `/dev/xdma0_h2c_0`); Verilator build (no `help2man`: stubbed).
+- Bitstream r4 (`TPAIR=1 TQUAD=1`, tree `bb27096f`, CFG_HASH `3fb1359e`): Vivado build started on
+  the Windows host (`_claude/build_r4.cmd`), not loaded.
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published

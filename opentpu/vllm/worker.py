@@ -172,8 +172,10 @@ class OpenTPUWorker(WorkerBase):
     # ---- set-up
     def init_device(self) -> None:
         self.device = torch.device("cpu")
-        if self.opts["backend"] == "board" and not os.path.exists(self.opts["dev"]):
-            raise RuntimeError(f"openTPU: {self.opts['dev']} not found (the card's XDMA device)")
+        dev = self.opts["dev"]          # an XDMA prefix: its nodes are <dev>_user, <dev>_h2c_0 ...
+        if self.opts["backend"] == "board" and not (os.path.exists(dev) or
+                                                    os.path.exists(f"{dev}_h2c_0")):
+            raise RuntimeError(f"openTPU: {dev}_h2c_0 not found (the card's XDMA device)")
 
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:

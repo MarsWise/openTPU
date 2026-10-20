@@ -39,9 +39,15 @@ def linear(x, w, b, y, M: int, K: int, N: int, act: str = "none", wlo=None):
     b: [N] (zeros for none)."""
     D = ol.block_size()
     Kp = kp(K, D)
-    R = ol.current().cfg.act_rows
     f = ACTS[act]
     nc = min(NC, N)
+    # rows a tile: ACT_ROWS, fewer when [R, Kp] + [R, nc] with the bias does not fit TMEM (a
+    # wide K: SmolVLA's 12,288-wide connector, R 16 would need 196 K words of 64 K)
+    room = ol.tmem_words() - N - 2048
+    R = max(1, min(ol.current().cfg.act_rows, room // (Kp + nc)))
+    if Kp + nc > room:
+        raise ol.CompileError(f"linear: K = {K} ({Kp} words a row) does not fit TMEM "
+                              f"({ol.tmem_words()} words) with {N} outputs")
     bias = ol.load(b)
     xt = ol.empty([R, Kp])
     out = ol.empty([R, nc])
@@ -59,6 +65,7 @@ def linear(x, w, b, y, M: int, K: int, N: int, act: str = "none", wlo=None):
             if f is not None:
                 yt.set(f(yt))
             ol.store(y[m0:m0 + n, c0:c0 + c], yt)
+        del q           # (its ACT RAM blocks free before the next tile's: a wide K holds most)
 
 
 def reference(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, act: str = "none"):
