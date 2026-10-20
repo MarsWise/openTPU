@@ -1840,6 +1840,8 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
             cols = slice(h0 * d, min(nq, h0 + mc) * d)      # a time (TMEM)
             o[:, cols].set(o[:, cols] * sigmoid(ol.dot(xs, lw.wgate[cols, :])))
     o_all = ol.all_gather(o)                    # [R, n_q*d]
+    if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o (as
+        o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)     # _attention's, a row at a time)
     y = ol.all_gather(ol.dot(o_all, lw.wo))     # [R, H]
     return x + y
 

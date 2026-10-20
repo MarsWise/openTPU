@@ -89,8 +89,8 @@ def build_engine(path, backend: str, cap: int, slots: int, dev: str = "/dev/xdma
         c = device_config(spec, cap, batch=B, rows=PREFILL_ROWS, lookup=True, S=1,
                           wformat=kw["wformat"], head_format=kw.get("head_format"))
         cfg = dataclasses.replace(c, DRAM_BYTES=2 * c.DRAM_BYTES)
-    eng = Engine(spec, W, cap=cap, cfg=cfg, backend=be, resident=resident and not bitnet,
-                 prompt_runs=prompt_runs and not bitnet, batch=B, **kw)
+    eng = Engine(spec, W, cap=cap, cfg=cfg, backend=be, resident=resident,
+                 prompt_runs=prompt_runs, batch=B, **kw)
     return eng, spec
 
 

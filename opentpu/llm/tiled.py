@@ -1278,7 +1278,12 @@ KERNELS = {"qwen3": qwen3_tile, "qwen35": qwen35_tile, "lfm2": lfm2_tile,
 
 
 def family(img) -> str | None:
-    """The image's model family (its module's name) when a tile kernel serves it, else None."""
+    """The image's model family (its module's name) when a tile kernel serves it, else None.
+    BitNet (the Qwen3 image with spec.subln) has none: its attn_sub_norm spans every head
+    before W_o and its ffn_sub_norm the whole F row, which the tile kernels' W_o and W_down
+    output parts do not hold (its prompt runs are qwen3_rows', prefill.tiling)."""
+    if getattr(getattr(img, "spec", None), "subln", False):
+        return None
     name = type(img).__module__.rsplit(".", 1)[-1]
     return name if name in KERNELS else None
 

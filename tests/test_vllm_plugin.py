@@ -204,8 +204,18 @@ def test_bitnet_through_vllm(env, tmp_path_factory):
     p = [1, 5, 9, 33, 64]
     got, _ = _gen(llm, [p], max_tokens=6)
     e, spec = build_engine(d, "isa", 128, 1)
-    assert spec.subln and e.image.wformat == "ternary"
-    lg, ref = e.prefill(p), []
+    assert spec.subln and e.image.wformat == "ternary" and e.resident
+    from opentpu.isasim import board_config
+    from opentpu.llm.bitnet import IMAGE, Weights
+    from opentpu.llm.qwen3 import Engine
+    # the reference feeds the prompt token by token (the decode program): the worker's prompt
+    # runs of several rows must give the same tokens (before attn_sub_norm was in qwen3_rows
+    # both sides ran the same wrong rows program and agreed)
+    e = Engine(spec, Weights(d), cap=128, cfg=board_config(DRAM_BYTES=1 << 27), pipeline=False,
+               **IMAGE)
+    for t in p:
+        lg = e.step(t)
+    ref = []
     for _ in range(6):
         ref.append(int(np.argmax(lg)))
         lg = e.step(ref[-1])

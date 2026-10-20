@@ -125,3 +125,56 @@ def test_tmm_pair_engine_is_bit_identical(ckpt, monkeypatch):
         out.append(np.array([eng.step(t) for t in TOKS[:4]]))
         assert pairs and all(p == tp for p in pairs)
     assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))
+
+
+def _bits(a):
+    return np.asarray(a, np.float32).view(np.uint32)
+
+
+@pytest.mark.parametrize("prompt_runs", [False, True])
+def test_prompt_rows_are_bit_identical_to_steps(ckpt, prompt_runs):
+    """A prompt fed in runs of several rows (qwen3_rows: attn_sub_norm before W_o per row; with
+    prompt_runs, the resident image's run-time-position runs, not tiled: tiled.family has no
+    kernel for subln) leaves the logits of feeding it token by token, bit for bit."""
+    spec, W = load_spec(ckpt), Weights(ckpt)
+    cfg = board_config(DRAM_BYTES=1 << 27)
+    eng = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, resident=True, **IMAGE)
+    for t in TOKS:
+        want = eng.step(t)
+    eng2 = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, resident=True,
+                  prompt_runs=prompt_runs, **IMAGE)
+    got = None
+    runs = []
+    for toks, lg in eng2.prefill_chunks(TOKS):
+        runs.append(len(toks))
+        got = lg if lg is not None else got
+    assert max(runs) > 1 and eng2.pos == len(TOKS)
+    assert np.array_equal(_bits(got), _bits(want))
+
+
+def test_resident_generate_loop_matches_steps(ckpt):
+    """Resident decode (one program per attention bucket, the token and position as run
+    arguments, the embedding / RoPE rows from the image's tables) and the generate loop on the
+    device (ARGMAX, the token fed back, no logits read) give the host's greedy tokens."""
+    spec, W = load_spec(ckpt), Weights(ckpt)
+    cfg = board_config(DRAM_BYTES=1 << 27)
+    ref = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, **IMAGE)
+    for t in TOKS[:-1]:
+        ref.step(t)
+    lg, want = ref.step(TOKS[-1]), []
+    for _ in range(8):
+        want.append(int(np.argmax(lg)))
+        lg = ref.step(want[-1])
+    res = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, resident=True, **IMAGE)
+    assert res.resident and res.can_generate
+    for t in TOKS[:-1]:
+        res.step(t)
+    lg, got = res.step(TOKS[-1]), []
+    for _ in range(8):
+        got.append(int(np.argmax(lg)))
+        lg = res.step(got[-1])
+    assert got == want
+    gen = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, resident=True, **IMAGE)
+    for t in TOKS[:-1]:
+        gen.step(t)
+    assert gen.generate_card(TOKS[-1], 8, stop_ids=[]) == want
