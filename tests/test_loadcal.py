@@ -3,6 +3,7 @@ centre, when it is wanted, the scan against ddrcal's PHY model, and the load on 
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from opentpu import Config
 from opentpu.host import ddrcal as C
@@ -99,10 +100,13 @@ def test_slips_off_scans_the_calibrated_bitslips_only():
     assert L.slips_wanted(env="") and L.slips_wanted(env="1") and not L.slips_wanted(env="0")
 
 
-def test_the_load_runs_on_the_isa_simulator():
-    """A few iterations of the load (the m8 card's TMEM): the DMA's tiles are the source tile (it
-    stores them and reloads the one before), and every row of the MMs' results is written."""
-    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072)
+@pytest.mark.parametrize("tmem", [131072, 65536])
+def test_the_load_runs_on_the_isa_simulator(tmem):
+    """A few iterations of the load (the m8 card's TMEM, and the m4 card's 64K, where the reload
+    goes into the source tile -- r4's run 4b found it did not fit): the DMA's tiles are the source
+    tile (it stores them and reloads the one before), and every row of the MMs' results is
+    written."""
+    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=tmem)
     img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=3)
     dram = np.concatenate([img, np.zeros(cfg.DRAM_BYTES - len(img), np.uint8)])
     m = Machine(cfg, [prog], [dram]).run()

@@ -229,7 +229,9 @@ def _kernel():
         xs = ol.quantize(ol.load(m.x))
         y = ol.empty([m.rows, R])
         t = ol.load(m.src)
-        u = ol.empty([NS * NS])
+        # the reload's tile: its own on the m8 card's 128K TMEM; on a 64K TMEM (m4) the source
+        # tile itself (it reloads what was stored from it: the same words, after that store)
+        u = t if m.reuse else ol.empty([NS * NS])
         per = -(-n_dma // n_mm)
         for _ in ol.range(n_iter):
             k = 0
@@ -270,7 +272,7 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
     m = SimpleNamespace(w=_qdesc(a["w"], a["ws"], n_mm * R, H, 128, "fp4"),
                         x=_tdesc(a["x"], (rows, H)), src=_tdesc(a["src"], (NS * NS,)),
                         dma=_tdesc(a["dma"], (n_dma, NS * NS)), out=_tdesc(a["out"], (n_mm * rows, R)),
-                        rows=rows)
+                        rows=rows, reuse=cfg.TMEM_WORDS < 131072)
     prog = _kernel().trace(cfg, 0, {"m": m, "n_mm": n_mm, "n_dma": n_dma,
                                     "n_iter": n_iter}).finish()
     return img, a, prog
