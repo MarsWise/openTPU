@@ -2240,3 +2240,26 @@ def test_selftest_tmm_stage_covers_pair_and_quad():
         ok, msg = CK.tmm_check(SimBoard(cfg), cfg)
         assert ok and msg.startswith(f"{want} ternary TMM programs"), msg
         assert ("QUAD KB=7" in msg) == tq and ("PAIR KB=5" in msg) == tp
+
+
+def test_r4_caps2_erratum():
+    """r4 (bb27096f) reports CAPS2 0 (its FPGA top dropped the TPAIR / TQUAD generics) but was
+    built with both: its BUILD_ID and CFG_HASH 3fb1359e name them (board.CAPS2_ERRATA), so the
+    host takes TPAIR / TQUAD and the hash matches. The registers are the card's (2026-10-21,
+    card_info): without the erratum the host's hash is r3's 4ffd1e17 and it refuses the card."""
+    import copy
+
+    from opentpu.host.board import ConfigMismatch, caps2_errata, device_config
+    card = {"build_id": 0xbb27096f, "regmap": 5, "D": 128, "MCOLS": 4, "LANES": 8, "act_rows": 16,
+            "caps": R.caps(0xef0a0eff), "caps2": R.caps2(0),
+            "cfg": {"S": 1, "TMEM_WORDS": 65536, "IMEM_WORDS": 32768, "ACT_BLOCKS": 128,
+                    "DRAM_BYTES": 4294967296, "channels": 2, "channel_bytes": 2147483648,
+                    "MXU_IMPL": 2, "TMEM_IMPL": 3, "VPU_CL": 2, "ULANES": 8, "SEQ_WC": 1,
+                    "platform": 1, "hash": 0x3fb1359e}}
+    with pytest.raises(ConfigMismatch, match="4ffd1e17"):
+        device_config(copy.deepcopy(card))
+    c = device_config(caps2_errata(copy.deepcopy(card)))
+    assert c.TPAIR and c.TQUAD and not c.TFN
+    other = copy.deepcopy(card)
+    other["build_id"] = 0x12345678
+    assert not caps2_errata(other)["caps2"]["tpair"]

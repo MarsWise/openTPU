@@ -817,6 +817,9 @@ class Board:
             t = by_platform(d["cfg"]["platform"])
             if t is not None and t.family != "xilinx7" and d["temp_c"] is not None:
                 d["temp_c"] = round(R.temp_c(tp, t.family), 2)
+        # bitstreams whose CAPS2 under-reports what they were built with (a generic the FPGA top
+        # did not take): their build and CFG_HASH name the capabilities
+        caps2_errata(d)
         self._info = d
         return d
 
@@ -1293,6 +1296,22 @@ class Board:
 
 
 # ------------------------------------------------------------------------------ configuration
+# (BUILD_ID, CFG_HASH) -> the CAPS2 capabilities the bitstream has but does not report. r4
+# (bb27096f, TMM PAIR + QUAD, CFG_HASH 3fb1359e): otpu_fpga_top_ld had no TPAIR / TQUAD
+# parameters, so Vivado dropped the generics and CAPS2 reads 0; the MXU's PAIR and QUAD
+# datapaths are in every build of that tree (the generics only set CAPS2).
+CAPS2_ERRATA = {(0xbb27096f, 0x3fb1359e): {"tpair": True, "tquad": True}}
+
+
+def caps2_errata(info: dict) -> dict:
+    """info (Board.info()) with CAPS2_ERRATA applied: the capabilities its build has."""
+    e = CAPS2_ERRATA.get((info.get("build_id"), (info.get("cfg") or {}).get("hash")))
+    if e is not None:
+        info["caps2"] = dict(info["caps2"], **e)
+        info["caps2_erratum"] = True
+    return info
+
+
 class ConfigMismatch(RuntimeError):
     """The bitstream on the card and the host's configuration disagree."""
 
