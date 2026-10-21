@@ -92,11 +92,13 @@ def pack_conv_weight(w: np.ndarray, D: int) -> np.ndarray:
 
 @ol.jit
 def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, stride: int,
-           pad: int, act: str = "silu", res=None, wlo=None):
+           pad: int, act: str = "silu", res=None, wlo=None, roll: bool = True):
     """y [OH*OW, Cout] (or a [OH, OW, Cout] view) = act(conv2d(x, w) + b) (+ res, a view like
     y: a residual added after the activation, YOLOX's Bottleneck). x: pad_input rows
     [Hp, row_words] (or a view of at least that many words a row); w: Weight(pack_conv_weight)
-    [Cout, KH*Kp]; b: [Cout]. wlo: split_weight's low part (a second MM per kernel row)."""
+    [Cout, KH*Kp]; b: [Cout]. wlo: split_weight's low part (a second MM per kernel row).
+    roll=False: no rolling patches (a shorter program: cnngraph falls back to it when the rolled
+    one does not fit IMEM)."""
     D = ol.block_size()
     OH, OW, Hp, Wp, Kp, rw = geometry(H, W, Cin, KH, KW, stride, pad, D)
     R = ol.current().cfg.act_rows
@@ -104,7 +106,7 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     bias = ol.load(b)
     groups = [(o, min(R, OW - o)) for o in range(0, OW, R)]
     cfg = ol.current().cfg
-    roll = (ROLL and KH > 1 and stride < KH and OH > 1 and
+    roll = (roll and ROLL and KH > 1 and stride < KH and OH > 1 and
             len(groups) * KH * (Kp // D) + 8 <= ol.act_blocks() and
             not any(cfg.PAIR and 2 * n <= cfg.MCOLS for _, n in groups))
     rows = None if roll else ol.empty([KH, rw])

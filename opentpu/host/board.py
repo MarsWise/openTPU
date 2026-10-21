@@ -1081,6 +1081,13 @@ class Board:
                 from opentpu import waits as W
                 ents += [np.full(1, W.DEFAULT, np.uint64)] * (S - len(ents))
         n = max(len(w) for w in progs)
+        imem = ((self._info or self.info()).get("cfg") or {}).get("IMEM_WORDS")
+        if imem and n > imem:
+            # the loader would take PROG_N rows into an IMEM of fewer: the program's end
+            # overwrites its start, and it runs as something else (r4: YOLOX --wsplit's stem,
+            # 4765 instructions into 4096, gave mAP 0 with no error anywhere)
+            raise ValueError(f"a program of {n // 8} instructions; this bitstream's IMEM holds "
+                             f"{imem // 8}")
         if self.in_run:
             self.stop()
         for s, w in enumerate(progs):

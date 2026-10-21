@@ -96,6 +96,21 @@ def test_v3_info_snapshot_and_rates():
                                           / 0.01 / 1e9)
 
 
+def test_a_program_longer_than_imem_is_refused():
+    """The loader takes PROG_N rows into IMEM: a program longer than this bitstream's IMEM
+    (CFG IMEM_WORDS) is refused before anything is written (r4 loaded YOLOX --wsplit's stem,
+    4765 instructions into 4096, and it ran as garbage with no error)."""
+    b = Board(FakeTransport(devname=None, regmap=5))
+    imem = b.info()["cfg"]["IMEM_WORDS"]
+    fits = I.assemble([I.nop()] * (imem // 8 - 1) + [I.halt()])
+    b.load_program(4096, fits)
+    assert b.t.reg_read(R.R_PROG_N) == imem // 8
+    long = I.assemble([I.nop()] * (imem // 8) + [I.halt()])
+    with pytest.raises(ValueError, match="IMEM holds"):
+        b.load_program(4096, long)
+    assert b.t.reg_read(R.R_PROG_N) == imem // 8           # nothing loaded
+
+
 def test_caps2_gather_and_the_load_refusal():
     """Register map 5's CAPS2 bit0 (GATHER): a one-slice bitstream built without it (otpu_board
     COLL_GATHER 0) runs BAR alone, so the host refuses to load a program with a GATHER there,

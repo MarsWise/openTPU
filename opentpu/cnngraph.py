@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import quant as Q
-from .compiler import Affine, QTensor, Tensor
+from .compiler import Affine, CompileError, QTensor, Tensor
 from .kernels import conv as C
 
 ALIGN = 4096
@@ -314,6 +314,14 @@ class Plan:
             else:
                 raise NotImplementedError(op.kind)
             op.prog = kern.trace(cfg, 0, bound).finish()
+            if len(op.prog) > cfg.IMEM_WORDS // 8 and kern is C.conv2d:
+                # the rolled loop body (P rows x every tile x KH MMs, x2 with wsplit) can outgrow
+                # IMEM where ACT_BLOCKS lets a wide layer roll (YOLOX's stem on the card: 4765 of
+                # 4096 with wsplit): the plain row loop instead
+                op.prog = kern.trace(cfg, 0, {**bound, "roll": False}).finish()
+            if len(op.prog) > cfg.IMEM_WORDS // 8:
+                raise CompileError(f"{op.kind} {op.name}: a program of {len(op.prog)} "
+                                   f"instructions, IMEM holds {cfg.IMEM_WORDS // 8}")
 
     # ------------------------------------------------------------------ run
     def run_isa(self, cfg, img: np.ndarray, each=None) -> np.ndarray:

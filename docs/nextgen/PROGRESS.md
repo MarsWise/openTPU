@@ -215,6 +215,24 @@ Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIE
   (OTPU_LOAD_CENTER=1, the author's loadcal, normally only at 150 MHz), COCO x2 and SmolVLA
   base with the ECC counts after each step.
 
+### r4 runs 4b-4d (2026-10-21): DRAM channel 0, loadcal, the IMEM overflow
+
+- 4b: COCO plain clean, COCO --wsplit ECC_DED on channel 0 again; loadcal did not run (its load
+  did not fit a 64K TMEM: fixed, 16b7d04a).
+- 4c: loadcal ran, channel 0 then 0 / 0 over three COCO passes at 53-56 C (not thermal: read taps
+  at the edge of their window under load, e.g. lane 1 tap 14 -> 1 at bitslip -1); but it started
+  from the core CPU's stale result after a host calibration, so channel 1 lane 5 lost a bit offset
+  (~6e8 corrected words per pass, 0 uncorrectable). Fixed (36f4263c): with the CPU held, the host's
+  last calibration is the baseline.
+- 4d: the core's CPU recalibrated, loadcal from it: **both channels 0 / 0 ECC events over
+  selftest, COCO plain and --wsplit** (every lane a window under load). COCO plain 0.2821.
+- COCO --wsplit gave mAP 0.0000 with no error: YOLOX's stem program was 4765 instructions and the
+  card's IMEM holds 4096 (IMEM_WORDS 32768, ACT_BLOCKS 128 lets the stem roll a long loop body);
+  Board.load_program loaded PROG_N rows anyway and the program ran overwritten. The ISA check
+  (--check-isa) refused it. Fixed: load_program refuses a program longer than the bitstream's
+  IMEM; cnngraph retraces a conv that does not fit with the row loop (stem --wsplit: 1061, the
+  result bit for bit the rolled one's); ISA with the card's config: head rel L2 0.0922 as before.
+
 ### r5 (2026-10-21): what is in it, its two builds
 
 r5 = r4 + TFN (46a368a5) + VOP MAC + QST T4 + the CAPS2 generics in the top; host: selftest's

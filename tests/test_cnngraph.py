@@ -181,3 +181,25 @@ def test_unsupported_operator_is_refused():
     plan = G.build(gm, (3, 8, 8), cfg)
     host = [t for t in G.host_nodes(gm, plan) if t[2] not in G.HOST_LAYOUT]
     assert host and host[0][2] == "mul"                # --strict-fpga refuses this plan
+
+
+def test_a_rolled_conv_too_long_for_imem_falls_back_to_the_row_loop():
+    """A wide layer with many ACT_BLOCKS rolls a loop body of P rows x every tile x KH MMs (x2
+    with wsplit), which can outgrow IMEM (r4: YOLOX's stem, 4765 instructions into 4096, ran as
+    garbage, mAP 0): build retraces it with the row loop; every program fits, and the result is
+    the rolled plan's bit for bit."""
+    m = net()
+    gm = torch.fx.GraphModule(m, Leaf().trace(m))
+    H = W = 64
+    x = np.random.default_rng(3).standard_normal((1, 3, H, W)).astype(np.float32)
+    outs = []
+    for imem in (1 << 20, 2048):
+        cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=128, TMEM_WORDS=65536, LANES=8,
+                     IMEM_WORDS=imem)
+        plan = G.build(gm, (3, H, W), cfg, wsplit=True)
+        n = max(len(op.prog) for op in plan.ops)
+        assert (n > 256) if imem > 2048 else (n <= 256), n
+        img = plan.image(plan.size, cfg.D)
+        plan.put_input(img, "x", x[0].transpose(1, 2, 0))
+        outs.append(plan.read(plan.run_isa(cfg, img), plan.env[plan.out_node]))
+    assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
