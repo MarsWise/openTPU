@@ -31,7 +31,7 @@ __all__ = ["jit", "program_id", "num_programs", "block_size", "tmem_words", "mxu
            "recip", "rsqrt", "abs", "maximum", "minimum", "max", "sum", "sumsq", "outer", "full",
            "zeros",
            "empty", "all_gather", "all_reduce", "range", "static_range", "kv_append", "Tensor", "QTensor",
-           "KVDesc", "Tile", "CompileError", "LOG2E", "LN2", "has_tfn", "tfn"]
+           "KVDesc", "Tile", "CompileError", "LOG2E", "LN2", "has_tfn", "tfn", "mac"]
 
 LOG2E = 1.0 / math.log(2.0)
 LN2 = math.log(2.0)
@@ -215,6 +215,12 @@ def tfn(name: str, x) -> Tile:
     if not has_tfn():
         raise CompileError(f"tfn({name!r}): the target has no table functions (Config.TFN)")
     return current().unop(T.func_code(name), x)
+
+
+def mac(x, c, y, out=None) -> Tile:
+    """x * c[None, :] + y in one VOP (MAC: c a [cols] column vector; y a tile, or a row or column
+    broadcast). out: write there, e.g. in place into the accumulator y."""
+    return current().mac(x, c, y, out=out)
 
 
 def abs(x) -> Tile:  # noqa: A001

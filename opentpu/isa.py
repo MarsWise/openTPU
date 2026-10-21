@@ -42,10 +42,11 @@ C_EQ, C_NE, C_GE = 0, 1, 2      # WAITW flags[1:0]: the word ==, != or >= (signe
 
 # VOP functions
 V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_OUTER = 0, 1, 2, 3, 4, 5, 6
+V_MAC = 7                 # A * Cv(c) + B: Cv the column vector at imm (TMEM, w7 += R[rd])
 V_COPY, V_EXP2, V_RECIP, V_RSQRT, V_ABS, V_FILL, V_EXP2SUB, V_LOG2 = 8, 9, 10, 11, 12, 13, 14, 15
 V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX = 16, 17, 18, 19, 20
 VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max",
-          V_MIN: "min", V_OUTER: "outer", V_COPY: "copy", V_EXP2: "exp2", V_RECIP: "recip",
+          V_MIN: "min", V_OUTER: "outer", V_MAC: "mac", V_COPY: "copy", V_EXP2: "exp2", V_RECIP: "recip",
           V_RSQRT: "rsqrt", V_ABS: "abs", V_FILL: "fill", V_EXP2SUB: "exp2sub",
           V_LOG2: "log2", V_RSUM: "rsum", V_RMAX: "rmax", V_RSSQ: "rssq", V_RDOT: "rdot",
           V_ARGMAX: "argmax"}
@@ -56,7 +57,7 @@ VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "ge
                V_GELU_TANH: "gelu_tanh", V_SOFTPLUS: "softplus", V_MISH: "mish",
                V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos"})
 TFN_FUNCS = set(range(0x20, 0x2A))
-BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB}
+BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
 READS_B = BINARY | {V_RDOT}          # functions that read operand B in its bmode (OUTER: B_ROW)
 F_DSCALAR, F_DONE = 0x1, 0x2         # VOP OUTER: decay T[d] for every column / decay 1.0
@@ -491,7 +492,7 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func == V_ARGMAX else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
@@ -518,6 +519,16 @@ def outer(dst, d, b, c, rows, cols, drs, brs, dmode="scalar", ra=0, rb=0, rc=0, 
                  w=_w(dst, d, b, rows | (cols << 16), drs, brs | (V_OUTER << 16) | (B_ROW << 24),
                       c),
                  comment=comment)
+
+
+def mac(dst, a, b, c, rows, cols, drs, ars, brs, bmode=B_FULL, ra=0, rb=0, rc=0, rd=0,
+        comment="mac"):
+    """VOP MAC: T[dst + r*drs + j] = A(r, j) * T[c + j] + B(r, j) (B in bmode FULL, ROW or COL;
+    the column vector Cv = T[c + j] is read first, into the VPU's column buffers: cols <= 256)."""
+    _check(0 < cols <= OUTER_MAX_COLS and bmode != B_SCALAR,
+           f"MAC: cols {cols} (at most {OUTER_MAX_COLS}), bmode {bmode} (not SCALAR)")
+    return vop(V_MAC, dst, a, b, rows, cols, drs, ars, brs, bmode, c, ra=ra, rb=rb, rc=rc,
+               rd=rd, comment=comment)
 
 
 def gather(src, dst, rows, cols, srs, drs, seg, ra=0, rb=0, comment=""):

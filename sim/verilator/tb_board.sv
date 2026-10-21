@@ -39,6 +39,9 @@ module tb_board;
   parameter int TRACE_QD   = 32;
   parameter int PQ_WIN     = 1024;
   parameter bit DSTEP      = 1'b1;
+  parameter bit TPAIR      = 1'b0;         // CAPS2 bit1 / bit2 / bit3 as the build reports them
+  parameter bit TQUAD      = 1'b0;         // (TMM PAIR, TMM QUAD, the table functions: r4 / r5)
+  parameter bit TFN        = 1'b0;
   parameter int MEM_NATIVE = 2;            // the channels: 2 otpu_chmem (otpu_mem_ch and a LiteDRAM
                                            // model), 1 otpu_native_mem
   parameter bit HOSTCAL    = 1'b0;         // CAPS bit27 (the host calibrates the controllers)
@@ -104,7 +107,7 @@ module tb_board;
                .IMEM_WORDS(IMEM_WORDS), .LANES(LANES), .VPU_CL(VPU_CL), .MXU_IMPL(MXU_IMPL), .MXU_E(MXU_E), .ULANES(ULANES), .WIN(WIN), .CORE_KHZ(CORE_KHZ),
                .BUILD_ID(BUILD_ID), .DDR_MTS(DDR_MTS), .TRACE_DEPTH(TRACE_DEPTH), .TRACE_QD(TRACE_QD),
                .PQ_WIN(PQ_WIN), .DSTEP(DSTEP), .HOSTCAL(HOSTCAL), .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM),
-               .ARCH_HASH(ARCH_HASH), .COLL_GATHER(COLL_GATHER || S > 1), .TMEM_IMPL(TMEM_IMPL),
+               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .ARCH_HASH(ARCH_HASH), .COLL_GATHER(COLL_GATHER || S > 1), .TMEM_IMPL(TMEM_IMPL),
                .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH), .TMEM_RPL(TMEM_RPL),
                .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK),
                .TMEM_SDM(TMEM_SDM)) dut (

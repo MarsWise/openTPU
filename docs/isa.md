@@ -349,6 +349,12 @@ still the whole row's, but only elements `c < KB*D/2` are written (a V^T append 
 as wide as its padded row, LFM2's 64 of 128, then writes its 64 real rows instead of 128
 byte-strided ones; a quantizer without `HALF` writes the zero padding too, which nothing reads).
 
+Timing only (the result is the same): a QST with `drs = 1`, `es` a multiple of 4, `dst` word
+aligned and rows of at most 1024 elements (the V^T appends of the attention caches) runs the
+quantizer's T4 path: each row's bytes go to a transposition buffer at LANES a cycle, and every
+four rows are written out a word (four tokens' bytes) a cycle, where the byte path writes one
+byte a cycle.
+
 ### VOP
 
 `dst = R[ra]+w1`, `a = R[rb]+w2`, `b = R[rc]+w3` (TMEM words), `rows = w4[15:0]`,
@@ -371,6 +377,7 @@ Elementwise functions write `T[dst + r*drs + c] = f(A, B)`; reductions write
 | 4 | MAX | max(A, B) |
 | 5 | MIN | min(A, B) |
 | 6 | OUTER | A * Dv(c) + B(r) * Cv(c), in place (see below) |
+| 7 | MAC | A * Cv(c) + B: `Cv(c) = T[imm + c]` (imm the TMEM address `R[rd] + w7`), B in FULL / ROW / COL (not SCALAR), `cols <= 256` (r5 vector extensions: CAPS2 bit3, `Config.TFN`) |
 | 8 | COPY | A |
 | 9 | EXP2 | exp2(A) |
 | 10 | RECIP | recip(A) |
@@ -402,6 +409,12 @@ Dv(c)), mul(B(r), Cv(c)))`: two rounded products, then a rounded add. B must be 
 bit 1 (DONE; `a` is not read). The `a` field holds the decay address: A is dst itself (`ars` is
 not used). `cols <= 256`. `Cv` and `Dv` are read before anything is written, so they may overlap
 dst; `B(r)` is read with every element and must not be written by an earlier element.
+
+**MAC** reads its column vector `Cv` before anything is written (into the VPU's column buffers,
+as OUTER's), so `Cv` may overlap dst; A and B are read with each element (B may be dst itself,
+element for element: an accumulator, `dst += A * Cv`). One rounded product, then a rounded add.
+Depthwise convolution takes one MAC a tap (it took a MUL and an ADD), LayerNorm's affine step
+`(x r) w + b` one pass (two), AdaLN's `x (1 + scale) + shift` one.
 
 ### Table functions
 

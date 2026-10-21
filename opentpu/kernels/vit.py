@@ -79,7 +79,10 @@ def layernorm_(x, w, b, eps: float, cols: int = 384) -> None:
     r = ol.rsqrt(ol.sumsq(x) * n + eps)
     for c0, c1 in parts:
         xv = x[:, c0:c1]
-        xv.set((xv * r[:, None]) * w[c0:c1][None, :] + b[c0:c1][None, :])
+        if ol.has_tfn():                       # VOP MAC: (x r) * w + b in one pass
+            ol.mac(xv * r[:, None], w[c0:c1], b[c0:c1][None, :], out=xv)
+        else:
+            xv.set((xv * r[:, None]) * w[c0:c1][None, :] + b[c0:c1][None, :])
 
 
 def layernorm_q(x, w, eps: float, inplace: bool = False):

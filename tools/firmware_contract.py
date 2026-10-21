@@ -50,6 +50,23 @@ def host_report(contract: dict) -> dict:
     }
 
 
+def _match_known(contract: dict, info: dict) -> dict | None:
+    """The contract's "known" bitstream (r3, r4, r5-m4, r5-m8: each its build, CFG_HASH and
+    VERSION) that the card's registers name, or None. A pending entry (build_id "pending",
+    before its build) matches on CFG_HASH and VERSION."""
+    cfg_hash = (info.get("cfg") or {}).get("hash")
+    for k in contract.get("known", []):
+        bid = k.get("build_id", "pending")
+        if bid != "pending" and info.get("build_id") != int(bid, 0):
+            continue
+        if cfg_hash is not None and int(k.get("cfg_hash", "0"), 0) != cfg_hash:
+            continue
+        if any(info.get(key) != val for key, val in k["version"].items()):
+            continue
+        return {**k, "build_id": bid if bid != "pending" else f"{info.get('build_id') or 0:#x}"}
+    return None
+
+
 def card_report(contract: dict, dev: str) -> dict:
     from opentpu.host.board import Board, XdmaTransport
 
@@ -60,7 +77,7 @@ def card_report(contract: dict, dev: str) -> dict:
     finally:
         transport.close()
 
-    expected = contract["firmware"]
+    expected = _match_known(contract, info) or contract["firmware"]
     expected_version = expected["version"]
     actual_version = {key: info[key] for key in expected_version}
     mismatches = [
@@ -85,6 +102,7 @@ def card_report(contract: dict, dev: str) -> dict:
         "version": actual_version,
         "cfg_hash": None if not info["cfg"] else f"{info['cfg']['hash']:#010x}",
         "bitstream_sha256": expected["bitstream_sha256"],
+        "name": expected.get("name", contract["firmware"].get("name")),
         "part": expected["part"],
     }
 

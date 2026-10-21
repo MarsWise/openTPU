@@ -305,3 +305,60 @@ def test_quantizer_ties_qact_rtl(have_verilator, row):
     acc = np.where(d <= 16, q << np.maximum(16 - d, 0), 0)
     want = F.mul(F.i2f(acc), F.mul(s, F.f32(2.0 ** -16))[:, None, None])
     assert np.array_equal(got.view(np.uint32), want.transpose(1, 0, 2).view(np.uint32))
+
+
+def _both_kw(cfg, prog, dram, **kw):
+    m = Machine(cfg, [prog], [dram.copy()]).run()
+    drams, tmems, st = rtlsim.run(cfg, [prog], [dram.copy()], **kw)
+    bad = np.nonzero(drams[0] != m.slices[0].dram)[0]
+    assert len(bad) == 0, (f"{len(bad)} DRAM bytes differ, first at {bad[:6]}: RTL "
+                           f"{drams[0][bad[:6]]} ISA {m.slices[0].dram[bad[:6]]}")
+    assert np.array_equal(tmems[0], m.slices[0].tmem)
+    return st
+
+
+@pytest.mark.parametrize("D,stall", [(32, 0), (128, 0), (128, 25)])
+def test_qst_t4_transposed_rtl(have_verilator, D, stall):
+    """QST T4 (drs = 1, es a multiple of 4: the V^T caches' layout): rows 1 to 9 (a short last
+    group, one group, several, both buffer halves), KB 1 to 3, ROW or not, HALF, es 4 / 8 / a
+    cache's capacity; and the byte-at-a-time path beside it (es 4 at an unaligned dst, a row
+    longer than the buffer): DRAM bit for bit, with random memory stalls."""
+    cfg = Config(S=1, D=D, MCOLS=4, DRAM_BYTES=1 << 21)
+    rng = np.random.default_rng(D + stall)
+    R, KB = 9, 3
+    x = _qrows(rng, R, KB * D, D)
+    dram = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    _put(dram, X, x)
+    prog = [I.ld(X, 0, x.size)]
+    sd = 0x40000
+    cases = [(1, 1, False, False, 4, 0), (3, 1, True, False, 4, 0), (4, 2, False, False, 8, 0),
+             (5, 3, True, False, 132, 0), (8, 2, True, True, 4, 0), (9, 3, False, False, 64, 0),
+             (6, 1, True, False, 4, 2), (7, 2, False, False, 12, 0)]
+    for n, kb, row, half, es, off in cases:
+        prog.append(I.qst(0, sd + off, sd + 0x10000, n, kb, KB * D, 1, es, row=row, half=half))
+        sd += 0x20000
+    prog.append(I.halt())
+    kw = {"axi": True, "stall": stall} if stall else {}
+    _both_kw(cfg, prog, dram, **kw)
+
+
+def test_qst_t4_speed_rtl(have_verilator):
+    """T4 against the byte-at-a-time path on the same rows (the V^T append of 64 tokens of a
+    128-wide head), whole runs (the LD of the rows included): measured 5,930 against 12,969
+    cycles (2.19x). A row's scale (pass 0, the scale unit, its scale-row word) still comes
+    between its passes, ~44 of T4's ~60 cycles a 128-element row; the byte path writes its 128
+    bytes one a cycle on top."""
+    cfg = Config(S=1, D=128, MCOLS=4, DRAM_BYTES=1 << 21)
+    rng = np.random.default_rng(3)
+    R = 64
+    x = (rng.standard_normal((R, 128))).astype(np.float32)
+    dram = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    _put(dram, X, x)
+    cyc = {}
+    for name, es, dst in (("t4", 256, 0x40000), ("bytes", 256, 0x40001)):
+        prog = [I.ld(X, 0, x.size), I.qst(0, dst, 0x80000, R, 1, 128, 1, es, row=True),
+                I.halt()]
+        st = _both_kw(cfg, prog, dram)
+        cyc[name] = st["cycles"] if isinstance(st, dict) and "cycles" in st else st
+    print(cyc)
+    assert cyc["t4"] * 2 < cyc["bytes"], cyc

@@ -728,6 +728,12 @@ class _Parts:
         self.b, self.rows, self.cols = b, rows, cols
         self.shape = shape or (rows, cols)
 
+    def __getitem__(self, idx):
+        """A column range's shape (Stationary.blocks of a stationary filled in parts)."""
+        _, cs = idx
+        c0, c1, _ = cs.indices(self.cols)
+        return _Parts(self.b, self.rows, c1 - c0)
+
 
 class Stationary:
     """A tile quantized into ACT RAM blocks [ab, ab+KB), in chunks of up to ACT_ROWS rows.
@@ -1379,7 +1385,33 @@ class Builder:
             return out
         raise CompileError(f"cannot use {x!r} as a tile")
 
-    def vop(self, func: int, dst: Tile, a: Tile | None, b, at=None) -> None:
+    def mac(self, x, c, y, out=None) -> Tile:
+        """out = x * c[None, :] + y (VOP MAC: c a [cols] tile, read into the VPU's column buffers;
+        y a tile of x's shape, or a row / column broadcast). out: write there (e.g. in place into
+        y, an accumulator) instead of a new tile. Columns go 256 a VOP."""
+        x = self.materialize(x)
+        if not isinstance(c, Tile) or c.shape != (x.cols,):
+            raise CompileError(f"mac: the column vector must be a [{x.cols}] tile")
+        self.check_live(x, c, y if isinstance(y, Tile) else (y.t if isinstance(y, Bcast) else None))
+        if out is None:
+            out = self.alloc(x.shape)
+        elif (out.rows, out.cols) != (x.rows, x.cols):
+            raise CompileError(f"mac: out {out.shape} vs {x.shape}")
+        for c0 in builtins.range(0, x.cols, I.OUTER_MAX_COLS):
+            c1 = min(c0 + I.OUTER_MAX_COLS, x.cols)
+            whole = c0 == 0 and c1 == x.cols
+            xs, os_ = (x, out) if whole else (x[:, c0:c1], out[:, c0:c1])
+            if isinstance(y, Tile):
+                ys = y if whole else y[:, c0:c1]
+            elif isinstance(y, Bcast) and y.kind != B_ROWVIEW and not whole:
+                ys = Bcast(y.t[c0:c1], y.kind)
+            else:
+                ys = y
+            self.vop(I.V_MAC, os_, xs, ys, cv=c if whole else c[c0:c1])
+        out.fresh = True
+        return out
+
+    def vop(self, func: int, dst: Tile, a: Tile | None, b, at=None, cv=None) -> None:
         """Emit dst = func(a, b) over dst's shape; b may be a Tile, Bcast or float. at: a TMEM
         word offset with loop terms added to dst's address (VOP's dst = R[ra] + w1: rows of a
         buffer the loop walks, the looped attention's outputs, tiled._attention_loop)."""
@@ -1411,6 +1443,10 @@ class Builder:
             raise CompileError(f"bad operand {b!r}")
         drs = dst.rs if len(dst.shape) == 2 else 0
         ra, d_base = (0, dst.base) if at is None else self.addr(Affine(dst.base) + Affine.of(at))
+        if func == I.V_MAC:
+            if bmode == I.B_SCALAR:
+                raise CompileError("mac: y must be a tile or a broadcast (not a scalar)")
+            imm = cv.base
         self.emit(I.vop(func, d_base, a_base, b_base, rows, cols, drs, ars, brs, bmode, imm,
                         ra=ra, comment=I.VFUNCS[func]))
 
@@ -1469,7 +1505,8 @@ class Builder:
         if not getattr(value, "fresh", False) or value.shape != dst.shape:
             return False
         ins = self._last_vop_writing(value)
-        if ins is None or (ins.w[5] >> 16) & 0xFF in I.REDUCE:
+        if ins is None or (ins.w[5] >> 16) & 0xFF in I.REDUCE or \
+                (ins.w[5] >> 16) & 0xFF == I.V_MAC:
             return False
         rows, cols = dst.rows, dst.cols
         drs = dst.rs if len(dst.shape) == 2 else 0

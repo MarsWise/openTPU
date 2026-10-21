@@ -239,6 +239,8 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
                 rd.append(_mk(SP_TMEM, w[6], cols))
             elif f != I.V_FILL:
                 rd.append(_mk(SP_TMEM, w[1], p0 + cols))
+            if f == I.V_MAC:
+                rd.append(_mk(SP_TMEM, w[6], cols))
             if f in I.BINARY or f in (I.V_RDOT, I.V_OUTER):
                 if bm == I.B_FULL:
                     rd.append(_mk(SP_TMEM, w[2], p1 + cols))

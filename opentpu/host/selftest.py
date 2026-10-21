@@ -50,7 +50,7 @@ from opentpu.host.board import (CH_BYTES, ID_OTPU, R_ID, R_SCRATCH, R_STATUS, ST
                                 device_config)
 from opentpu.host.checks import (address_lines, bandwidth, channel_patterns, masked_program,
                                  model_check, partial_writes, pattern_test, run_demo,
-                                 stream_check, tmm_check, vops_check)
+                                 stream_check, tmm_check, vext_check, vops_check)
 
 HINTS = {
     "link": "Is the card enumerated (lspci -d 10ee:), the XDMA driver loaded (lsmod | grep "
@@ -93,6 +93,12 @@ HINTS = {
     "stream": "The stream engine computed a STREAM or DSTEP differently from the ISA "
               "simulator: run tests/test_stream.py -k rtl and the stream stage on the board "
               "model (tests/test_board.py::test_stream_on_board_model).",
+    "tmm": "A ternary MM (TMM, or its PAIR / QUAD K-splits on a bitstream that reports them in "
+           "CAPS2) differs from the ISA simulator: run tools/bench_tmm.py --mode plain|pair|quad "
+           "for the failing mode, and check the bitstream's CAPS2 against its build.",
+    "vext": "A table function, VOP MAC or a QST T4 write differs from the ISA simulator (the r5 "
+            "vector extensions, CAPS2 bit3): tools/r5_card_check.py names the failing program; "
+            "otpu-diag's vpu-tfn group runs each function alone.",
     "model": "Kernels pass but the model differs: compare per-token logits against "
              "IsaBackend with opentpu.llm.qwen3.Engine; check that the image fits the DRAM.",
     "ecc": "A DDR3 channel's ECC found an uncorrectable word (STATUS bit9 ECC_DED) in what the "
@@ -133,7 +139,7 @@ class Runner:
               flush=True)
         if not ok:
             self.failed = name
-            print(f"         hint: {HINTS[name]}")
+            print(f"         hint: {HINTS.get(name, 'run otpu-diag for the failing group')}")
         return ok
 
 
@@ -269,6 +275,9 @@ def main(argv=None) -> int:
     def tmm():
         return tmm_check(board, cfg)
 
+    def vext():
+        return vext_check(board, cfg)
+
     def model():
         return model_check(t, cfg, a.model, a.tokens, a.sim, a.wformat, a.head_format)
 
@@ -287,6 +296,7 @@ def main(argv=None) -> int:
     r.stage("vops", vops)
     r.stage("stream", stream)
     r.stage("tmm", tmm)
+    r.stage("vext", vext)
     if a.model:
         r.stage("model", model)
     r.stage("ecc", ecc)

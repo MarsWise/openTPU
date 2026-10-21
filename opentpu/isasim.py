@@ -723,6 +723,8 @@ class Slice:
         c = np.arange(cols)[None, :]
         if func == I.V_OUTER:
             return self._outer(ins, dst, a, b, w7, rows, cols, drs, brs, bmode)
+        if func == I.V_MAC and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
+            raise SimError("VOP MAC: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
         A = self.tget(aidx) if func != I.V_FILL else None
         bidx = None
@@ -771,6 +773,10 @@ class Slice:
                I.V_RECIP: lambda: F.recip(A), I.V_RSQRT: lambda: F.rsqrt(A),
                I.V_ABS: lambda: F.fabs(A), I.V_FILL: lambda: F.ftz(B),
                I.V_EXP2SUB: lambda: F.exp2(F.sub(A, B)), I.V_LOG2: lambda: F.log2(A)}
+        if func == I.V_MAC:
+            # the column vector is read before anything is written (the VPU's buffers)
+            Cv = self.tget(np.broadcast_to(w7 + c, (1, cols)))
+            ops[func] = lambda: F.add(F.mul(A, Cv), B)
         if func in I.TFN_FUNCS:
             if not getattr(self.cfg, "TFN", False):
                 raise SimError(f"VOP: table function {func:#x} needs Config.TFN")

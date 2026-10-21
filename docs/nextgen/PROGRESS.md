@@ -187,6 +187,52 @@ the largest VPU cost (SiLU 0.79 elements/cycle as 5 VOPs; 29% of a 3x3 conv's ti
 - New PCIe host reported by the user: `192.168.0.157`, x8 (HARDWARE_CONNECTIVITY.md; not yet
   inspected: `host157_check.cmd`).
 
+### Bitstream r4 on the card (2026-10-21, host 192.168.0.157, PCIe Gen2 x8)
+
+r4 (bb27096f, m4 133.33 MHz, TMM PAIR + QUAD; WNS +0.031 / WHS +0.018 ns, LUT 63.1%, BRAM 39.7%,
+DSP 37.9%, sha256 cf0af8a6...) loaded over JTAG (volatile) by the user. **Erratum found on the
+card:** CAPS2 read 0 (REGMAP 5, CFG_HASH 3fb1359e), so the host computed r3's hash 4ffd1e17 and
+refused the card. Cause: `otpu_fpga_top_ld` had no TPAIR / TQUAD parameters and Vivado dropped
+the generics (the PAIR / QUAD datapaths are in every build). Fixed in the tops (00be1641, a test
+that every generic reaches otpu_board) and by a host erratum for that build (board.CAPS2_ERRATA).
+Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIED so far:
+- the card reports r4 with TPAIR / TQUAD (via the erratum), selftest, TMM plain / PAIR / QUAD:
+  passed (the script went on to the models);
+- BitNet b1.58 2B4T generate on r4 (TMM QUAD): coherent text; otpu-chat "The capital of France
+  is Paris." TTFT 0.95 s, prefill 18.9 tok/s (device 27.1), decode 10.8 tok/s (device 17.8),
+  7.48 Mcycles/token;
+- YOLOX-Nano graph: card == ISA for every op (CHECK PASS); COCO val2017 500: **mAP50-95 0.2821
+  (r3 0.2821), 0.34 s/image (r3 0.44)**;
+- SmolVLA tiny: card == ISA (CHECK PASS), 100% of MACs on the device, actions rel L2 0.0205;
+- TMM on the card, M=1: plain 127.7 / PAIR 254.4 / QUAD 507.0 MAC/cycle, each bit for bit vs
+  the ISA; BitNet generate 16.4 tok/s (56 ms/token on the card), fp4 head 19.2 tok/s, step 7.6;
+- **DRAM channel 0 ECC: 1,810,759 corrected / 30,997 uncorrectable (channel 1: 0 / 0)** from the
+  second COCO pass (--wsplit) on: the results above were checked before it; what ran after it
+  is void (SmolVLA base rel L2 0.878; vLLM BitNet 11.15 tok/s, then a DeviceBusy in
+  vllm_smoke's second engine -- a host bug, open). qual: skipped (no Qwen3 / LFM2.5 checkpoints
+  on the host); host pytest: 38 failures, all "verilator" not found on the host.
+- Next on the card: run 4b (`claude_run_r4b.sh`): memcal cal --force, load-centred read taps
+  (OTPU_LOAD_CENTER=1, the author's loadcal, normally only at 150 MHz), COCO x2 and SmolVLA
+  base with the ECC counts after each step.
+
+### r5 (2026-10-21): what is in it, its two builds
+
+r5 = r4 + TFN (46a368a5) + VOP MAC + QST T4 + the CAPS2 generics in the top; host: selftest's
+`vext` stage, the firmware contract's known bitstreams (r3, r4, r5-m4, r5-m8), the board model
+configured as r5 (tests/test_r5_board.py), tools/r5_card_check.py. Two builds, the user starts
+them (`_claude/build_r5_m8.cmd`, `build_r5_m4.cmd`): **r5-m8** = the author's production recipe
+r150o (m8, MXU_E 8, 128K TMEM, 150 MHz, the array on DSP / block RAM X3-X10, setup margin
+0.15 ns, ExtraPostPlacementOpt; CFG_HASH 3b7f244e) with ours; **r5-m4** = r4's recipe with ours
+(CFG_HASH 603d5a6f). Not in r5's hardware, and why: HETEROGENEOUS_CORE_DSE.md "R-series".
+
+r5 tree verification (container, Verilator 5.046, per file): test_r5_board 1/1 (CAPS2 / hash,
+every TFN function, MAC, QST T4, TMM PAIR / QUAD on the board model == ISA), test_quant_rtl
+34/34, test_vops 43/43, test_tfn + test_mac + test_conv_roll 49/49, test_se_vpu + test_fp_rtl
+18/18, test_host 94 + 1 skip, target / contract / isa / compiler / conv / cnngraph / kernels /
+waits 287 + 3, test_minicpmv 39 + 1. The 4 failures are this container's: the program cache
+writes nothing that leaves under 20 GB free (16 GB here), and the S=2 m8 testbench's C++ build
+was OOM-killed at 7 GB; rerun with the floor lowered and a one-job build: see VERIFIED_RESULTS.
+
 ## Earlier record (through 2026-10-17)
 
 Verification snapshot: implementation/test source commit `1d496cfe`, based on the then-published

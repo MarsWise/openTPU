@@ -10,7 +10,7 @@ package otpu_pkg;
                          OP_VOP = 8'h30, OP_GATHER = 8'h40;
 
   localparam logic [7:0] V_ADD = 0, V_SUB = 1, V_RSUB = 2, V_MUL = 3, V_MAX = 4, V_MIN = 5,
-                         V_OUTER = 6, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
+                         V_OUTER = 6, V_MAC = 7, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
                          V_ABS = 12, V_FILL = 13, V_EXP2SUB = 14, V_LOG2 = 15, V_RSUM = 16,
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20;
   // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
@@ -166,7 +166,7 @@ package otpu_pkg;
 
   function automatic logic is_binary(input logic [7:0] f);
     return f == V_ADD || f == V_SUB || f == V_RSUB || f == V_MUL || f == V_MAX || f == V_MIN ||
-           f == V_FILL || f == V_EXP2SUB;
+           f == V_FILL || f == V_EXP2SUB || f == V_MAC;
   endfunction
 
   // the functions that read operand B in its bmode (OUTER's is always B_ROW)
@@ -353,6 +353,7 @@ package otpu_pkg;
             f.rd[2] = mk(SP_TMEM, c.w7, cols);
           end else if (c.w6[23:16] != V_FILL)
             f.rd[0] = mk(SP_TMEM, c.w2, p.p0 + cols);
+          if (c.w6[23:16] == V_MAC) f.rd[2] = mk(SP_TMEM, c.w7, cols);   // its column vector
           if (reads_b(c.w6[23:16])) begin
             case (c.w6[25:24])
               B_FULL: f.rd[1] = mk(SP_TMEM, c.w3, p.p1 + cols);

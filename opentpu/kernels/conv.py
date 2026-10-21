@@ -26,11 +26,14 @@ none. Grouped convolutions with 1 < groups < channels, pooling, resize and conca
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .. import language as ol
 from .lib import sigmoid, silu
 
+ROLL = True                                   # conv2d's rolling patches (tests turn it off)
 ACTS = {"none": None, "silu": silu, "relu": lambda x: ol.maximum(x, 0.0), "sigmoid": sigmoid}
 
 
@@ -99,12 +102,16 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     R = ol.current().cfg.act_rows
     f = ACTS[act]
     bias = ol.load(b)
-    rows = ol.empty([KH, rw])
     groups = [(o, min(R, OW - o)) for o in range(0, OW, R)]
+    cfg = ol.current().cfg
+    roll = (ROLL and KH > 1 and stride < KH and OH > 1 and
+            len(groups) * KH * (Kp // D) + 8 <= ol.act_blocks() and
+            not any(cfg.PAIR and 2 * n <= cfg.MCOLS for _, n in groups))
+    rows = None if roll else ol.empty([KH, rw])
     # two output tiles when TMEM has room: the VPU's bias fill, activation and residual and the
     # store of one tile overlap the MXU's MMs into the other (the sequencer runs units
     # concurrently on disjoint TMEM)
-    nbuf = 2 if 2 * R * Cout + KH * rw + 3 * Cout + 4096 <= ol.tmem_words() else 1
+    nbuf = 2 if 2 * R * Cout + (2 if roll else KH) * rw + 3 * Cout + 4096 <= ol.tmem_words() else 1
     outs = [ol.empty([R, Cout]) for _ in range(nbuf)]
 
     def row(oh, par=0):
@@ -125,7 +132,54 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
             ol.store(_out(y, oh, ow0, n, OW), yt)
 
     rbuf = ol.empty([R, Cout]) if res is not None else None
-    if OH == 1:
+    # ---- rolling patches (stride < KH): each input row's patches are quantized once, into
+    # a ring of KH slots of a stationary per tile of output pixels, and every output row's KH
+    # MMs read their kernel rows' slots: a QACT (and an input row's LD) per output row instead
+    # of KH. The patches and their scales are the per-kernel-row QACTs' above bit for bit.
+    P = KH // math.gcd(stride, KH)             # rows an unrolled iteration: slots repeat
+    if roll:
+        sts = [ol.stationary(n, KH * Kp) for _, n in groups]
+        xr = ol.empty([2, rw])                 # the newest input row (two: LD beside QACT)
+        nq = [0]
+
+        def quant(i, slot):
+            """Input row i into every tile's slot."""
+            xb = xr[nq[0] % 2:nq[0] % 2 + 1, :]
+            nq[0] += 1
+            ol.load(x[i:i + 1, :], out=xb)
+            for gi, (ow0, n) in enumerate(groups):
+                ol.quantize_into(sts[gi], xb.windows(0, ow0 * stride * Cin, n, stride * Cin, Kp),
+                                 slot * Kp)
+
+        def rrow(oh, u, par):
+            """Output row oh = (loop) + u, u its static phase: rows oh*s + KH - s .. are new."""
+            for t in range(stride):
+                k = KH - stride + t
+                quant(oh * stride + k, (u * stride + k) % KH)
+            for gi, (ow0, n) in enumerate(groups):
+                yt = outs[(par + gi) % nbuf][0:n, :]
+                yt.set(bias[None, :])
+                for kh in range(KH):
+                    q = sts[gi].blocks(((u * stride + kh) % KH) * (Kp // D), Kp // D)
+                    ol.dot(q, w[:, kh * Kp:(kh + 1) * Kp], acc=yt)
+                    if wlo is not None:
+                        ol.dot(q, wlo[:, kh * Kp:(kh + 1) * Kp], acc=yt)
+                if f is not None:
+                    yt.set(f(yt))
+                if res is not None:
+                    yt.set(yt + ol.load(_out(res, oh, ow0, n, OW), out=rbuf[0:n, :]))
+                ol.store(_out(y, oh, ow0, n, OW), yt)
+
+        for k in range(KH - stride):           # the first row's older rows
+            quant(k, k % KH)
+        per = (P if (nbuf == 1 or (len(groups) * P) % 2 == 0) else 2 * P)
+        if OH // per >= 1:
+            for j in ol.range(OH // per):
+                for u in range(per):
+                    rrow(j * per + u, u % P, (u * len(groups)) % nbuf)
+        for oh in range(OH // per * per, OH):
+            rrow(oh, oh % P, (oh * len(groups)) % nbuf)
+    elif OH == 1:
         row(0)
     elif nbuf == 2 and len(groups) % 2 == 1:
         # an odd number of tiles a row: two rows an iteration, so the tiles still alternate
@@ -175,6 +229,7 @@ def depthwise2d(x, w, b, y, H: int, W: int, C: int, K: int, stride: int, pad: in
     groups = [(o, min(G, OW - o)) for o in range(0, OW, G)]
     acc = ol.empty([G, C])
     tmp = ol.empty([G, C])
+    mac = ol.has_tfn()                         # VOP MAC (the r5 vector extensions, CAPS2 bit3)
 
     def row(oh):
         ol.load(x[oh * stride:oh * stride + K, :], out=rows)
@@ -184,8 +239,11 @@ def depthwise2d(x, w, b, y, H: int, W: int, C: int, K: int, stride: int, pad: in
             for kh in range(K):
                 for kw in range(K):
                     v = rows.windows(kh, (ow0 * stride + kw) * C, n, stride * C, C)
-                    t.set(v * taps[kh * K + kw, :][None, :])
-                    a.set(a + t)
+                    if mac:                    # one VOP a tap: a += v * w (VOP MAC)
+                        ol.mac(v, taps[kh * K + kw, :], a, out=a)
+                    else:
+                        t.set(v * taps[kh * K + kw, :][None, :])
+                        a.set(a + t)
             if f is not None:
                 a.set(f(a))
             if res is not None:

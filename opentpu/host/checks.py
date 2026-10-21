@@ -601,3 +601,37 @@ def model_check(t, cfg, model: str, tokens: int, sim: bool, wformat: str = "int8
                 f"{dev.rows}, {pre_cyc / 1e6:.2f} Mcycles/token; {len(one)} one-token runs, "
                 f"{np.mean(one) / 1e6:.2f} Mcycles/token; {dt:.1f} s wall" +
                 ("" if ok else f"; ISA simulator says {tok.decode(want)!r}"))
+
+
+def vext_program() -> list:
+    """VOP MAC in its modes (FULL / ROW / COL, in place into B) and a QST T4 V^T write (rows
+    into a cache's transposed layout), on the demo image's data."""
+    A, B_, C_, RES = 0, 1024, 2048, 8192
+    p = [I.ld(DATA, 0, 4096)]
+    for k, bm in enumerate((I.B_FULL, I.B_ROW, I.B_COL)):
+        p.append(I.mac(RES + 512 * k, A, B_, C_, 3, 100, 100, 101,
+                       1 if bm == I.B_ROW else 103, bm))
+    p.append(I.mac(B_, A, B_, C_, 3, 100, 103, 101, 103, I.B_FULL))
+    p += [I.st(OUT, RES, 1536), I.st(OUT + 0x2000, B_, 512),
+          I.qst(A, OUT + 0x4000, OUT + 0x10000, 7, 1, 128, 1, 132, row=True), I.halt()]
+    return p
+
+
+def vext_check(board, cfg) -> tuple[bool, str]:
+    """otpu-selftest's vext stage (the r5 vector extensions, CAPS2 bit3): every table function
+    on a tile and on the edge values (otpu-diag's vpu-tfn checks) and vext_program(), each
+    against the ISA simulator; a bitstream without them passes with a note."""
+    if not getattr(cfg, "TFN", False):
+        return True, "note: no vector extensions (CAPS2 bit3 clear)"
+    from .opchecks import diag_image, op_checks
+    img = diag_image(cfg)
+    progs = [(n, p) for g, n, p in op_checks(cfg) if g == "vpu-tfn"]
+    progs.append(("MAC / QST T4", vext_program()))
+    bad = []
+    for name, prog in progs:
+        ok, msg, _ = run_demo(board, cfg, prog, img)
+        if not ok:
+            bad.append(f"{name}: {msg.split(',')[0]}")
+    if bad:
+        return False, f"{len(bad)} of {len(progs)} differ: " + "; ".join(bad[:4])
+    return True, f"{len(progs)} programs (TFN x10 on tiles and edge values, MAC, QST T4) == ISA"

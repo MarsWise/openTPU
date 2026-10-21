@@ -573,7 +573,8 @@ class SimTransport:
         p.setdefault("PLATFORM", t.platform_id)
         p.setdefault("ARCH_HASH", "32'h%08x" % arch_hash(build_config(
             t, MCOLS=p["MCOLS"], LANES=p["LANES"], ACT_ROWS=p["ACT_ROWS"],
-            TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0))))
+            TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0),
+            TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0))))
         exe = rtlsim.build("tb_board", srcs, p)
         with simtmp.tempdir("otpu_board_") as d:
             for c in range(len(self.ch)):
