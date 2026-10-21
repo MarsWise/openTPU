@@ -116,3 +116,23 @@ def test_the_load_runs_on_the_isa_simulator(tmem):
         assert np.array_equal(got[a["dma"] + k * L.TILE:a["dma"] + (k + 1) * L.TILE], src)
     out = got[a["out"]:a["out"] + 4 * 2 * L.ROWS * L.R].view(np.float32).reshape(2 * L.ROWS, L.R)
     assert np.isfinite(out).all() and (np.abs(out).sum(1) > 0).all()
+
+
+def test_a_host_calibration_after_the_cpu_s_is_the_one_loadcal_starts_from(monkeypatch):
+    """memcal cal --force holds the core's CPU and calibrates from the host: loadcal then starts
+    from the host's taps, bitslips and bit offsets, not the CPU's stale mailbox (run 4c)."""
+    from opentpu.host import memcal, selfcal
+
+    def res(tap, offs):
+        return {"read": [{"tap": tap, "bitslip": 4}] * 9, "bit_offsets": [offs] * 9}
+    cpu = {0: res(14, [0] * 8), 1: res(6, [0, 0, 0, 2, 2, 0, 2, 0])}
+    host = {"by": "host", "channels": {"1": res(7, [2, 0, 0, 2, 2, 0, 2, 0])}}
+    monkeypatch.setattr(selfcal, "present", lambda c: True)
+    monkeypatch.setattr(selfcal, "result", lambda c, cfg: cpu)
+    monkeypatch.setattr(memcal, "last", lambda t: host)
+    for held, tap1, off1 in ((False, 6, 0), (True, 7, 2)):
+        monkeypatch.setattr(selfcal, "held", lambda c, h=held: h)
+        taps = L.calibrated(None, None, Path("."))
+        slips, offs = L.calibrated_slips(None, None, Path("."))
+        assert taps[0] == [14] * 9 and taps[1] == [tap1] * 9
+        assert offs[1][0][0] == off1 and offs[1][0][3] == 2

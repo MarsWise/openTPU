@@ -280,11 +280,18 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
 
 # ------------------------------------------------------------------------------ on the card
 def _calibration(c, t, data: Path) -> dict:
-    """{channel: the calibration's result}: the core's CPU's, or the host's last one."""
+    """{channel: the calibration's result}: the core's CPU's, or the host's last one. A host
+    calibration after the CPU's (memcal cal --force: memcal.ensure holds the CPU and calibrates
+    from the host) is the one the PHY has: its channels replace the CPU's mailbox result, which is
+    then stale. (r4's run 4c started loadcal from the CPU's after a host calibration: channel 1
+    lane 5's bit offsets differed by one bit, so that bit read wrong at every tap of the scan and
+    after it -- ECC corrected ~6e8 words a COCO pass.)"""
     from . import memcal, selfcal
+    host = {int(ch): r for ch, r in ((memcal.last(t) or {}).get("channels") or {}).items()}
     if selfcal.present(c):
-        return selfcal.result(c, data / "sdram_init.py")
-    return {int(ch): r for ch, r in ((memcal.last(t) or {}).get("channels") or {}).items()}
+        res = selfcal.result(c, data / "sdram_init.py")
+        return {**res, **host} if selfcal.held(c) else res
+    return host
 
 
 def calibrated(c, t, data: Path) -> list[list[int]]:
