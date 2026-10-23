@@ -317,17 +317,19 @@ def _both_kw(cfg, prog, dram, **kw):
     return st
 
 
-@pytest.mark.parametrize("D,stall", [(32, 0), (128, 0), (128, 25)])
-def test_qst_t4_transposed_rtl(have_verilator, D, stall):
+@pytest.mark.parametrize("D,mcols,stall", [(32, 4, 0), (128, 4, 0), (128, 4, 25),
+                                         (128, 8, 0), (128, 8, 25), (128, 8, 75)])
+def test_qst_t4_transposed_rtl(have_verilator, D, mcols, stall):
     """QST T4 (drs = 1, es a multiple of 4: the V^T caches' layout): rows 1 to 9 (a short last
     group, one group, several, both buffer halves), KB 1 to 3, ROW or not, HALF, es 4 / 8 / a
     cache's capacity; and the byte-at-a-time path beside it (es 4 at an unaligned dst, a row
     longer than the buffer): DRAM bit for bit, with random memory stalls."""
-    cfg = Config(S=1, D=D, MCOLS=4, DRAM_BYTES=1 << 21)
+    cfg = Config(S=1, D=D, MCOLS=mcols, DRAM_BYTES=1 << 21)
     rng = np.random.default_rng(D + stall)
     R, KB = 9, 3
     x = _qrows(rng, R, KB * D, D)
-    dram = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    # Nonzero untouched bytes expose a bad byte enable on a short final group.
+    dram = rng.integers(0, 256, cfg.DRAM_BYTES, dtype=np.uint8)
     _put(dram, X, x)
     prog = [I.ld(X, 0, x.size)]
     sd = 0x40000

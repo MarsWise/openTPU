@@ -344,6 +344,11 @@ otpu-chat --backend bend ...                  # (also otpu-serve, validate.py, c
 
 ## 8. Limits and next steps
 
+- **Local r5 extensions.** This upstream port does not implement TMM (PAIR/QUAD), QACT DUP4,
+  TFN or VOP MAC. The Python driver rejects these before LOAD instead of letting an unknown
+  VOP use the port's default COPY path. Runtime dispatch rejects them in HALT CHAIN programs
+  loaded from DRAM as well. Use the Python ISA, RTL or board backend for those
+  programs. `bend_shadow` logs these runs as skipped; this is not Bend verification of r5.
 - **The kernel's limits.** `--verdict` cannot load `sim.bend` (it runs out of memory) and runs
   out of fuel on the longest cache replays. Those laws are checked only by Bend's own checker.
 - **Equivalence is tested, not proved.** A proof that `sim.bend` refines isasim, instruction by

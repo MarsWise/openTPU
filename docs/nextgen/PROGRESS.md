@@ -1,5 +1,21 @@
 # Nextgen implementation progress
 
+## Local update (2026-10-23): upstream and r5 timing recovery
+
+- Merged FeSens main `91df4109` (19 new commits after `9bd4d83c`) as `f139f524`:
+  Bend ISA/cache simulators and checks, CLI integration, unary STREAM and LFU fixes.
+  This upstream interval contains no RTL/Vivado changes.
+- T4 now uses static byte-enabled synchronous RAM banks with a read-ahead drain. Isolated
+  Vivado 2024.2.2 synthesis confirms 8 RAM blocks and no T4 FF array (previously 65,536 FF).
+- Explicit TFN descriptors remove the synthesis defect. The same SE top before/after gives
+  latches 1,280 -> 0, no_clock 8,704 -> 0, unconstrained internal endpoints 1,280 -> 0.
+  Coefficient ROM words are unchanged.
+- MXU PAIR/QUAD reduction has two registered adder levels with aligned scales/valid/FIFO
+  writes. MM gains one latency cycle; the pipeline still accepts one row per cycle.
+- m4/m8 board-model checks pass. Detailed regression evidence, Bend's local-extension limits
+  and the fresh MCOLS=8 / 150 MHz build procedure: [R5_TIMING_RECOVERY.md](R5_TIMING_RECOVERY.md).
+  Full-chip placement/routing and a new bitstream are not yet measured.
+
 ## Current state (2026-10-19)
 
 Plan to close the master brief: phases A-G (hygiene, BitNet to DoD, Matrix Engine 2.0, CNN/YOLO,

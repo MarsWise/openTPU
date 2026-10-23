@@ -673,15 +673,7 @@ module otpu_quant
   // elements e = l mod LANES; two halves) and its drain (a word a cycle on DRAM port A)
   localparam int TBW = (TB > 0) ? TB / LANES : 1;          // a bank's words a half
   localparam int TAW = $clog2(2 * TBW);
-  logic [7:0] tbm [LANES][4][2 * TBW];
   wire t4w = t4 && busy && !ackw && wqd.v && wqd.st;        // the writer's bytes go to the buffer
-  if (TB > 0) begin : g_tb
-    always_ff @(posedge clk)
-      if (en && t4w)
-        for (int l = 0; l < LANES; l++)
-          if (wqd.mask[l])
-            tbm[l][wqd.row[1:0]][{wqd.row[2], (TAW-1)'(wqd.e / LANES)}] <= qb[l];
-  end
   // the drain: the queue of complete groups (at most one a half), the write in flight (dv: its
   // element de, half dh, address da, byte enables dbe); a group's address advances by es
   typedef struct packed { logic v; logic h; logic [31:0] a; logic [3:0] be; } dq_t;
@@ -691,11 +683,46 @@ module otpu_quant
   logic [3:0] dbe;
   logic [31:0] gbase;                        // the next group's dst + r0
   logic       t4_fin;                        // the instruction's last byte is in the buffer
-  logic [31:0] dword_t4;
-  always_comb
-    for (int b = 0; b < 4; b++)
-      dword_t4[8*b +: 8] = tbm[de[$clog2(LANES)-1:0]][b][{dh, (TAW-1)'(de / LANES)}];
   wire dw = t4 && dv && !sw_ph;              // the drain writes this cycle (with en)
+  // Read the next drain word at the edge that advances its metadata. On a lost grant both
+  // the RAM output and metadata hold; scale writes hold the drain on the same word. A queued
+  // half is complete before its first read, and stays owned until its last word is accepted.
+  logic [31:0] de_next;
+  logic dh_next, dv_next;
+  always_comb begin
+    de_next = de;
+    dh_next = dh;
+    dv_next = dv;
+    if (dw) begin
+      if (de + 1 >= GW) dv_next = 1'b0;
+      else de_next = de + 1;
+    end
+    if ((!dv || (dw && de + 1 >= GW)) && tq[0].v) begin
+      dv_next = 1'b1;
+      dh_next = tq[0].h;
+      de_next = '0;
+    end
+  end
+  logic [LANES-1:0][31:0] tb_rd;
+  if (TB > 0) begin : g_tb
+    for (genvar l = 0; l < LANES; l++) begin : g_lane
+      // One simple-dual-port RAM per lane, with four byte write enables. Static banks and a
+      // synchronous read avoid the old 64K flip-flops and asynchronous bank/word mux.
+      (* ram_style = "block" *) logic [31:0] mem [2 * TBW];
+      always_ff @(posedge clk) begin
+        if (en && t4w && wqd.mask[l])
+          for (int b = 0; b < 4; b++)
+            if (wqd.row[1:0] == 2'(b))
+              mem[{wqd.row[2], (TAW-1)'(wqd.e / LANES)}][8*b +: 8] <= qb[l];
+        if (en && dv_next)
+          tb_rd[l] <= mem[{dh_next, (TAW-1)'(de_next / LANES)}];
+      end
+    end
+  end else begin : g_no_tb
+    assign tb_rd = '0;
+  end
+  logic [31:0] dword_t4;
+  assign dword_t4 = tb_rd[de[$clog2(LANES)-1:0]];
   // a DRAM write is waiting (independent of the grant, which the slice derives from it)
   assign a_want = (busy && !ackw && wqd.v && wqd.st && !t4) || sw_ph || (t4 && dv);
 
@@ -789,6 +816,9 @@ module otpu_quant
       mb0 <= '0;
       p1a <= 1'b0;
       bm <= 1'b0;
+      dv <= 1'b0;
+      tq[0] <= '0; tq[1] <= '0;
+      t4_busy <= '0;
     end else if (ackw) begin
       m0a <= '0;
       mb0 <= '0;
@@ -841,6 +871,7 @@ module otpu_quant
       t4 <= TB > 0 && qst && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
             cmd.w2[1:0] == 2'd0 && 32'(kb) * D <= 32'(TB);
       t4_busy <= '0; t4_fin <= 1'b0; dv <= 1'b0; tq[0] <= '0; tq[1] <= '0;
+      de <= '0; dh <= 1'b0;
       gbase <= cmd.w2;
       p1a <= 1'b0; r1 <= '0; e1c <= '0; xw <= '0; xr <= '0; xocc <= '0; dr <= '0; sv <= '0;
       mb0 <= '0;
@@ -949,17 +980,16 @@ module otpu_quant
         logic [1:0] nq;
         dq_t q0, q1;
         q0 = tq[0]; q1 = tq[1];
+        dv <= dv_next; dh <= dh_next; de <= de_next;
         if (dw) begin
           if (de + 1 >= GW) begin
-            dv <= 1'b0;
             t4_busy[dh] <= 1'b0;
           end else begin
-            de <= de + 1;
             da <= da + es;
           end
         end
         if ((!dv || (dw && de + 1 >= GW)) && q0.v) begin   // the next group
-          dv <= 1'b1; dh <= q0.h; da <= q0.a; dbe <= q0.be; de <= '0;
+          da <= q0.a; dbe <= q0.be;
           q0 = q1; q1 = '0;
         end
         if (t4w && wqd.rl && (wqd.row[1:0] == 2'd3 || wqd.fin)) begin

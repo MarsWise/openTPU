@@ -1,6 +1,6 @@
 # Build the bitstream: synthesis, implementation (opt, place, phys_opt, route, post-route
 # phys_opt), reports and bitstream.
-#   vivado -mode batch -source build.tcl -tclargs [OUT_DIR] [JOBS] [impl|full] [IMPL_STRATEGY]
+#   vivado -mode batch -source build.tcl -tclargs [OUT_DIR] [JOBS] [impl|full|synth] [IMPL_STRATEGY]
 # With "impl", the existing synthesis (and IP runs) are kept and only implementation reruns:
 # for constraint or implementation-strategy changes that do not touch the RTL.
 # Expects the project from create_project.tcl. Outputs in OUT_DIR/reports and
@@ -12,6 +12,8 @@ set root [file normalize $here/../../..]
 set out [expr {[llength $argv] > 0 ? [file normalize [lindex $argv 0]] : "$root/build/vivado"}]
 set jobs [expr {[llength $argv] > 1 ? [lindex $argv 1] : 8}]
 set impl_only [expr {[lindex $argv 2] eq "impl"}]
+set synth_only [expr {[lindex $argv 2] eq "synth"}]
+set strict_r5 [expr {[info exists ::env(OTPU_STRICT_R5)] && $::env(OTPU_STRICT_R5) eq "1"}]
 # an implementation strategy (e.g. Performance_Explore) when the default run misses timing
 set strategy [lindex $argv 3]
 
@@ -21,6 +23,23 @@ file mkdir $out/reports
 # FAST development build (create_project.tcl)
 set fast [expr {[info exists ::env(OTPU_FAST)] && $::env(OTPU_FAST) eq "1"}]
 if {!$fast && [file exists $here/impl_directives.tcl]} { source $here/impl_directives.tcl }
+
+# Opt-in checkpoints and reports at every physical stage (the r5 timing build). The normal
+# flow has no intermediate reports, so a stopped place/route otherwise loses its evidence.
+if {[info exists ::env(OTPU_STAGE_REPORT_DIR)] && $::env(OTPU_STAGE_REPORT_DIR) ne ""} {
+  set stage_dir [file normalize $::env(OTPU_STAGE_REPORT_DIR)]
+  file mkdir $stage_dir
+  set reporter [file normalize $root/tools/vivado/r5_stage_reports.tcl]
+  foreach {step stage} {OPT_DESIGN opt PLACE_DESIGN placed PHYS_OPT_DESIGN physopt
+                       ROUTE_DESIGN routed POST_ROUTE_PHYS_OPT_DESIGN postroute} {
+    set hook $stage_dir/hook_${stage}.tcl
+    set fh [open $hook w]
+    puts $fh [list source $reporter]
+    puts $fh [list otpu_r5_report_stage $stage $stage_dir]
+    close $fh
+    set_property STEPS.${step}.TCL.POST $hook [get_runs impl_1]
+  }
+}
 
 if {!$impl_only} {
   # ---- IP (block design) out-of-context runs first
@@ -47,11 +66,35 @@ if {!$impl_only} {
   open_run synth_1
   report_utilization -hierarchical -hierarchical_depth 4 -file $out/reports/synth_util_hier.rpt
   report_timing_summary -max_paths 20 -file $out/reports/synth_timing.rpt
+  if {$strict_r5} {
+    set latches [get_cells -quiet -hier -filter {REF_NAME =~ LD*}]
+    if {[llength $latches]} { error "r5: unexpected latches after synthesis: [llength $latches]" }
+    set tb_bram [get_cells -quiet -hier -filter {NAME =~ *u_quant*g_tb* && REF_NAME =~ RAMB*}]
+    set tb_ff [get_cells -quiet -hier -filter {NAME =~ *u_quant*g_tb* && REF_NAME =~ FD*}]
+    if {![llength $tb_bram] || [llength $tb_ff] > 1024} {
+      error "r5: T4 mapping is unexpected (BRAM [llength $tb_bram], FF [llength $tb_ff])"
+    }
+    check_timing -verbose -file $out/reports/synth_check_timing.rpt
+    set fh [open $out/reports/synth_check_timing.rpt]; set checked [read $fh]; close $fh
+    foreach metric {no_clock unconstrained_internal_endpoints} {
+      set pattern [format {checking %s \(([0-9]+)\)} $metric]
+      if {![regexp $pattern $checked -> count] || $count != 0} {
+        error "r5: synthesis timing coverage failed for $metric; see synth_check_timing.rpt"
+      }
+    }
+    puts "R5_SYNTH_GATE PASS: no latches; T4 BRAM [llength $tb_bram], FF [llength $tb_ff]"
+    write_checkpoint -force $out/reports/synth_checked.dcp
+  }
   close_design
 } else {
   if {[get_property PROGRESS [get_runs synth_1]] != "100%"} { error "impl: no finished synthesis to reuse" }
   # constraint edits mark synthesis out of date; keep its netlist anyway
   set_property NEEDS_REFRESH false [get_runs synth_1]
+}
+if {$synth_only} {
+  puts "SYNTH_ONLY complete: $out/reports (implementation not launched)"
+  close_project
+  exit
 }
 
 # ---- implementation to the routed design
@@ -167,6 +210,9 @@ close $fh
 puts [exec cat $out/reports/SUMMARY.txt]
 
 # ---- bitstream, written from the routed design opened above
+if {$strict_r5 && ($wns < 0 || $whs < 0)} {
+  error "r5: timing failed (WNS $wns, WHS $whs); reports saved, no bitstream written"
+}
 write_bitstream -force $out/otpu.bit
 if {[llength [get_debug_cores -quiet]]} { write_debug_probes -force $out/otpu.ltx }
 # BPI x16 flash image (for a permanent load; see docs/board.md). The flash has address lines

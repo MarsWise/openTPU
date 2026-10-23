@@ -42,12 +42,20 @@ def test_tfn_special_values():
 
 
 def test_tfn_tables_match_generator():
-    """The committed ROM is the generator's output (to the last bit on this platform's libm;
-    elsewhere within an ulp)."""
+    """Re-fitting matches ROM to fp32 rounding or float64 interpolation roundoff.
+
+    Flat tails subtract almost equal function values: another libm/BLAS can turn a tiny
+    coefficient into zero or change its sign. Its fp32 word distance is then huge even
+    though the difference is only a few float64 epsilons. The committed ROM remains the
+    bit-exact ISA/RTL definition; this check never regenerates it.
+    """
     coef, tails = T.fit_tables()
     rc, rt = T.tables()
     d = np.abs(coef.astype(np.int64) - rc.astype(np.int64))
-    assert d.max() <= 1 and np.array_equal(tails, rt)
+    a, b = coef.view(np.float32).astype(np.float64), rc.view(np.float32).astype(np.float64)
+    roundoff = 32 * np.finfo(np.float64).eps * np.maximum(1.0, np.abs(b))
+    assert np.all((d <= 1) | (np.abs(a - b) <= roundoff))
+    assert np.array_equal(tails, rt)
 
 
 def _vop_prog(func, n):

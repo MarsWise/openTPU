@@ -304,8 +304,10 @@ module otpu_se_comp
   // (RECIP's rcp_ek), which finish adds as EXP2's i.
   function automatic cst_t setup(input logic [2:0] c, input f32_t x, input logic [3:0] tf);
     cst_t t;
+    tfn_d_t desc;
     f32_t xz, ax, sd, mg;
     logic ge, z, rcp, lo, hi;
+    desc = tfn_desc(tf);
     xz = ftz(x);
     ax = {1'b0, xz[30:0]};
     ge = (xz[22:0] >= LOG2_SQRT2);
@@ -330,7 +332,7 @@ module otpu_se_comp
       CC_RCP: t.f = {xz[31], (ax >= 32'h7E80_0000), (ax == 0)};
       CC_RSQ: t.f = {2'b00, (xz[31] || z || xz == F_INF)};
       CC_LOG: t.f = {!z && (xz[31] || is_nan(xz)), xz == F_INF, z};  // NaN, +inf, -inf
-      CC_TFN: t.f = {tfn_desc(tf).odd && xz[31], 2'b00};
+      CC_TFN: t.f = {desc.odd && xz[31], 2'b00};
       default: ;
     endcase
     if (c == CC_TFN) t.k1 = x;                                        // the post step's x
@@ -513,6 +515,10 @@ module otpu_se_comp
   endfunction
 
   // ---------------------------------------------------------------- lanes
+  // Materialize struct-return functions before selecting fields. Vivado 2024.2 synthesized
+  // inline tfn_desc(...).field expressions into undriven controls and operand latches.
+  tfn_d_t in_desc;
+  assign in_desc = tfn_desc(in_tf);
   for (genvar l = 0; l < LANES; l++) begin : g_lane
     cst_t sti [NS], sto [NS], stp [NS];    // state at each stage's input, output, after it
     assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l], in_tf);
@@ -523,6 +529,8 @@ module otpu_se_comp
       localparam logic       KVU = kv_use(s), KTU = kt_use(s);
       localparam bit         T0 = (s == 0);      // TFN's op 0 (pass 0) is at S0
       f32_t a, b, c, y;
+      tfn_d_t st_desc;
+      assign st_desc = tfn_desc(sti[s].tf);
       always_comb begin
         cst_t t;
         t = sti[s];
@@ -530,27 +538,27 @@ module otpu_se_comp
           A_K1:    a = AU[A_K1] ? t.k1 : t.v;
           A_K2:    a = AU[A_K2] ? t.k2 : t.v;
           A_X:     a = (s == 0 && AU[A_X]) ?                    // pass 0 is at S0
-                       ((T0 && !ret && in_c == CC_TFN && tfn_desc(in_tf).per) ? fabs(in_a[l])
+                       ((T0 && !ret && in_c == CC_TFN && in_desc.per) ? fabs(in_a[l])
                                                                               : in_a[l]) : t.v;
           default: a = t.v;
         endcase
         case (uci[s].bs)
           B_K1:    b = BU[B_K1] ? t.k1 : uci[s].kb;
           B_K2:    b = BU[B_K2] ? t.k2 : uci[s].kb;
-          B_PX:    b = (BU[B_PX] && tfn_desc(t.tf).post == 2'd1) ? t.k1 : F_ONE;
+          B_PX:    b = (BU[B_PX] && st_desc.post == 2'd1) ? t.k1 : F_ONE;
           // RSQRT's op 0 (pass 0, at S0): h's factor per lane (rsq_h; the ROM's is 0.5); TFN's
           // op 0: the function's S
           default: b = (s == 0 && !ret && in_c == CC_RSQ) ? rsq_h(in_a[l]) :
-                       (T0 && !ret && in_c == CC_TFN) ? tfn_desc(in_tf).s : uci[s].kb;
+                       (T0 && !ret && in_c == CC_TFN) ? in_desc.s : uci[s].kb;
         endcase
         case (uci[s].cs)
           C_K2:    c = CU[C_K2] ? t.k2 : uci[s].kc;
           C_NY:    c = (s == 0 && CU[C_NY]) ? fneg(in_b[l]) : uci[s].kc;
           C_T1:    c = CU[C_T1] ? t.cf[63:32] : uci[s].kc;
           C_T0:    c = CU[C_T0] ? t.cf[31:0] : uci[s].kc;
-          C_PR:    c = (CU[C_PR] && tfn_desc(t.tf).post == 2'd2 && fp_gt(t.k1, F_ZERO)) ?
+          C_PR:    c = (CU[C_PR] && st_desc.post == 2'd2 && fp_gt(t.k1, F_ZERO)) ?
                        ftz(t.k1) : F_NZ;                    // relu(x), or -0
-          default: c = (T0 && !ret && in_c == CC_TFN) ? tfn_desc(in_tf).o : uci[s].kc;
+          default: c = (T0 && !ret && in_c == CC_TFN) ? in_desc.o : uci[s].kc;
         endcase
       end
       assign st_a[s][l] = a;
@@ -593,10 +601,15 @@ module otpu_se_comp
         cst_t q0, q1, q2;
         logic [95:0] rom_q;
         logic        rom_t, rom_h;                // q2's: a tail, its hi
+        tfn_d_t rr_desc, rom_desc, tail_desc;
+        assign rr_desc = tfn_desc(sto[s].tf);
+        assign rom_desc = tfn_desc(q1.tf);
+        assign tail_desc = tfn_desc(q2.tf);
         always_ff @(posedge clk) if (en_l[l]) begin
           cst_t t;
-          logic lo, hi, bad, per;
+          logic lo, hi, bad;
           t = sto[s];
+          lo = 1'b0; hi = 1'b0; bad = 1'b0;
           if (rr_e) begin
             // x < -126 or x >= 128 (or NaN): the result is +0 or +inf whatever the steps
             // compute, so x is not clamped to 0 (the flags decide at the end)
@@ -605,10 +618,9 @@ module otpu_se_comp
             t.f = {1'b0, hi, lo};
           end
           if (rr_t) begin
-            per = tfn_desc(t.tf).per;
-            bad = per && (t.v[30:23] == 8'hFF);
-            lo = !per && fp_gt(F_ZERO, t.v);
-            hi = !per && !fp_gt(F_256, t.v);
+            bad = rr_desc.per && (t.v[30:23] == 8'hFF);
+            lo = !rr_desc.per && fp_gt(F_ZERO, t.v);
+            hi = !rr_desc.per && !fp_gt(F_256, t.v);
             t.f[0] = bad;
             t.ii = {lo || hi, 7'd0, hi};
             if (bad || lo || hi) t.v = F_ZERO;
@@ -625,7 +637,7 @@ module otpu_se_comp
           end
           if (t2) t.k2 = fneg(tfn_trb(q1.v));
           q2 <= t;
-          rom_q <= TFN_COEF[{tfn_desc(q1.tf).tbl, q1.ii[7:0]}];
+          rom_q <= TFN_COEF[{rom_desc.tbl, q1.ii[7:0]}];
           rom_t <= t2 && q1.ii[8];
           rom_h <= q1.ii[0];
         end
@@ -634,7 +646,7 @@ module otpu_se_comp
         always_ff @(posedge clk) if (en_l[l]) t3 <= t2;
         always_comb begin
           stp[s] = q2;
-          if (t3) stp[s].cf = rom_t ? {64'd0, TFN_TAIL[{tfn_desc(q2.tf).tbl, rom_h}]} : rom_q;
+          if (t3) stp[s].cf = rom_t ? {64'd0, TFN_TAIL[{tail_desc.tbl, rom_h}]} : rom_q;
         end
       end else begin : g_nrr
         assign stp[s] = sto[s];

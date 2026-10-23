@@ -220,6 +220,11 @@ def Ins.w0(+i: Ins) -> U32:
     case Ins{+w0, w1, w2, w3, w4, w5, w6, w7, va, vb, vc, vd}:
       w0
 
+def Ins.w6(+i: Ins) -> U32:
+  match i:
+    case Ins{w0, w1, w2, w3, w4, w5, +w6, w7, va, vb, vc, vd}:
+      w6
+
 def op(+w0: U32) -> U32:
   (w0 .&. 255 : U32)
 
@@ -2577,10 +2582,33 @@ def ex.f16(~mm: Sl -> Ins -> Sl, z: Bool, s: Sl, +i: Ins, +o: U32) -> Sl:
     case False{}:
       ex.f34(~mm, U32.is_eq(o, 34), s, i, o)
 
+# Runtime guards also cover instructions loaded dynamically by HALT CHAIN. The Python LOAD
+# check alone cannot see a future program in DRAM; unsupported local ops must not become COPY.
+def ex.vop.go(z: Bool, s: Sl, +i: Ins) -> Sl:
+  match z:
+    case True{}:
+      x.vop(s, i)
+    case False{}:
+      ex.bad(s, i)
+
+def ex.vop(s: Sl, +i: Ins) -> Sl:
+  +fn = ((Ins.w6(i) >> 16n : U32) .&. 255 : U32)
+  ex.vop.go((fn <= 20 : U32) && U32.is_ne(fn, 7), s, i)
+
+def ex.qact.go(z: Bool, s: Sl, +i: Ins) -> Sl:
+  match z:
+    case True{}:
+      ex.bad(s, i)
+    case False{}:
+      x.qact(s, i)
+
+def ex.qact(s: Sl, +i: Ins) -> Sl:
+  ex.qact.go(U32.is_eq((fl(Ins.w0(i)) .&. 24 : U32), 24), s, i)
+
 def ex.f33(~mm: Sl -> Ins -> Sl, z: Bool, s: Sl, +i: Ins, +o: U32) -> Sl:
   match z:
     case True{}:
-      x.qact(s, i)
+      ex.qact(s, i)
     case False{}:
       ex.f16(~mm, U32.is_eq(o, 16), s, i, o)
 
@@ -2594,7 +2622,7 @@ def ex.f32(~mm: Sl -> Ins -> Sl, z: Bool, s: Sl, +i: Ins, +o: U32) -> Sl:
 def ex.f48(~mm: Sl -> Ins -> Sl, z: Bool, s: Sl, +i: Ins, +o: U32) -> Sl:
   match z:
     case True{}:
-      x.vop(s, i)
+      ex.vop(s, i)
     case False{}:
       ex.f32(~mm, U32.is_eq(o, 32), s, i, o)
 

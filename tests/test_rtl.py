@@ -197,15 +197,15 @@ def test_tmm_rtl_edges(have_verilator, case):
 @pytest.mark.parametrize("KB,unit,acc", [(5, False, False), (4, True, True), (1, False, True),
                                         (6, False, False), (7, True, False), (20, False, False),
                                         (3, False, True)])
-def test_tmm_quad_rtl(have_verilator, KB, unit, acc):
+@pytest.mark.parametrize("mcols,M", [(4, 1), (8, 1), (8, 2)])
+def test_tmm_quad_rtl(have_verilator, KB, unit, acc, mcols, M):
     """TMM QUAD (the ternary K-split by four) in the RTL against the ISA simulator, under random
     port stalls: QACT DUP4's four ACT rows, column q taking quarter q of each chunk, the four
-    partners' integers added before the epilogue (M = 1 on MCOLS 4); KB not a multiple of four
+    partners' integers added before the epilogue (M = 1/2 on MCOLS 4/8); KB not a multiple of four
     leaves the last advance's top quarters out. The ISA's QUAD is plain TMM's bit for bit
     (test_ternary)."""
-    M = 1
     rng = np.random.default_rng(0x9D4 + KB)
-    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
+    cfg = Config(S=1, D=128, MCOLS=mcols, ACT_ROWS=8, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
     D, N = cfg.D, 9
     values = rng.standard_normal((M, KB * D), dtype=np.float32)
     weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
@@ -223,9 +223,9 @@ def test_tmm_quad_rtl(have_verilator, KB, unit, acc):
               rsc=not unit, acc=acc, rmax=True, quad=True),
         # a plain TMM and a QUAD back to back (the pipeline takes the next command only when
         # it is alike), then the QUAD again over the same rows
-        I.tmm(wa, 0 if unit else sa, oa + 2 * ors, N, KB, packed.shape[1], ors, M, 0, 4,
+        I.tmm(wa, 0 if unit else sa, oa + 2 * M * ors, N, KB, packed.shape[1], ors, M, 0, 4,
               unit=unit, rsc=not unit),
-        I.tmm(wa, 0 if unit else sa, oa + 4 * ors, N, KB, packed.shape[1], ors, M, 0, 4,
+        I.tmm(wa, 0 if unit else sa, oa + 4 * M * ors, N, KB, packed.shape[1], ors, M, 0, 4,
               unit=unit, rsc=not unit, quad=True),
         I.halt()]
     ref = Machine(cfg, [prog], [img.copy()]).run()
@@ -234,7 +234,9 @@ def test_tmm_quad_rtl(have_verilator, KB, unit, acc):
     assert np.array_equal(drams[0], ref.slices[0].dram)
     assert np.array_equal(tmems[0], ref.slices[0].tmem)
     t = ref.slices[0].tmem
-    assert np.array_equal(t[oa + 2 * ors:oa + 2 * ors + N], t[oa + 4 * ors:oa + 4 * ors + N])
+    for j in range(M):
+        a, b = oa + (2*M + j)*ors, oa + (4*M + j)*ors
+        assert np.array_equal(t[a:a + N], t[b:b + N])
 
 
 @pytest.mark.parametrize("M", [3, 6])

@@ -17,6 +17,8 @@ import pytest
 
 import bend_shadow as BS
 from opentpu import isa as I
+from opentpu.bend_sim import (DRAM, SUPPORTED_VFUNCS, BendError, BendMachine, check_program,
+                              words_of)
 from opentpu.isasim import Config, Machine, SimError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -180,7 +182,7 @@ def test_vop_vectors():
     rng = np.random.default_rng(1)
     rows, cols = 3, 37
     seen = set()
-    for func in sorted(I.VFUNCS):
+    for func in sorted(SUPPORTED_VFUNCS):
         for bmode in (I.B_FULL, I.B_ROW, I.B_COL, I.B_SCALAR):
             if func == I.V_ARGMAX:
                 prog = [I.argmax(3000, 0, rows, cols, drs=2, ars=cols)]
@@ -193,6 +195,42 @@ def test_vop_vectors():
             m.slices[0].tmem[:] = words(rng, cfg.TMEM_WORDS)
             seen.add(both(m))
     assert seen == {"same"}
+
+
+@pytest.mark.parametrize("func", [I.V_MAC, *sorted(I.TFN_FUNCS)])
+def test_local_vops_are_rejected_before_bend(func):
+    prog = [I.vop(func, 0, 32, 64, 1, 8, 8, 8, 8), I.halt()]
+    with pytest.raises(NotImplementedError, match="Bend backend: VOP"):
+        check_program(words_of(prog))
+
+
+def test_local_ternary_instructions_are_rejected_before_bend():
+    for ins in (I.Instr(I.TMM), I.qact(0, 1, 0, 1, 128, dup4=True)):
+        with pytest.raises(NotImplementedError, match="Bend backend:"):
+            check_program(words_of([ins, I.halt()]))
+
+
+def test_upstream_vops_remain_supported_by_bend():
+    check_program(words_of([I.vop(f, 0, 32, 64, 1, 8, 8, 8, 8)
+                            for f in sorted(SUPPORTED_VFUNCS)] + [I.halt()]))
+
+
+@needs_server
+@pytest.mark.parametrize("ins", [I.Instr(I.TMM), I.qact(0, 1, 0, 1, 128, dup4=True),
+                                 I.vop(I.V_MAC, 0, 32, 64, 1, 8, 8, 8, 8),
+                                 I.vop(I.V_SIN, 0, 32, 64, 1, 8, 8, 8, 8)])
+def test_chained_r5_instruction_is_rejected_at_runtime(ins):
+    cfg = Config(S=1, D=32, MCOLS=8, TMEM_WORDS=4096, DRAM_BYTES=1 << 12)
+    late = words_of([ins, I.halt()])
+    b = BendMachine(cfg)
+    try:
+        b.put(0, DRAM, 256, late.view(np.uint8))
+        b.load([[I.li(1, 256), I.li(2, len(late)), I.halt(chain=True, ra=1, rb=2)]])
+        with pytest.raises(BendError) as e:
+            b.run()
+        assert e.value.code == 2                   # unsupported instruction, never COPY
+    finally:
+        b.close()
 
 
 # ------------------------------------------------------------------------------- STREAM

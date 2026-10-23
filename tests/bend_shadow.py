@@ -18,7 +18,7 @@ import pytest
 
 from opentpu import isa as I
 from opentpu import isasim
-from opentpu.bend_sim import CTRL, DRAM, ERRORS, TMEM, BendMachine, words_of
+from opentpu.bend_sim import CTRL, DRAM, ERRORS, TMEM, BendMachine, check_program, words_of
 
 TODO = {int(x, 0) for x in os.environ.get("OTPU_BEND_TODO", "").split(",") if x}
 # the words of isasim's message that name each Bend error (default: ERRORS' whole text)
@@ -60,6 +60,12 @@ def _shadow_run(self, max_steps: int = 10_000_000):
         skip = "todo"
     elif any(s.pc or s.stack or s.halted or s.waiting or s.polling for s in self.slices):
         skip = "mid-run state"
+    if skip is None:
+        try:
+            for prog in progs:
+                check_program(words_of(prog))
+        except NotImplementedError as e:
+            skip = str(e)             # logged explicitly; r5 is still checked by ISA/Verilator
     if skip is not None:
         _log({"test": _test["id"], "outcome": "skip", "why": skip})
         return _orig_run(self, max_steps)

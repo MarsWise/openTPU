@@ -124,7 +124,7 @@ module otpu_mxu
   localparam int LROW = CLS + MCOLS + 5;
   // result FIFO rows: a row pops only while fewer than RF are between the pop and the drain, so
   // RF covers the pipeline's rows in flight (one-advance rows: one per cycle of its latency)
-  localparam int RF = (LROW + 7 <= 32) ? 32 : 64;
+  localparam int RF = (LROW + 8 <= 32) ? 32 : 64;  // includes the extra row-reduction stage
   localparam int RFW = $clog2(RF);
   localparam int MW = $clog2(MCOLS) + 1;
   localparam int TD = 128;                  // port A requests in flight (their tags)
@@ -914,29 +914,40 @@ module otpu_mxu
                                                  .q({tl_v, tl_pr, tl_qd, tl_M}));
   otpu_skew #(.W(32 + MCOLS * 32), .N(LROW - 1)) u_ts (.clk, .en(1'b1), .d({sw1, sap1}),
                                                       .q({tl_sw, tl_sa}));
-  // PAIR: row j (j < M <= MCOLS/2) adds its partner column j + M's integer; registered for the
-  // result FIFO (rv: push)
+  // Two-stage integer reduction: select partners and add pairs, then add the partial sums.
+  // All modes take the same latency, with scales and valid alongside the data. Addition is
+  // modulo 2^48 just as before; a new row can enter every cycle, including across commands.
+  logic             part_v;
+  logic [MCOLS-1:0][47:0] part_lo, part_hi;
+  logic [MCOLS-1:0][31:0] part_sa;
+  logic [31:0]      part_sw;
   logic             rv;
   logic [MCOLS-1:0][47:0] rowi;
   logic [MCOLS-1:0][31:0] rsa;
   logic [31:0]      rsw;
   always_ff @(posedge clk) begin
-    rv <= !rst && tl_v;
+    part_v <= !rst && tl_v;
+    rv <= !rst && part_v;
     for (int j = 0; j < MCOLS; j++) begin
-      logic [47:0] pb;
-      pb = '0;
-      for (int m = 1; m <= MCOLS / 2; m++)
-        if (j < MCOLS / 2 && j + m < MCOLS && tl_M == 8'(m)) pb = acc_al[j + m];
-      // QUAD: row j (j < M <= MCOLS/4) adds its partners j + M, j + 2M, j + 3M
+      logic [47:0] b, c, d;
+      b = '0; c = '0; d = '0;
+      if (tl_pr)
+        for (int m = 1; m <= MCOLS / 2; m++)
+          if (j < MCOLS / 2 && j + m < MCOLS && tl_M == 8'(m)) b = acc_al[j + m];
       if (tl_qd) begin
-        pb = '0;
+        b = '0;
         for (int m = 1; m <= MCOLS / 4; m++)
-          if (j < m && tl_M == 8'(m)) pb = acc_al[j + m] + acc_al[j + 2 * m] + acc_al[j + 3 * m];
+          if (j < m && tl_M == 8'(m)) begin
+            b = acc_al[j + m]; c = acc_al[j + 2*m]; d = acc_al[j + 3*m];
+          end
       end
-      rowi[j] <= ((tl_pr || tl_qd) && j < MCOLS / 2) ? acc_al[j] + pb : acc_al[j];
+      part_lo[j] <= acc_al[j] + b;
+      part_hi[j] <= c + d;
+      rowi[j] <= part_lo[j] + part_hi[j];
     end
-    rsa <= tl_sa;
-    rsw <= tl_sw;
+    part_sa <= tl_sa; part_sw <= tl_sw;
+    rsa <= part_sa;
+    rsw <= part_sw;
   end
 
   // ================================================================== result FIFO
@@ -978,7 +989,7 @@ module otpu_mxu
     logic           wv;
     logic [RFW-1:0] wt;
     always_ff @(posedge clk) begin
-      wv <= !rst && tl_v;
+      wv <= !rst && part_v;
       if (rst) wt <= '0;
       else if (wv) wt <= wt + 1'b1;
     end
