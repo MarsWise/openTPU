@@ -172,11 +172,10 @@ def simulate(req, C, policy, warm, prior=None, half=32.0):
                 m = [e for e in cur if e not in cache]
                 for e in cur:
                     cnt[e] = cnt.get(e, 0) + 1
-                for e in m:
-                    while len(cache) >= C:
-                        f, s, v = heapq.heappop(heap)
-                        if v in cache and cache[v] == (f, s) and v not in cur:
-                            del cache[v]
+                while heap and len(cache) + len(m) > C:     # room for the misses
+                    f, s, v = heapq.heappop(heap)
+                    if v in cache and cache[v] == (f, s) and v not in cur:
+                        del cache[v]
                 for e in cur:
                     cache[e] = (cnt[e], step)
                     heapq.heappush(heap, (cnt[e], step, e))
@@ -481,6 +480,9 @@ def main():
     ap.add_argument("--half", type=float, default=32.0,
                     help="lfu_layer: a use's half-life, in requests of its layer")
     ap.add_argument("--json")
+    ap.add_argument("--bend", action="store_true",
+                    help="static, lru, lru_layer, lfu and opt in Bend (tools/offload/cache_bend.py, "
+                         "docs/bend.md): every replay of a text at once; no prediction coverage")
     ap.add_argument("--survey", help="tools/offload/survey.py --json output: bytes, card slots")
     ap.add_argument("--repo", help="the model's row in --survey (default: the trace's model)")
     ap.add_argument("--card-gib", type=float, default=4.0)
@@ -556,22 +558,25 @@ def main():
               + ", ".join(f"{p} {v:.3f}" for p, v in acc.items()))
         others = [y["req"] for j, y in enumerate(tr) if j != i] or [x["req"]]
         prof = sum(freq(r, n) for r in others)
-        for C in sizes:
-            warm = top_set(prof, C)
-            warm_all = top_set(prof, n)
-            for pol in a.policies.split(","):
-                mt, ma = simulate(x["req"], C, pol,
-                                  warm_all if pol in ("lru_layer", "lfu_layer") else warm, prof,
-                                  a.half)
-                T = x["req"].shape[0]
-                r = dict(text=Path(x["meta"]["text"]).name, slots=C, frac=C / n, policy=pol,
-                         hit=1 - mt.sum() / (T * L * k), miss_mean=float(mt.mean()),
-                         miss_p50=float(np.percentile(mt, 50)),
-                         miss_p90=float(np.percentile(mt, 90)), miss_max=int(mt.max()))
-                if pol in ("lru", "lru_layer"):
-                    r["cover_k"] = coverage(ma, x["preds"], k)
-                    r["cover_2k"] = coverage(ma, x["preds"], 2 * k)
-                rows.append(r)
+        jobs = [(C, pol, top_set(prof, n if pol in ("lru_layer", "lfu_layer") else C))
+                for C in sizes for pol in a.policies.split(",")]
+        done = {}
+        if a.bend:                      # the policies Bend has, all at once (no miss sets)
+            from cache_bend import POLICIES, sweep
+            bj = [(C, pol, w, prof) for C, pol, w in jobs if pol in POLICIES]
+            done = {(C, pol): (mt, None) for (C, pol, _, _), (mt, _) in
+                    zip(bj, sweep(x["req"], bj))}
+        for C, pol, w in jobs:
+            mt, ma = done.get((C, pol)) or simulate(x["req"], C, pol, w, prof, a.half)
+            T = x["req"].shape[0]
+            r = dict(text=Path(x["meta"]["text"]).name, slots=C, frac=C / n, policy=pol,
+                     hit=1 - mt.sum() / (T * L * k), miss_mean=float(mt.mean()),
+                     miss_p50=float(np.percentile(mt, 50)),
+                     miss_p90=float(np.percentile(mt, 90)), miss_max=int(mt.max()))
+            if pol in ("lru", "lru_layer") and ma is not None:
+                r["cover_k"] = coverage(ma, x["preds"], k)
+                r["cover_2k"] = coverage(ma, x["preds"], 2 * k)
+            rows.append(r)
     print(f"{'slots':>6} {'frac':>5} " + " ".join(f"{p:>13}" for p in a.policies.split(","))
           + "   (hit rate, misses/token mean; mean over texts)")
     for C in sizes:
