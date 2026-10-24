@@ -19,26 +19,22 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic               sel2,              // TMM QUAD: the quarter's high bit (with sel)
   input  logic               quad,              // TMM QUAD: wlo holds four 2-bit codes, quarter
                                                 //   {sel2, sel} is the weight (per command)
-  input  logic               ternary,           // native {zero, +act, -act} path
   input  logic [47:0]        pcin,
-  input  logic signed [23:0] tpcin,             // ternary feedback, kept off the DSP cascade
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
   logic [7:0] br, wlr, whr;
-  logic       selr, sel2r, quadr, ternary_r, ternary_m;
+  logic       selr, sel2r, quadr;
   logic signed [15:0] m;
-  logic signed [8:0] tm;
   logic signed [23:0] pn_r;
   wire  signed [23:0] pn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(m);
-  wire  signed [23:0] tpn = (FIRST ? 24'sd0 : tpcin) + 24'(tm);
   wire  [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
-  wire  [1:0] tc = wl[2 * {sel2r, selr} +: 2];     // QUAD: the quarter's code
-  wire  signed [7:0] tw = quadr ? ((tc == 2'b01) ? 8'sd1 : (tc == 2'b10) ? -8'sd1 : 8'sd0) :
-                                  $signed(selr ? wh : wl);
-  wire  signed [8:0] ta = $signed({br[7], br});
-  wire  signed [8:0] tprod = (tw == 8'sd1) ? ta :
-                               (tw == -8'sd1) ? -ta : 9'sd0;
+  // TMM's weights are 0 / +1 / -1 bytes and go through the product as int8 ones do; QUAD's low
+  // stream holds four 2-bit codes, quarter {sel2, sel} decoded in front of the multiplier (the
+  // DSP's A), the high stream unused
+  wire  [1:0] tc = wl[2 * {sel2r, selr} +: 2];
+  wire  [7:0] w = quadr ? ((tc == 2'b01) ? 8'h01 : (tc == 2'b10) ? 8'hFF : 8'h00) :
+                          (selr ? wh : wl);
   always_ff @(posedge clk) if (en) begin
     br <= act;
     selr <= sel;
@@ -46,18 +42,15 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     quadr <= quad;
     wlr <= wlo;
     whr <= whi;
-    m <= 16'(int'($signed(br)) * int'($signed(selr ? wh : wl)));
-    ternary_r <= ternary;
-    tm <= tprod;
-    ternary_m <= ternary_r;
+    m <= 16'(int'($signed(br)) * int'($signed(w)));
     pn_r <= pn;
   end
   if (LAST) begin : g_comb
-    assign p = ternary_m ? tpn : pn;
+    assign p = pn;
   end else begin : g_preg
-    always_ff @(posedge clk) if (en) p <= ternary_m ? tpn : pn;
+    always_ff @(posedge clk) if (en) p <= pn;
   end
-  assign pcout = LAST ? 48'd0 : 48'(pn_r);           // cascade data is DSP-only, never ternary-selected
+  assign pcout = LAST ? 48'd0 : 48'(pn_r);
 endmodule
 
 

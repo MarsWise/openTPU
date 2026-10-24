@@ -856,9 +856,6 @@ module otpu_mxu
 `endif
   for (genvar j = 0; j < MCOLS; j++) begin : g_ask
     for (genvar i = 0; i < D; i++) begin : g_p
-      logic ternary_k;
-      otpu_skew #(.W(1), .N(i % CLS + j)) u_t (.clk, .en(1'b1), .d(m0.ternary),
-                                               .q(ternary_k));
       otpu_skew #(.W(8), .N(i % CLS + j)) u_a (.clk, .en(1'b1), .d(a0[(j*D + i)*8 +: 8]),
                                              .q(as_k[j][i]));
       // columns past the first register their weights in the DSP (WREG), from the previous
@@ -866,9 +863,8 @@ module otpu_mxu
       localparam int JW = (j == 0) ? 0 : j - 1;
       otpu_pe #(.FIRST(i % CLS == 0), .LAST(i % CLS == CLS - 1), .WREG(j != 0)) u_pe (
         .clk, .en(1'b1), .act(as_k[j][i]), .wlo(wc[JW][i][7:0]), .whi(wc[JW][i][15:8]),
-        .sel(c_qs[j][0]), .sel2(c_qs[j][1]), .quad(c_quad), .ternary(ternary_k),
+        .sel(c_qs[j][0]), .sel2(c_qs[j][1]), .quad(c_quad),
         .pcin((i % CLS == 0) ? 48'd0 : pc[j][(i % CLS == 0) ? i : i - 1]), .pcout(pc[j][i]),
-        .tpcin((i % CLS == 0) ? 24'sd0 : preg[j][(i % CLS == 0) ? i : i - 1]),
         .p(preg[j][i]));
 `ifndef SYNTHESIS
       // the DSP's select register is hi0[j] (both are c_hi[j], loaded every cycle)
