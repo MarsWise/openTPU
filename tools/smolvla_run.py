@@ -147,6 +147,7 @@ def main():
     print(f"bytes to the device: weights {runner.weight_bytes:,} once (resident), per call "
           f"{runner.call_bytes:,} in all (activations, programs"
           + ("" if runner.resident else ", weights") + ")")
+    print(f"programs traced {runner.stats['traced']}, reused {runner.stats['cached']}")
     print(f"actions [{r.shape[0]} x {d}] vs float32: rel L2 {rel:.4f}, max |d| "
           f"{float(np.abs(g - r).max()):.4f} (action range {float(np.abs(r).max()):.3f}); "
           f"first step float {np.round(r[0], 3).tolist()} device {np.round(g[0], 3).tolist()}")

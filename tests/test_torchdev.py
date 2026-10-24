@@ -226,3 +226,34 @@ def test_resident_weights_are_written_once_and_change_nothing():
     assert len(r1._res) == 3                         # the conv and the two linears, once each
     assert r1.call_bytes < r0.call_bytes - 2 * r1.weight_bytes   # 3 passes: weights not re-sent
     assert cfg.DRAM_BYTES // 2 <= r1._heap < cfg.DRAM_BYTES
+
+
+def test_programs_are_traced_once_per_distinct_call(monkeypatch):
+    """Runner caches each distinct call's programs (the same layer, shapes and resident weights):
+    a repeated forward traces nothing new, its outputs bit for bit the uncached run's; with
+    OTPU_PROG_CACHE_CHECK=1 every reuse is checked against a fresh trace."""
+    torch = pytest.importorskip("torch")
+    from opentpu import torchdev as TD
+    torch.manual_seed(3)
+    m = torch.nn.Sequential(torch.nn.Linear(40, 64), torch.nn.GELU(), torch.nn.Linear(64, 10)).eval()
+    xs = [torch.randn(5, 40) for _ in range(3)]
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, DRAM_BYTES=1 << 24)
+    outs = {}
+    for cache in (False, True):
+        mm = __import__("copy").deepcopy(m)
+        r = TD.Runner("isa", cfg=cfg, cache_programs=cache)
+        TD.to_device(mm, r, TD.Coverage())
+        with torch.no_grad():
+            outs[cache] = [mm(x).numpy() for x in xs]
+        if cache:
+            assert r.stats["traced"] == 2 and r.stats["cached"] == 4, r.stats
+        else:
+            assert r.stats["traced"] == 0
+    for a, b in zip(outs[False], outs[True]):
+        assert np.array_equal(a.view(np.uint32), b.view(np.uint32))
+    monkeypatch.setenv("OTPU_PROG_CACHE_CHECK", "1")
+    r = TD.Runner("isa", cfg=cfg)
+    TD.to_device(m, r, TD.Coverage())
+    with torch.no_grad():
+        for x in xs:
+            m(x)

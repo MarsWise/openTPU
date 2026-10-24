@@ -70,7 +70,7 @@ class Runner:
     its wait entries, tens to ~100 ms each -- weights are one part of that overhead.)"""
 
     def __init__(self, backend: str = "isa", cfg=None, dev: str = "/dev/xdma0",
-                 check_isa: bool = False, resident: bool = True):
+                 check_isa: bool = False, resident: bool = True, cache_programs: bool = True):
         self.backend, self.check_isa = backend, check_isa
         self.board = None
         if backend == "board":
@@ -93,6 +93,8 @@ class Runner:
         self._heap = cfg.DRAM_BYTES
         self._res = {}                  # id(Weight) -> (Resident, the Weight: kept alive)
         self._regions = []              # (addr, bytes): what the ISA simulator's images get
+        self.cache_programs = cache_programs
+        self._progs = {}                # call key -> (the programs as text, their Compiled)
         self.weight_bytes = 0           # written once
         self.call_bytes = 0             # written per call (activations, programs)
 
@@ -126,6 +128,60 @@ class Runner:
         self._res[id(w)] = (res, w)
         return res
 
+    def _key(self, kernel, limit, args):
+        """A call's program cache key: the kernel and each argument's shape (an
+        Input / Output), placement (a Resident) or value (anything else); None when an argument
+        has no key (a non-resident Weight: its bytes are in the image, the program is not)."""
+        from .runtime import Input, Output, Resident
+        parts = [kernel.__name__, id(kernel)]          # (the limit only bounds placement:
+        #                                                 the same args place at the same addresses)
+        for k in sorted(args):
+            v = args[k]
+            if isinstance(v, Input):
+                parts.append((k, "in", v.array.shape))
+            elif isinstance(v, Output):
+                parts.append((k, "out", v.shape))
+            elif isinstance(v, Resident):
+                parts.append((k, "res", v.daddr, v.saddr, v.N, v.K, v.fmt))
+            elif isinstance(v, (int, float, str, bool, type(None))):
+                parts.append((k, v))
+            elif isinstance(v, tuple) and all(isinstance(x, (int, float, str, bool)) for x in v):
+                parts.append((k, v))
+            else:
+                return None
+        return tuple(parts)
+
+    def _compile(self, kernel, limit, args):
+        """compile_kernel, with each distinct call's programs traced once: a call alike in
+        every key part (the same layer at the same shapes, its weights resident) places its
+        data and reuses the programs and store records (with this call's Output objects).
+        Tracing a linear took 37-88 ms a call on the host (2026-10-24); SmolVLA's Euler steps
+        repeat the same calls. OTPU_PROG_CACHE_CHECK=1 traces anyway and compares."""
+        import os
+        from .compiler import Compiled
+        from .runtime import Output, compile_kernel, place
+        key = self._key(kernel, limit, args) if self.cache_programs else None
+        hit = self._progs.get(key) if key is not None else None
+        if hit is None or os.environ.get("OTPU_PROG_CACHE_CHECK") == "1":
+            comp, imgs = compile_kernel(kernel, self.cfg, _dram_limit=limit, **args)
+            if hit is not None and [list(map(str, p)) for p in comp.programs] != hit[0]:
+                raise RuntimeError(f"{kernel.__name__}: the cached program differs from a fresh "
+                                   "trace (a kernel that reads its inputs' data while tracing)")
+            if key is not None and hit is None:
+                self._progs[key] = ([list(map(str, p)) for p in comp.programs], comp)
+                self.stats["traced"] += 1
+            return comp, imgs
+        comp0 = hit[1]
+        dram, layout, _ = place(self.cfg, args, limit)
+        # the store records name the Output objects of the call that traced them: this call's
+        new_of = {}
+        for name, (a, _) in comp0.layout.params.items():
+            if isinstance(a, Output):
+                new_of[id(a)] = layout.params[name][0]
+        stores = [[(new_of.get(id(h), h), off, n) for h, off, n in recs] for recs in comp0.stores]
+        self.stats["cached"] += 1
+        return Compiled(self.cfg, comp0.programs, stores, layout), dram.images
+
     MIN_CALL_BYTES = 64 << 20   # DRAM kept for a call's data and program (half a small DRAM)
 
     def run(self, kernel, out: str = "y", **args) -> np.ndarray:
@@ -136,7 +192,7 @@ class Runner:
                     for k, v in args.items()}
             # the call's data, then the program PROG_GAP above it, all below the weights
             limit = self._heap - PROG_GAP - 4 * self.cfg.IMEM_WORDS - 4096
-        comp, imgs = compile_kernel(kernel, self.cfg, _dram_limit=limit, **args)
+        comp, imgs = self._compile(kernel, limit, args)
         for addr, b in self._regions:           # the ISA simulator: the resident weights too
             for img in imgs:                    # (on the card they are already there; the
                 img[addr:addr + b.size] = b     # card's image is written only up to its top)
