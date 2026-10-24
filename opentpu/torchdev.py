@@ -62,10 +62,15 @@ def run_on_board(board, comp, img, out: str = "y"):
 class Runner:
     """Runs kernels on `backend`: "isa" (the ISA simulator) or "board" (the card at `dev`, its
     bitstream's Config); check_isa: every board run also on the ISA simulator from the same
-    image, outputs required bit-identical."""
+    image, outputs required bit-identical. resident (default): a Weight argument is quantized
+    and written to DRAM once, the first time it is used, and stays there (runtime.Resident);
+    each call then moves only its activations, outputs and program. resident=False: every
+    call's image carries its weights, as before. (SmolVLA base on r4: 2.35 G card cycles,
+    ~18 s, in ~1415 s of device calls; per call the host also compiles the kernel and computes
+    its wait entries, tens to ~100 ms each -- weights are one part of that overhead.)"""
 
     def __init__(self, backend: str = "isa", cfg=None, dev: str = "/dev/xdma0",
-                 check_isa: bool = False):
+                 check_isa: bool = False, resident: bool = True):
         self.backend, self.check_isa = backend, check_isa
         self.board = None
         if backend == "board":
@@ -82,10 +87,69 @@ class Runner:
         self.cycles = 0
         self.device_s = 0.0
         self.mismatch = 0
+        # resident weights: quantized and written once, top-down from the end of DRAM; each
+        # call places only its activations and outputs below them (and its program above those)
+        self.resident = resident and cfg.S == 1
+        self._heap = cfg.DRAM_BYTES
+        self._res = {}                  # id(Weight) -> (Resident, the Weight: kept alive)
+        self._regions = []              # (addr, bytes): what the ISA simulator's images get
+        self.weight_bytes = 0           # written once
+        self.call_bytes = 0             # written per call (activations, programs)
+
+    def _resident_of(self, w):
+        """w's Resident: its quantized rows and scales written once (the card, or kept for the
+        ISA simulator's images), placed below the previous ones."""
+        from . import quant as Q
+        from .runtime import ALIGN, Resident
+        r = self._res.get(id(w))
+        if r is not None:
+            return r[0]
+        D = self.cfg.D
+        N, K = w.array.shape
+        q, sc = Q.quantize_mxu(w.array, w.fmt, D)
+        q = np.ascontiguousarray(q).view(np.uint8).reshape(-1)
+        sc = np.ascontiguousarray(sc).view(np.uint8).reshape(-1)
+        saddr = (self._heap - sc.size) // ALIGN * ALIGN
+        daddr = (saddr - q.size) // ALIGN * ALIGN
+        floor = min(self.MIN_CALL_BYTES, self.cfg.DRAM_BYTES // 2)
+        if daddr < floor:
+            raise MemoryError(f"resident weights: {self.weight_bytes + q.size + sc.size} bytes "
+                              f"leave less than {floor} for a call's data")
+        self._heap = daddr
+        if self.board is not None:
+            self.board.write(daddr, q.copy())
+            self.board.write(saddr, sc.copy())
+        if self.board is None or self.check_isa:    # the ISA simulator's images get them too
+            self._regions += [(daddr, q), (saddr, sc)]
+        self.weight_bytes += q.size + sc.size
+        res = Resident(daddr, saddr, N, K, w.fmt)
+        self._res[id(w)] = (res, w)
+        return res
+
+    MIN_CALL_BYTES = 64 << 20   # DRAM kept for a call's data and program (half a small DRAM)
 
     def run(self, kernel, out: str = "y", **args) -> np.ndarray:
-        from .runtime import compile_kernel, run
-        comp, imgs = compile_kernel(kernel, self.cfg, **args)
+        from .runtime import Weight, compile_kernel, run
+        limit = None
+        if self.resident:
+            args = {k: (self._resident_of(v) if isinstance(v, Weight) and v.shard is None else v)
+                    for k, v in args.items()}
+            # the call's data, then the program PROG_GAP above it, all below the weights
+            limit = self._heap - PROG_GAP - 4 * self.cfg.IMEM_WORDS - 4096
+        comp, imgs = compile_kernel(kernel, self.cfg, _dram_limit=limit, **args)
+        for addr, b in self._regions:           # the ISA simulator: the resident weights too
+            for img in imgs:                    # (on the card they are already there; the
+                img[addr:addr + b.size] = b     # card's image is written only up to its top)
+        from . import quant as Q
+        from .runtime import Input
+        D = self.cfg.D
+        self.call_bytes += 32 * sum(len(p) for p in comp.programs)     # 8 words an instruction
+        for a, _ in comp.layout.params.values():
+            if isinstance(a, Input):
+                self.call_bytes += a.array.nbytes
+            elif isinstance(a, Weight):                                 # as quantized and sent
+                n, k = a.array.shape
+                self.call_bytes += n * (Q.row_bytes(k, a.fmt, D) + Q.scale_bytes(k, a.fmt, D))
         cap = self.cfg.IMEM_WORDS // 8
         n = max(len(p) for p in comp.programs)
         if n > cap:

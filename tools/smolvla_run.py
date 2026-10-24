@@ -95,6 +95,8 @@ def main():
     ap.add_argument("--check-isa", action="store_true")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--wsplit", action="store_true")
+    ap.add_argument("--no-resident", action="store_true",
+                    help="send each layer's weights with every call (the old way)")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
@@ -119,7 +121,8 @@ def main():
         ref = pol.model.sample_actions(*x[:5], noise=x[5].clone())
         t_ref = time.time() - t0
     dev = copy.deepcopy(pol)
-    runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa)
+    runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa,
+                       resident=not a.no_resident)
     cov = TD.Coverage()
     n = TD.to_device(dev, runner, cov, wsplit=a.wsplit)
     vwe = dev.model.vlm_with_expert
@@ -141,6 +144,9 @@ def main():
     print(f"kernel runs {runner.stats['runs']}, device time {runner.device_s:.1f}s"
           + (f", card cycles {runner.cycles:,}" if runner.board is not None else "")
           + f"; float run {t_ref:.2f}s, device run {t_dev:.1f}s")
+    print(f"bytes to the device: weights {runner.weight_bytes:,} once (resident), per call "
+          f"{runner.call_bytes:,} in all (activations, programs"
+          + ("" if runner.resident else ", weights") + ")")
     print(f"actions [{r.shape[0]} x {d}] vs float32: rel L2 {rel:.4f}, max |d| "
           f"{float(np.abs(g - r).max()):.4f} (action range {float(np.abs(r).max()):.3f}); "
           f"first step float {np.round(r[0], 3).tolist()} device {np.round(g[0], 3).tolist()}")

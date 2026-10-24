@@ -197,3 +197,32 @@ def test_a_linear_too_long_for_imem_runs_in_row_chunks():
                                     DRAM_BYTES=1 << 24, IMEM_WORDS=8 * 4))
     with pytest.raises(TD.ProgramTooLong, match="IMEM holds 4"):
         TD.DeviceLinear(lin, r, TD.Coverage())(x)
+
+
+def test_resident_weights_are_written_once_and_change_nothing():
+    """Runner(resident=True), the default: a layer's weights are quantized and placed once, above
+    every call's data, and each later call moves only activations and the program; the outputs
+    are the non-resident run's bit for bit (the same quantized bytes, other addresses)."""
+    torch = pytest.importorskip("torch")
+    from opentpu import torchdev as TD
+    torch.manual_seed(2)
+    m = torch.nn.Sequential(torch.nn.Conv2d(3, 16, 4, stride=4), torch.nn.Flatten(1),
+                            torch.nn.Linear(16 * 4 * 4, 64), torch.nn.GELU(),
+                            torch.nn.Linear(64, 10)).eval()
+    xs = [torch.randn(2, 3, 16, 16) for _ in range(3)]
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, DRAM_BYTES=1 << 27)
+    outs, runners = {}, {}
+    for res in (False, True):
+        mm = __import__("copy").deepcopy(m)
+        r = TD.Runner("isa", cfg=cfg, resident=res)
+        TD.to_device(mm, r, TD.Coverage())
+        with torch.no_grad():
+            outs[res] = [mm(x).numpy() for x in xs]
+        runners[res] = r
+    for a, b in zip(outs[False], outs[True]):
+        assert np.array_equal(a.view(np.uint32), b.view(np.uint32))
+    r0, r1 = runners[False], runners[True]
+    assert r0.weight_bytes == 0 and r1.weight_bytes > 0
+    assert len(r1._res) == 3                         # the conv and the two linears, once each
+    assert r1.call_bytes < r0.call_bytes - 2 * r1.weight_bytes   # 3 passes: weights not re-sent
+    assert cfg.DRAM_BYTES // 2 <= r1._heap < cfg.DRAM_BYTES

@@ -21,8 +21,12 @@ here is built; r5 (`0f9f9b1d`, m8 @ 150 MHz) is being implemented by the user.
 | VLA (SmolVLA via `opentpu/torchdev.py`) | **most**: LayerNorm / RMSNorm, RoPE, GELU / SiLU, residual adds, pow, pixel shuffle, the time embedding (sin/cos), the Euler update; the graph itself is PyTorch, one device call per layer with its weights re-sent every call | run 4 log: 398 M host elements a sample; 5643 calls, 2.35 G card cycles (17.6 s) in 1415 s of calls |
 
 Measured cost of the per-layer pattern (r4, SmolVLA base, PHYSICAL FPGA, timing only — that
-run's numerics were void, see PROGRESS.md): 99 % of the time in the device calls is transfer,
-program load and synchronisation, not computation.
+run's numerics were void, see PROGRESS.md): 99 % of the time in the device calls is not the
+card computing. Its parts are not yet measured on the card; host-side per call (container,
+2026-10-24): compiling a linear 37-88 ms, its wait entries 8-88 ms (1.4 s the first time),
+plus the weights re-sent (now resident: `torchdev.Runner(resident=True)`), the program load
+and the synchronisation. Next: cache each layer's compiled program and wait entries (the same
+shapes and, with resident weights, the same addresses every Euler step).
 
 ## 2. What removes it, and whether it needs RTL
 

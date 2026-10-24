@@ -7,6 +7,7 @@ Host arguments:
                       over slices by rows (shard=0) or columns (shard=1) -> QTensor
   Output(shape)       fp32 result; the kernel `store`s into it          -> Tensor
   KVCache(k, v, cap)  [Hkv, T, d] K/V, quantized, heads round-robin over slices -> KVDesc
+  Resident(daddr, saddr, N, K, fmt)  a weight its owner already wrote to DRAM  -> QTensor
 Anything else (ints, floats) is passed to the kernel unchanged (compile-time constants).
 """
 from __future__ import annotations
@@ -51,6 +52,15 @@ class Weight:
         self.array, self.shard, self.fmt = a, shard, fmt
 
 
+class Resident:
+    """A weight already in DRAM: quantized and written once by its owner (torchdev.Runner keeps
+    a model's layers resident on the card), bound as its QTensor; nothing is placed or written
+    per call. daddr / saddr: its rows' and scales' addresses; [N, K] in `fmt` (one slice)."""
+
+    def __init__(self, daddr: int, saddr: int, N: int, K: int, fmt: str = "int8"):
+        self.daddr, self.saddr, self.N, self.K, self.fmt = daddr, saddr, N, K, fmt
+
+
 class KVCache:
     def __init__(self, k, v, capacity: int):
         k = np.asarray(k, dtype=np.float32)
@@ -77,16 +87,18 @@ def quantize_rows(a: np.ndarray, D: int, row: bool = False) -> tuple[np.ndarray,
 
 
 class _Dram:
-    def __init__(self, S: int, size: int):
+    def __init__(self, S: int, size: int, limit: int | None = None):
         self.size = size
+        self.limit = size if limit is None else min(size, limit)
         self.next = 0
         self.images = [np.zeros(size, dtype=np.uint8) for _ in range(S)]
 
     def alloc(self, nbytes: int) -> int:
         a = self.next
         self.next = (a + nbytes + ALIGN - 1) // ALIGN * ALIGN
-        if self.next > self.size:
-            raise MemoryError("DRAM image does not fit")
+        if self.next > self.limit:
+            raise MemoryError("DRAM image does not fit" + (
+                f" below the resident weights at {self.limit:#x}" if self.limit < self.size else ""))
         return a
 
     def put(self, s: int, addr: int, data: np.ndarray) -> None:
@@ -99,10 +111,11 @@ class Layout:
     params: dict = field(default_factory=dict)       # name -> (host arg, placement info)
 
 
-def place(cfg: Config, args: dict) -> tuple[_Dram, Layout, list]:
-    """Lay out host args in DRAM. Returns images, layout and per-slice bound kernel arguments."""
+def place(cfg: Config, args: dict, limit: int | None = None) -> tuple[_Dram, Layout, list]:
+    """Lay out host args in DRAM (below `limit`: resident weights above it). Returns images,
+    layout and per-slice bound kernel arguments."""
     S, D = cfg.S, cfg.D
-    dram = _Dram(S, cfg.DRAM_BYTES)
+    dram = _Dram(S, cfg.DRAM_BYTES, limit)
     layout = Layout()
     bound = [dict() for _ in range(S)]
     for name, a in args.items():
@@ -145,6 +158,11 @@ def place(cfg: Config, args: dict) -> tuple[_Dram, Layout, list]:
             desc = QTensor.weight(daddr, saddr, n_loc, K, a.fmt, D)
             for s in range(S):
                 bound[s][name] = desc
+        elif isinstance(a, Resident):
+            if S != 1:
+                raise ValueError(f"{name}: resident weights are for one slice")
+            desc = QTensor.weight(a.daddr, a.saddr, a.N, a.K, a.fmt, D)
+            bound[0][name] = desc
         elif isinstance(a, KVCache):
             if a.d % D:
                 raise ValueError("head dim must be a multiple of D")
@@ -195,13 +213,15 @@ def _tensor(addr: int, shape, host) -> Tensor:
     return Tensor(Affine(addr), shape, tuple(reversed(strides)), host, Affine(0))
 
 
-def compile_kernel(kernel: Kernel, cfg: Config, **args):
+def compile_kernel(kernel: Kernel, cfg: Config, _dram_limit: int | None = None, **args):
+    """Place the args (below _dram_limit when resident weights sit above it), trace each
+    slice's program: (Compiled, the DRAM images)."""
     sig = inspect.signature(kernel.fn)
     missing = [p for p, v in sig.parameters.items()
                if p not in args and v.default is inspect.Parameter.empty]
     if missing:
         raise TypeError(f"{kernel.__name__}: missing arguments {missing}")
-    dram, layout, bound = place(cfg, args)
+    dram, layout, bound = place(cfg, args, _dram_limit)
     programs, stores = [], []
     for s in range(cfg.S):
         b = kernel.trace(cfg, s, bound[s])
