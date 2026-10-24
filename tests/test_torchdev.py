@@ -172,3 +172,28 @@ def test_tiny_smolvla_actions():
     a, b = got.numpy()[0, :, :6], ref.numpy()[0, :, :6]
     assert rel(a, b) < 0.05
     assert cov.total("host") == 0 and cov.total("device") > 0     # every MAC on the device
+
+
+def test_a_linear_too_long_for_imem_runs_in_row_chunks():
+    """The linear kernel's program grows with M: a layer whose program would not fit IMEM runs
+    its rows in chunks that do (r4: SmolVLA base's were 219140 instructions into 4096, and ran
+    overwritten until the loader refused them), the result the one-program run's bit for bit;
+    a kernel that cannot be split raises ProgramTooLong instead of running."""
+    torch = pytest.importorskip("torch")
+    from opentpu import torchdev as TD
+    torch.manual_seed(1)
+    lin = torch.nn.Linear(96, 200)
+    x = torch.randn(300, 96)
+    outs, runs = [], []
+    for imem in (1 << 20, 8 * 120):
+        r = TD.Runner("isa", cfg=Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16,
+                                        DRAM_BYTES=1 << 24, IMEM_WORDS=imem))
+        dl = TD.DeviceLinear(lin, r, TD.Coverage())
+        outs.append(dl(x).detach().numpy())
+        runs.append(r.stats["runs"])
+    assert runs[0] == 1 and runs[1] > 1, runs
+    assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
+    r = TD.Runner("isa", cfg=Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16,
+                                    DRAM_BYTES=1 << 24, IMEM_WORDS=8 * 4))
+    with pytest.raises(TD.ProgramTooLong, match="IMEM holds 4"):
+        TD.DeviceLinear(lin, r, TD.Coverage())(x)

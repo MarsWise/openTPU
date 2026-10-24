@@ -19,6 +19,16 @@ import numpy as np
 PROG_GAP = 1 << 20
 
 
+class ProgramTooLong(RuntimeError):
+    """A kernel's program is longer than IMEM holds (the board's loader takes IMEM_WORDS / 8
+    instructions; a longer one would run overwritten -- SmolVLA base's linears on r4, rel L2 0.88
+    against float, before the loader refused it). n: its instructions, cap: IMEM's."""
+
+    def __init__(self, name: str, n: int, cap: int):
+        super().__init__(f"{name}: a program of {n} instructions, IMEM holds {cap}")
+        self.n, self.cap = n, cap
+
+
 def run_on_board(board, comp, img, out: str = "y"):
     """Run one compiled kernel on the card: its DRAM image (up to its last placed byte) at 0, the
     program above it, then the output read back. Returns (output, run stats)."""
@@ -76,6 +86,10 @@ class Runner:
     def run(self, kernel, out: str = "y", **args) -> np.ndarray:
         from .runtime import compile_kernel, run
         comp, imgs = compile_kernel(kernel, self.cfg, **args)
+        cap = self.cfg.IMEM_WORDS // 8
+        n = max(len(p) for p in comp.programs)
+        if n > cap:
+            raise ProgramTooLong(kernel.__name__, n, cap)
         t0 = time.perf_counter()
         if self.board is None:
             y = run(comp, imgs, "isa").outputs[out]
@@ -212,9 +226,25 @@ class DeviceLinear:
         if M == 0:
             return torch.zeros(*shp[:-1], self.N, dtype=dt)
         kw = dict(wlo=self.wlo) if self.wlo is not None else {}
-        y = self.runner.run(L.linear, x=Input(L.pad_rows(a, self.runner.cfg.D)), w=self.w,
-                            b=Input(self.b), y=Output((M, self.N)), M=M, K=self.K, N=self.N,
-                            **kw)
+        D = self.runner.cfg.D
+        # the kernel's program grows with M (a row tile at a time, unrolled): rows in chunks of
+        # `step` (a multiple of D: each chunk's tiles and their activation scales are the whole
+        # run's, so the result is the same bit for bit) small enough for IMEM
+        y = np.empty((M, self.N), np.float32)
+        m0, step = 0, getattr(self, "_step", None) or M
+        while m0 < M:
+            n = min(step, M - m0)
+            try:
+                y[m0:m0 + n] = self.runner.run(
+                    L.linear, x=Input(L.pad_rows(a[m0:m0 + n], D)), w=self.w, b=Input(self.b),
+                    y=Output((n, self.N)), M=n, K=self.K, N=self.N, **kw)
+            except ProgramTooLong as e:
+                if n <= D:
+                    raise
+                step = max(D, min(n - 1, n * e.cap // e.n) // D * D)
+                self._step = step
+                continue
+            m0 += n
         self.cov.add("device", "linear", M * self.K * self.N)
         return torch.from_numpy(np.ascontiguousarray(y)).reshape(*shp[:-1], self.N).to(dt)
 
