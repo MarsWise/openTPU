@@ -52,10 +52,16 @@ AMD describes the soft/hard behavior in [UG906](https://docs.amd.com/r/2024.1-En
 From the feature worktree:
 
 ```powershell
-.\tools\replay_r5_locality.ps1 -DryRun
-.\tools\replay_r5_locality.ps1 -Mode Plan
-.\tools\replay_r5_locality.ps1 -Mode Place
+.\tools\replay_r5_locality.cmd -DryRun
+.\tools\replay_r5_locality.cmd -Mode Plan
+.\tools\replay_r5_locality.cmd -Mode Place
 ```
+
+The Windows `.cmd` entry point starts Windows PowerShell with RemoteSigned for that child
+process only. It supports a local checkout when LocalMachine is AllSigned, without changing
+the persistent execution policy or requiring administrator privileges. Group Policy still
+takes precedence. The `.ps1` entry point remains available in an appropriately configured
+PowerShell session. [Microsoft execution-policy scopes](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1).
 
 Plan only opens the post-opt checkpoint, validates/applies constraints and saves a new
 `planned.dcp`. Place additionally runs the original directives: ExtraPostPlacementOpt,
@@ -74,14 +80,14 @@ check_timing and locality.tsv. Compare against the original post-place physopt c
 -0.503 ns / clk2x -0.315 ns (not against routed WNS). For a same-directive control run:
 
 ```powershell
-.\tools\replay_r5_locality.ps1 -Mode Place -Scope None
+.\tools\replay_r5_locality.cmd -Mode Place -Scope None
 ```
 
 `-Scope Rmw` and `-Scope Tmem` isolate the two changes. If the new placed result warrants
 routing, continue from its saved checkpoint without repeating placement:
 
 ```powershell
-.\tools\replay_r5_locality.ps1 -Mode Route -Checkpoint '<experiment>/physopt/design.dcp'
+.\tools\replay_r5_locality.cmd -Mode Route -Checkpoint '<experiment>/physopt/design.dcp'
 ```
 
 Route uses NoTimingRelaxation and saves routed reports/DCP, bus-skew and CDC reports.
