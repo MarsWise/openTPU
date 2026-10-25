@@ -172,3 +172,17 @@ placing and routing (OTPU_X2C_MARGIN, removed for the bitstream), phys_opt and p
 at AggressiveExplore, the router at Explore, 8 threads (OTPU_MAX_THREADS). If the paths still
 fail: a read-data register at TMEM's outputs (read latency 2, each unit's read pipeline one cycle
 longer; ISA unchanged) -- an RTL change across MXU, DMA, VPU, quantizer and collective.
+
+### db36f818 routed (2026-10-25 17:25, the user's PC)
+
+ROUTED (with the 0.15 ns margin still on, as the stage report is taken): all 421,254 nets routed,
+0 errors; core_clk WNS -0.671 ns / TNS -391.7 (2,797 endpoints), core_clk2x -0.603, core ->
+clk2x -0.498, clk2x -> core -0.550 (1,513); WHS +0.015 (hold met); crg +0.096, userclk1 -0.030.
+Without the margin about -0.52 ns: an fmax near 139 MHz. Routing made it more diffuse than the
+placer's estimate (-0.503): besides TMEM's outputs, fp32 multipliers' normalisation in the MXU
+epilogue (g_rmw u_y, g_lane u_m1: 1.1 ns logic, 5.2-5.4 ns route) and the quantizer (r3 -> u_r).
+The post-route phys_opt (AggressiveExplore was not yet set; the strategy's) stopped without a
+message in its second phase (Physopt 32-745: "slack too large ... most effective above
+-0.5 ns"); the run is marked failed, no bitstream (the r5 gate requires WNS >= 0 anyway).
+Next: `build_r5_timing.ps1 -Mode Impl` at 150 (`_claude\r5m8_impl.cmd`), or a full build at
+137.5 MHz (`-CoreMhz 137.5`, `_claude\r5m8_137.cmd`: +0.606 ns of period).

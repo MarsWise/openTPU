@@ -6,6 +6,9 @@ the author's r150o placement recipe; the default) or m4 (MCOLS=4, 133.33 MHz, r4
   .\tools\build_r5_timing.ps1 -Mode Build [-Variant m4] [-NoFence]
   .\tools\build_r5_timing.ps1 -Mode Impl -OutDir build\vivado-r5-timing-<rev>
 -NoFence (m8): leave the MXU's DSP columns' free sites to the placer (otpu_mxu_place.tcl's fence).
+-CoreMhz (m8): another core clock than 150 MHz (core_clk2x twice it; core_clock.tcl needs an even
+MMCM divider: 141.67 = 850 / 6, 137.5 = 825 / 6), e.g. 137.5; default OutDir
+build\vivado-r5-m8-<MHz>-<rev>. The CFG_HASH does not change (the clock is not in the Config).
 Prepare creates the project only. Synth runs IP/core synthesis and structural gates.
 Build runs synthesis, implementation and writes a bitstream only if setup/hold pass.
 Impl reruns implementation only, on an existing project's finished synthesis (OutDir required):
@@ -23,6 +26,7 @@ param(
     [string]$Vivado = 'C:\Xilinx\Vivado\2024.2\bin\vivado.bat',
     [string]$OutDir,
     [switch]$NoFence,
+    [string]$CoreMhz = '',
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
@@ -31,7 +35,8 @@ $revision = (& git -C $repoRoot rev-parse --short=8 HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read repository revision' }
 $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if (-not $OutDir) {
-    $OutDir = Join-Path $repoRoot $(if ($Variant -eq 'm8') { "build\vivado-r5-timing-$revision" }
+    $OutDir = Join-Path $repoRoot $(if ($Variant -eq 'm8' -and $CoreMhz) { "build\vivado-r5-m8-$CoreMhz-$revision" }
+                                    elseif ($Variant -eq 'm8') { "build\vivado-r5-timing-$revision" }
                                     else { "build\vivado-r5-$Variant-$revision" })
 }
 $OutDir = [IO.Path]::GetFullPath($OutDir)
@@ -60,6 +65,14 @@ $v = if ($Variant -eq 'm8') {
     @{ mcols = 8; mhz = '150'; hash = '3b7f244e'; tmem = '131072'; clk2x = 300 }
 } else {
     @{ mcols = 4; mhz = '133.33'; hash = '603d5a6f'; tmem = '65536'; clk2x = 266.67 }
+}
+if ($CoreMhz) {
+    $cm = 0.0
+    if ($Variant -ne 'm8') { throw '-CoreMhz is for -Variant m8' }
+    if (-not [double]::TryParse($CoreMhz, [Globalization.NumberStyles]::Float,
+                                [Globalization.CultureInfo]::InvariantCulture, [ref]$cm) -or
+        $cm -lt 100 -or $cm -gt 150) { throw "-CoreMhz '$CoreMhz': 100 to 150" }
+    $v.mhz = $CoreMhz; $v.clk2x = [math]::Round(2 * $cm, 2)
 }
 if ($Variant -eq 'm4') {
     $buildEnv.TMEM_WORDS = $v.tmem
