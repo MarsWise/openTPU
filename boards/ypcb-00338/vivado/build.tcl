@@ -36,7 +36,8 @@ if {[info exists ::env(OTPU_MAX_THREADS)] && [string trim $::env(OTPU_MAX_THREAD
   puts $fh "puts \"otpu_threads: general.maxThreads \[get_param general.maxThreads\]\""
   close $fh
   set_param general.maxThreads $nt
-  set_property STEPS.SYNTH_DESIGN.TCL.PRE $th [get_runs synth_1]
+  # (not on synth_1 in an impl run: a changed property would mark its finished synthesis stale)
+  if {!$impl_only} { set_property STEPS.SYNTH_DESIGN.TCL.PRE $th [get_runs synth_1] }
   set_property STEPS.OPT_DESIGN.TCL.PRE $th [get_runs impl_1]
 }
 
