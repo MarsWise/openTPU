@@ -86,3 +86,34 @@ Timing (timing_summary.rpt): **WNS +0.011 ns, WHS +0.024 ns, all constraints met
 Headroom for NextGen RTL: ~109 K LUTs, ~1,190 DSP, ~650 BRAM tiles free. TMM PAIR (`d6f665d2`)
 adds no DSP or BRAM (the PAIR datapath exists) and a few muxes in the MXU's control; its timing
 effect is unknown until a build (the core clock has +0.107 ns).
+
+## r5-m8 implementation (2026-10-24/25, tree 0f9f9b1d, Vivado 2024.2.2, the user's PC)
+
+`tools/build_r5_timing.ps1 -Mode Build` (m8, 150 / 300 MHz, the author's r150o placement recipe
++ r5's units). SYNTHESIS / PLACEMENT ESTIMATED; the run was stopped during routing (no routed
+timing, no bitstream).
+
+| Stage | Result |
+|---|---|
+| synthesis gate | PASS: no latches, T4 in 8 RAMB, no_clock 0, unconstrained internal 0 |
+| after opt (pre-placement estimate) | core +0.706 ns, core_clk2x +1.361, userclk2 -0.142 (the PCIe IP's, as on r4) |
+| utilization after phys_opt | 234,749 LUTs (213 k logic), 242,597 FFs, 521 RAMB36 + 79 RAMB18, 1,299 DSP48 |
+| u_mxu / u_vpu / u_tmem / u_quant | 87.0 k / 41.8 k / 13.7 k / 9.0 k LUTs; 113.6 k / 38.4 k / 6.4 k / 9.5 k FFs |
+| placed WNS / TNS | core -2.715 ns (8,252 failing), core <-> clk2x -0.801 / -1.179, clk2x -0.388 |
+| after phys_opt Explore | core -1.677, clk2x -0.452, crg +0.009; routing started at WNS -1.59 |
+| congestion (placer) | level 5: North 100% over u_mxu, South 111% (u_mxu, u_dma, u_mem) |
+
+The failing paths are long wires through the author's logic, not new logic: the VPU stream
+tail's lane 7 `otpu_fmul` (1.2 ns logic, 7.4 ns route: its cells from SLICE Y39 to Y370, its
+DSP at DSP48_X5Y147 inside the array's columns), `u_mem -> u_tmem rpvb` (7.7 ns route), TMEM's
+block RAM outputs into the MXU / DMA / VPU / quantizer across core_clk2x -> core (4.5-5 ns
+route), the quantizer's and DMA's TMEM read enables (~6 ns), the sequencer's start into the MXU
+and VPU (7.2-7.4 ns).
+
+**Why:** the design is ~57 k LUTs / ~71 k FFs larger than the author's r150o (~178 k LUTs,
+~171 k FFs, 87 % slices, which closed at +0.079 ns). Most of it is TMM's parallel datapath in
+every one of the 1,024 PEs (a second activation / weight register set, +/-act, a 24-bit adder
+chain beside the DSP cascade, a 24-bit output mux, and a skewed ternary flag per PE), although
+TMM's weights reach the PE as 0 / +1 / -1 bytes the DSP multiplies exactly. Commit 9e36232f
+folds the ternary products into the DSP (QUAD's 2-bit code decoded in front of A); the MXU
+alone is to be synthesized out of context (`r5_synth_check.tcl mxu`) before the next full build.

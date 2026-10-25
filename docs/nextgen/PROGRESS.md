@@ -249,6 +249,25 @@ Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIE
   IMEM; cnngraph retraces a conv that does not fit with the row loop (stem --wsplit: 1061, the
   result bit for bit the rolled one's); ISA with the card's config: head rel L2 0.0922 as before.
 
+### r5-m8 timing (2026-10-24/25)
+
+- Codex's fixes (0f9f9b1d: T4 in BRAM, no TFN latches, PAIR / QUAD sum in two stages) passed
+  synthesis's gates on the full design; placement then failed at 150 MHz: core -2.715 ns placed,
+  -1.677 after phys_opt, level-5 congestion over the array (RESOURCE_BUDGET.md "r5-m8
+  implementation"). Long wires through the author's logic, on a design ~57 k LUTs / ~71 k FFs
+  above r150o's.
+- The excess is mostly TMM's parallel fabric datapath in each PE; 9e36232f moves the ternary
+  products into the DSP's multiplier (the same integers, cycle for cycle). Next: the MXU out of
+  context (`tools/vivado/r5_synth_check.tcl mxu`), then the full build (`_claude/r5m8_next.cmd`
+  does both, the build only if the MXU's LUTs fell under 75 k).
+- Container verification of Codex's tree: T4 / quantizer 37/37 (m8, 75 % stalls), TFN / SE /
+  MAC / torchdev 86 + 1 skip, the r5 board model PASS; test_rtl's S=4 cases cannot compile in the
+  7 GB container (cc1plus killed): BLOCKED here, to run on the 92 GB host
+  (`_claude/claude_run_vl.sh`: Verilator 5.046 from source + the whole suite).
+- Host software: torchdev resident weights (addd2e7c) and the program cache (9166b633): SmolVLA
+  tiny 553 calls -> 87 traced, 466 reused, 1.56 MB of weights once; actions unchanged (rel L2
+  0.0205).
+
 ### r5 (2026-10-21): what is in it, its two builds
 
 r5 = r4 + TFN (46a368a5) + VOP MAC + QST T4 + the CAPS2 generics in the top; host: selftest's
