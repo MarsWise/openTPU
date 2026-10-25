@@ -95,6 +95,9 @@ def main():
     ap.add_argument("--check-isa", action="store_true")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--wsplit", action="store_true")
+    ap.add_argument("--device-rows", action="store_true",
+                    help="activations, LayerNorm / RMSNorm and tensor sums / products on the "
+                         "device too (kernels/eltwise.py)")
     ap.add_argument("--no-resident", action="store_true",
                     help="send each layer's weights with every call (the old way)")
     ap.add_argument("--steps", type=int, default=None)
@@ -124,15 +127,17 @@ def main():
     runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa,
                        resident=not a.no_resident)
     cov = TD.Coverage()
-    n = TD.to_device(dev, runner, cov, wsplit=a.wsplit)
+    n = TD.to_device(dev, runner, cov, wsplit=a.wsplit, rows=a.device_rows)
     vwe = dev.model.vlm_with_expert
     if not a.host_attention:                # SmolVLA's attention (its eager path) on the device
         att = TD.DeviceAttention(runner, cov, vwe.num_attention_heads, vwe.num_key_value_heads)
         vwe.eager_attention_forward = att           # the VLM / expert layers (prefix masks)
         TD.hf_attention(vwe.vlm.model.vision_model, att)    # the SigLIP tower (no mask)
-    print(f"{n} nn.Linear / nn.Conv2d layers on the device ({a.backend}, D={runner.cfg.D}, "
+    print(f"{n} modules (nn.Linear / nn.Conv2d{' / activations / norms' if a.device_rows else ''}) on the device ({a.backend}, D={runner.cfg.D}, "
           f"MCOLS={runner.cfg.MCOLS}{', wsplit' if a.wsplit else ''})")
-    with torch.no_grad(), TD.host_counter(cov):
+    import contextlib
+    ops = TD.device_ops(runner, cov) if a.device_rows else contextlib.nullcontext()
+    with torch.no_grad(), TD.host_counter(cov), ops:
         t0 = time.time()
         got = dev.model.sample_actions(*x[:5], noise=x[5].clone())
         t_dev = time.time() - t0

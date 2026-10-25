@@ -182,6 +182,30 @@ class Runner:
         self.stats["cached"] += 1
         return Compiled(self.cfg, comp0.programs, stores, layout), dram.images
 
+    def rows(self, kernel, xs: dict, N: int, vecs: dict | None = None, **kw) -> np.ndarray:
+        """A row-wise kernel (kernels/eltwise.py) over [M, N] arrays xs (by argument name, the
+        same M), vecs [N] arrays, kw its other arguments: y [M, N], the rows in chunks whose
+        programs fit IMEM."""
+        from .runtime import Input, Output
+        M = next(iter(xs.values())).shape[0]
+        out = np.empty((M, N), np.float32)
+        steps = self.__dict__.setdefault("_row_steps", {})
+        m0, step = 0, steps.get((kernel.__name__, N), M)
+        while m0 < M:
+            n = min(step, M - m0)
+            args = {k: Input(np.ascontiguousarray(v[m0:m0 + n])) for k, v in xs.items()}
+            args.update({k: Input(v) for k, v in (vecs or {}).items()})
+            try:
+                out[m0:m0 + n] = self.run(kernel, y=Output((n, N)), M=n, N=N, **args, **kw)
+            except ProgramTooLong as e:
+                if n <= 1:
+                    raise
+                step = max(1, min(n - 1, n * e.cap // e.n) // 16 * 16 or 1)
+                steps[(kernel.__name__, N)] = step
+                continue
+            m0 += n
+        return out
+
     MIN_CALL_BYTES = 64 << 20   # DRAM kept for a call's data and program (half a small DRAM)
 
     def run(self, kernel, out: str = "y", **args) -> np.ndarray:
@@ -235,6 +259,7 @@ class Coverage:
         self.macs = collections.Counter()
         self.calls = collections.Counter()
         self.elems = collections.Counter()      # host elementwise / reduction ops: outputs
+        self.delems = collections.Counter()     # device elementwise / norm ops: outputs
 
     def add(self, where: str, op: str, macs: int) -> None:
         self.macs[where, op] += int(macs)
@@ -248,6 +273,10 @@ class Coverage:
         lines = [f"MACs on the device {d:,} ({100 * d / max(d + h, 1):.2f}%), host {h:,}"]
         for (w, op), v in sorted(self.macs.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {w:6s} {op:28s} {v:>16,} MACs in {self.calls[w, op]} calls")
+        if self.delems:
+            top = ", ".join(f"{k} {v:,}" for k, v in self.delems.most_common(8))
+            lines.append(f"device elementwise / norm outputs {sum(self.delems.values()):,} "
+                         f"elements ({top})")
         if self.elems:
             top = ", ".join(f"{k} {v:,}" for k, v in self.elems.most_common(8))
             lines.append(f"host elementwise / norm / reduction outputs {sum(self.elems.values()):,}"
@@ -518,11 +547,103 @@ def hf_attention(model, att: DeviceAttention, name: str = "opentpu") -> int:
     return n
 
 
+class DeviceRows:
+    """Replaces a row-wise module's forward (an activation, LayerNorm, RMSNorm over the last
+    dimension) with kernels/eltwise.py on the device: the input's leading dimensions flattened
+    into rows, the result in the input's dtype."""
+
+    def __init__(self, runner: Runner, cov: Coverage, name: str, kind: str, fn: str = "",
+                 w=None, b=None, eps: float = 0.0):
+        self.runner, self.cov, self.name, self.kind, self.fn = runner, cov, name, kind, fn
+        self.w = None if w is None else w.detach().float().cpu().numpy().copy()
+        self.b = None if b is None else b.detach().float().cpu().numpy().copy()
+        self.eps = float(eps)
+
+    def __call__(self, x, *args, **kwargs):
+        import torch
+        from .kernels import eltwise as E
+        N, dt = x.shape[-1], x.dtype
+        a = x.detach().float().reshape(-1, N).cpu().numpy()
+        if self.kind == "act":
+            y = self.runner.rows(E.unary, {"x": a}, N, fn=self.fn)
+        elif self.kind == "layer_norm":
+            y = self.runner.rows(E.layer_norm, {"x": a}, N, {"w": self.w, "b": self.b},
+                                 eps=self.eps)
+        else:
+            y = self.runner.rows(E.rms_norm, {"x": a}, N, {"w": self.w}, eps=self.eps)
+        self.cov.delems[self.fn or self.kind] += y.size
+        return torch.from_numpy(y).reshape(x.shape).to(dt)
+
+
+def row_module(m, runner: Runner, cov: Coverage, name: str):
+    """The DeviceRows for module m, or None when its kind is not taken (an activation the
+    target cannot run exactly: GELU's erf form needs the table functions)."""
+    import torch.nn as nn
+    cls = type(m).__name__
+    if isinstance(m, nn.LayerNorm) and len(m.normalized_shape) == 1 and \
+            m.weight is not None and m.bias is not None:
+        return DeviceRows(runner, cov, name, "layer_norm", w=m.weight, b=m.bias, eps=m.eps)
+    if cls.endswith("RMSNorm") and cls in RMS_NORMS and getattr(m, "weight", None) is not None:
+        eps = getattr(m, "variance_epsilon", getattr(m, "eps", None))
+        if eps is not None:
+            return DeviceRows(runner, cov, name, "rms_norm", w=m.weight, eps=eps)
+    fn = ACT_MODULES.get(cls)
+    if cls in ("GELU", "GELUActivation") and getattr(m, "approximate", "none") == "tanh":
+        fn = "gelu_tanh"
+    if fn == "gelu" and not getattr(runner.cfg, "TFN", False):
+        return None
+    if fn is not None:
+        return DeviceRows(runner, cov, name, "act", fn=fn)
+    return None
+
+
+# RMSNorms whose forward is x * rsqrt(mean(x^2) + eps) * weight (not Gemma's 1 + weight)
+RMS_NORMS = {"LlamaRMSNorm", "Qwen2RMSNorm", "Qwen3RMSNorm", "MistralRMSNorm", "Idefics3RMSNorm",
+             "SmolLM3RMSNorm"}
+ACT_MODULES = {"SiLU": "silu", "SiLUActivation": "silu", "Sigmoid": "sigmoid", "Tanh": "tanh",
+               "ReLU": "relu", "GELUTanh": "gelu_tanh", "PytorchGELUTanh": "gelu_tanh",
+               "GELU": "gelu", "GELUActivation": "gelu"}
+
+
+def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
+    """A TorchFunctionMode running the sums, differences and products of two fp32 tensors (the
+    same shape, or the second a [N] vector over the last dimension) on the device
+    (kernels/eltwise.py binary), from min_elems outputs up; anything else is PyTorch's."""
+    import torch
+    from torch.overrides import TorchFunctionMode
+    from .kernels import eltwise as E
+    ops = {"add": "add", "__add__": "add", "__radd__": "add", "mul": "mul", "__mul__": "mul",
+           "__rmul__": "mul", "sub": "sub", "__sub__": "sub"}
+
+    class Ops(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            op = ops.get(getattr(func, "__name__", ""))
+            if op is not None and len(args) == 2 and not kwargs:
+                a, b = args
+                if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and \
+                        a.dtype == b.dtype == torch.float32 and a.dim() >= 1 and \
+                        a.numel() >= min_elems and not (a.requires_grad or b.requires_grad):
+                    N = a.shape[-1]
+                    if b.shape == a.shape:
+                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy(),
+                                                   "b": b.reshape(-1, N).numpy()}, N, op=op)
+                    elif b.numel() == N and b.shape[-1] == N and b.dim() <= a.dim():
+                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy()}, N,
+                                        {"b": b.reshape(N).numpy()}, op=op, brow=True)
+                    else:
+                        return func(*args, **kwargs)
+                    cov.delems[op] += y.size
+                    return torch.from_numpy(y).reshape(a.shape)
+            return func(*args, **kwargs)
+    return Ops()
+
+
 def to_device(model, runner: Runner, cov: Coverage, select=None, wsplit: bool = False,
-              convs: bool = True) -> int:
+              convs: bool = True, rows: bool = False) -> int:
     """Every nn.Linear (and, with convs, every nn.Conv2d the kernel takes) of `model`
-    (select(name, module) -> bool, default all) runs on the device. Returns the number of
-    layers moved."""
+    (select(name, module) -> bool, default all) runs on the device; with rows, also its
+    activations, LayerNorms and RMSNorms (row_module). Returns the number of modules moved."""
     import torch.nn as nn
     n = 0
     for name, m in model.named_modules():
@@ -534,4 +655,9 @@ def to_device(model, runner: Runner, cov: Coverage, select=None, wsplit: bool = 
         elif convs and isinstance(m, nn.Conv2d):
             m.forward = DeviceConv2d(m, runner, cov, name, wsplit)
             n += 1
+        elif rows:
+            r = row_module(m, runner, cov, name)
+            if r is not None:
+                m.forward = r
+                n += 1
     return n
