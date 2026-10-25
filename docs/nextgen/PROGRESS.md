@@ -264,6 +264,14 @@ Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIE
   MAC / torchdev 86 + 1 skip, the r5 board model PASS; test_rtl's S=4 cases cannot compile in the
   7 GB container (cc1plus killed): BLOCKED here, to run on the 92 GB host
   (`_claude/claude_run_vl.sh`: Verilator 5.046 from source + the whole suite).
+- The MXU out of context on 9e36232f (the user's run): 55,276 LUTs / 57,391 FFs, before 99,269 /
+  114,417 (SYNTHESIS ESTIMATED). Then the cycle-exact timing fixes for each of 0f9f9b1d's failing
+  groups (RESOURCE_BUDGET.md "Timing fixes for the next r5-m8 build"): the array's DSP columns
+  fenced, the TMEM request registers replicated, sw_rdy from flip-flops, the PEs' selects copied
+  per column. Not yet built. RTL SIMULATED on the fixes (container, Verilator 5.046, each copy
+  checked against its original every cycle): test_rtl `-k tmm` 41 passed (TMM / PAIR / QUAD, m4
+  and m8), test_r5_board 1 passed, test_quant_rtl 37 passed; test_eltwise 18 passed 1 skipped
+  (GELU's erf without TFN), test_torchdev 14 passed 1 skipped (no LeRobot).
 - Host software: torchdev resident weights (addd2e7c) and the program cache (9166b633): SmolVLA
   tiny 553 calls -> 87 traced, 466 reused, 1.56 MB of weights once; actions unchanged (rel L2
   0.0205).

@@ -299,6 +299,12 @@ module otpu_mxu
   logic        pn;
   qent_t       pop_q, pop_e;
   assign pop_e = pop_q;
+  // The PEs' selects (pop_q's qs and quad), a copy per array column loaded with pop_q's next
+  // value, so each equals pop_q's field: they reach every DSP of their column (the QUAD decode in
+  // front of A, 8 LUTs a PE, and INMODE), ~1.2 k loads a column; pop_q.quad alone would drive
+  // ~9 k (2026-10-25, 9e36232f's PE fold). max_fanout splits each further.
+  (* max_fanout = 64 *) logic [MCOLS-1:0][1:0] pe_qs;
+  (* max_fanout = 64 *) logic [MCOLS-1:0]      pe_qd;
 
   wire [31:0] c_out = h.out;
   wire        c_tz = h.tz;
@@ -832,13 +838,35 @@ module otpu_mxu
   // column end's input registers) is one group's sum. Exact integers.
   // TMM QUAD: the low stream carries position i's four 2-bit codes {q3, q2, q1, q0} as they are
   // (the PEs pick quarter qs and decode it), the high stream nothing
+  // The decode's controls are copies of m0's (qd, ternary, h, ts) and of wf0 / pr0, loaded with
+  // their next values: each reaches the D x 16 weight bits' muxes (m0.qd alone 2104 loads in r5's
+  // m8 0f9f9b1d), m0's own fields the rest of S1.
+  (* max_fanout = 64 *) logic wq_qd, wq_tn, wq_h, wq_pr;
+  (* max_fanout = 64 *) logic [1:0] wq_ts, wq_wf;
+  always_ff @(posedge clk) begin
+    wq_qd <= pop && c_quad;
+    wq_tn <= pop && c_ternary;
+    wq_h <= pop && c_w4 && !c_pair && ck[0];
+    wq_ts <= !pop ? 2'b00 : c_pair ? {ck[0], 1'b0} : ck[1:0];
+    wq_wf <= c_wf;
+    wq_pr <= c_pair;
+  end
+`ifndef SYNTHESIS
+  bit wq_v;
+  initial wq_v = 1'b0;
+  always @(posedge clk) wq_v <= 1'b1;
+  always @(posedge clk)
+    if (wq_v && {wq_qd, wq_tn, wq_h, wq_ts, wq_wf, wq_pr} !==
+                {m0.qd, m0.ternary, m0.h, m0.ts, wf0, pr0})
+      $fatal(1, "otpu_mxu: the weight decode's control copies are not m0's");
+`endif
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
   always_ff @(posedge clk)
     for (int i = 0; i < D; i++)
-      wd[i] <= m0.qd ? {8'd0, w0[2 * (3 * D + i) +: 2], w0[2 * (2 * D + i) +: 2],
+      wd[i] <= wq_qd ? {8'd0, w0[2 * (3 * D + i) +: 2], w0[2 * (2 * D + i) +: 2],
                         w0[2 * (D + i) +: 2], w0[2 * i +: 2]} :
-               {wsel(w0, i, 1'b1, wf0, m0.ternary, pr0 ? {m0.ts[1], 1'b1} : m0.ts),
-                wsel(w0, i, m0.h, wf0, m0.ternary, m0.ts)};
+               {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_pr ? {wq_ts[1], 1'b1} : wq_ts),
+                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_ts)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
     otpu_skew #(.W(16), .N(i % CLS)) u_w (.clk, .en(1'b1), .d(wd[i]), .q(wc[0][i]));
@@ -863,7 +891,7 @@ module otpu_mxu
       localparam int JW = (j == 0) ? 0 : j - 1;
       otpu_pe #(.FIRST(i % CLS == 0), .LAST(i % CLS == CLS - 1), .WREG(j != 0)) u_pe (
         .clk, .en(1'b1), .act(as_k[j][i]), .wlo(wc[JW][i][7:0]), .whi(wc[JW][i][15:8]),
-        .sel(c_qs[j][0]), .sel2(c_qs[j][1]), .quad(c_quad),
+        .sel(pe_qs[j][0]), .sel2(pe_qs[j][1]), .quad(pe_qd[j]),
         .pcin((i % CLS == 0) ? 48'd0 : pc[j][(i % CLS == 0) ? i : i - 1]), .pcout(pc[j][i]),
         .p(preg[j][i]));
 `ifndef SYNTHESIS
@@ -1889,6 +1917,10 @@ module otpu_mxu
         // command that becomes the head as it is accepted gets its entry a cycle later (cl_ld;
         // the pipeline is empty then, and nothing pops before c_left loads)
         pop_q <= pnx ? npx : hpx;
+        for (int j = 0; j < MCOLS; j++) begin
+          pe_qs[j] <= pnx ? npx.qs[j] : hpx.qs[j];
+          pe_qd[j] <= pnx ? npx.quad : hpx.quad;
+        end
       end
       pn <= pnx;
       q_n <= qn;
@@ -1919,6 +1951,9 @@ module otpu_mxu
       end
     if (q_n != 0 && !cl_ld && pop_q != (pn ? n : h))
       $fatal(1, "otpu_mxu: pop_q is not the pop head's entry");
+    if (q_n != 0 && (pe_qs != pop_q.qs || pe_qd != {MCOLS{pop_q.quad}}))
+      $fatal(1, "otpu_mxu: the PEs' select copies %h / %b are not pop_q's %h / %b", pe_qs, pe_qd,
+             pop_q.qs, pop_q.quad);
     if (32'(tg_n) > TD) $fatal(1, "otpu_mxu: %0d port A requests in flight", tg_n);
     if (32'(s_count) > DEPTH) $fatal(1, "otpu_mxu: scale FIFO overflow (%0d)", s_count);
     if (rv1 && tg_n == 0) $fatal(1, "otpu_mxu: a port A response without a request");

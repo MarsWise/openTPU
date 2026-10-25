@@ -3,7 +3,8 @@ Prepare a fresh r5 project from the current committed checkout: -Variant m8 (MCO
 the author's r150o placement recipe; the default) or m4 (MCOLS=4, 133.33 MHz, r4's recipe).
   .\tools\build_r5_timing.ps1 -Mode Prepare
   .\tools\build_r5_timing.ps1 -Mode Synth
-  .\tools\build_r5_timing.ps1 -Mode Build [-Variant m4]
+  .\tools\build_r5_timing.ps1 -Mode Build [-Variant m4] [-NoFence]
+-NoFence (m8): leave the MXU's DSP columns' free sites to the placer (otpu_mxu_place.tcl's fence).
 Prepare creates the project only. Synth runs IP/core synthesis and structural gates.
 Build runs synthesis, implementation and writes a bitstream only if setup/hold pass.
 No fetch, checkout, merge, programming or reuse of an older RTL checkpoint.
@@ -15,6 +16,7 @@ param(
     [int]$Jobs = 8,
     [string]$Vivado = 'C:\Xilinx\Vivado\2024.2\bin\vivado.bat',
     [string]$OutDir,
+    [switch]$NoFence,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
@@ -36,6 +38,7 @@ $buildEnv = @{
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
     OTPU_MXU_WRAM_COL = '2'; OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
     OTPU_MXU_PLACE = '1'; OTPU_DDR_PHY_PLACE = '1'
+    OTPU_MXU_FENCE = $(if ($NoFence) { '0' } else { '1' })
     OTPU_TMEM_PBLOCK = ''; OTPU_XDMA_PBLOCK = ''; OTPU_STRICT_R5 = '1'
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
@@ -49,7 +52,9 @@ $v = if ($Variant -eq 'm8') {
 if ($Variant -eq 'm4') {
     $buildEnv.TMEM_WORDS = $v.tmem
     foreach ($k in 'OTPU_SETUP_MARGIN', 'OTPU_MXU_DSP_COLS', 'OTPU_MXU_BRAM_COLS', 'OTPU_MXU_WRAM_COL',
-                   'OTPU_PLACE_DIRECTIVE', 'OTPU_MXU_PLACE', 'OTPU_DDR_PHY_PLACE') { $buildEnv[$k] = '' }
+                   'OTPU_PLACE_DIRECTIVE', 'OTPU_MXU_PLACE', 'OTPU_DDR_PHY_PLACE', 'OTPU_MXU_FENCE') {
+        $buildEnv[$k] = ''
+    }
 }
 Write-Output ("r5 timing: revision=$revision mode=$Mode variant=$Variant MCOLS=$($v.mcols) " +
               "core=$($v.mhz)MHz clk2x=$($v.clk2x)MHz hash=$($v.hash)")

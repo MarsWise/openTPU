@@ -41,6 +41,8 @@
 #   g_fd[1]'s mem_reg_5 at RAMB36_X0Y30 (level with position ~50) for skews at positions 58..62
 #   and 117..125: the weight feed's endpoints were 2-3 levels with 5.0-5.7 ns of route (163ab46d
 #   88 under +0.2 ns, worst +0.009; 4f8be3d2 455, worst -0.156, its worst endpoint).
+# - The fence (OTPU_MXU_FENCE, default 1): the array's DSP columns' sites it leaves free are
+#   prohibited (PROHIBIT), so the other units' DSPs go to the other columns.
 # It stops the run (error) when a name pattern matches no cells, when the PEs are not MCOLS x D,
 # or when a cascade chain is not in position order. The LOCs it sets are also written to
 # otpu_mxu_place.xdc in the implementation run's directory (or to OTPU_MXU_PLACE_XDC).
@@ -255,6 +257,35 @@ proc ::otpu_mxu_place::run {} {
     set k $split
     foreach c $ce($j) { loc $c DSP48_X${x}Y[expr {$base + $k}]; incr k }
   }
+  # ---- the fence: the array's DSP columns' other sites (rows below and above the array and its
+  # column ends) prohibited, so no other unit's DSP lands there. r5's m8 0f9f9b1d (no fence): the
+  # VPU stream tail's lane 7 multiplier sat at DSP48_X5Y147, in the array's column 4, and its
+  # fabric spread from slice row 39 to 370 (its worst path, m_reg -> r_reg, -2.715 ns at 150
+  # MHz, 7.4 ns of 8.6 route). OTPU_MXU_FENCE=0 leaves them to the placer. Skipped (a warning)
+  # when the other DSPs would not fit the remaining sites.
+  set fence [expr {[info exists ::env(OTPU_MXU_FENCE)] ? $::env(OTPU_MXU_FENCE) : 1}]
+  set nfence 0
+  if {$fence} {
+    set fs {}
+    foreach x $dcols {
+      foreach st [get_sites -quiet DSP48_X${x}Y*] {
+        if {[info exists used($st)] || [llength [get_cells -quiet -of_objects $st]]} { continue }
+        lappend fs $st
+      }
+    }
+    set ndsp [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ DSP48*}]]
+    set nall [llength [get_sites -quiet DSP48_X*]]
+    set nours [array size used]
+    if {$nall - [llength $fs] - $nours < $ndsp - $nours} {
+      puts "otpu_mxu_place: WARNING no fence: $ndsp DSPs, $nall sites, [llength $fs] to fence"
+    } else {
+      foreach st $fs {
+        set_property PROHIBIT true [get_sites $st]
+        lappend lines "set_property PROHIBIT true \[get_sites {$st}\]"
+        incr nfence
+      }
+    }
+  }
   # ---- the ACT RAM: column j's memory beside it, piece p (bytes p*D/NP ..) level with its PEs
   set act [file dirname $pre]/u_act
   # the block RAM sites other cells hold (not ours, should this run twice on one netlist)
@@ -359,7 +390,7 @@ proc ::otpu_mxu_place::run {} {
         DSP48_X{$dcols} rows $base..[expr {$base + $h - 1}], the column ends ($cem) from row [expr {$base + $split}];\
         $nact ACT RAMs on RAMB36_X{$bcols};\
         $n weight RAMs on RAMB36_X$wcol ($wdesc) ([llength $lines] LOCs[expr {$rec ne "" ? ", $rec" : ""}];\
-        $nheld block RAM sites other cells hold)"
+        $nheld block RAM sites other cells hold; $nfence DSP sites of the array's columns fenced)"
 }
 
 ::otpu_mxu_place::run

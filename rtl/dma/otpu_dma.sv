@@ -597,7 +597,10 @@ module otpu_dma
   // that request where adv will be up: adv_nx, adv a cycle ahead from its flip-flops' next
   // values, so no adv gate sits between the register and TMEM (the r2 slice OOC's worst clk ->
   // clk2x path: pl -> adv -> the gate -> the TMEM's ranks -> a pumped bank's address, 12 levels)
-  logic [LANES-1:0]       t_ren_c, t_rv, t_re_q;
+  // t_re_q / t_rb_q reach the pumped banks' block RAMs across TMEM (r5's m8 0f9f9b1d: t_re_q ->
+  // a bank's RAM, 5.6 ns of route, -0.58 ns at 150 MHz): max_fanout replicas, loaded alike
+  logic [LANES-1:0]       t_ren_c, t_rv;
+  (* max_fanout = 16 *) logic [LANES-1:0] t_re_q;
   logic [LANES-1:0][31:0] t_raddr_c;
   // st_pend, pl and oc_nf move in the ST branch of the process below (st_pend and pl with adv,
   // occ with the push and the issue); a start clears st_pend; elsewhere st_pend is low, so adv
@@ -616,7 +619,8 @@ module otpu_dma
   // registers, so TMEM's ranks and compares start at flip-flops (r150d, the m8 card at a real 150
   // MHz: t_re_q -> the guests' pick and the rotation -> the ranks -> a pumped bank's address, 8
   // levels, the card's worst core -> clk2x path)
-  logic [LANES-1:0]       t_rben_c, t_rbv, t_rb_q;
+  logic [LANES-1:0]       t_rben_c, t_rbv;
+  (* max_fanout = 16 *) logic [LANES-1:0] t_rb_q;
   logic [LANES-1:0][31:0] t_rbad_c;
   otpu_tmem_breq #(.LANES(LANES)) u_tbr (.en(t_ren_c), .a0(t_raddr_c[0]), .ben(t_rben_c), .bad(t_rbad_c));
   always_ff @(posedge clk)

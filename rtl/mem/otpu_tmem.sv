@@ -1118,7 +1118,9 @@ module otpu_pump_bank #(
   // aligns itself at the first fast edge, as tq does.
   (* keep *) logic tog;
   (* keep *) logic tq;
-  logic evr;
+  // evr selects the bank RAM's port A address, enable and write enable (~512 loads, r5's m8
+  // 0f9f9b1d: -0.39 ns at 300 MHz): max_fanout replicas, each loaded with tq != tog
+  (* max_fanout = 64 *) logic evr;
   always_ff @(posedge clk) tog <= !tog;
   always_ff @(posedge clk_f) begin
     tq <= tog;

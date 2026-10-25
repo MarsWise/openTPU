@@ -307,12 +307,18 @@ module otpu_quant
                                                           .ben(t_rben_c), .bad(t_rbad_c));
   otpu_tmem_breq #(.LANES(LANES), .TLANES(TLANES)) u_tb2 (.en(t_ren2_c), .a0(t_raddr2_c[0]),
                                                           .ben(t_rben2_c), .bad(t_rbad2_c));
+  // The bank enables reach the pumped banks' block RAMs across TMEM (r5's m8 0f9f9b1d: t_rben ->
+  // a bank's RAM, 0 levels and 6.2 ns of route, -0.80 ns at 150 MHz): max_fanout replicas the
+  // placer can put by the banks (each loaded as the register is)
+  (* max_fanout = 16 *) logic [TLANES-1:0] t_rben_q, t_rben2_q;
+  (* max_fanout = 16 *) logic              t_ren3_q;
+  assign t_rben = t_rben_q, t_rben2 = t_rben2_q, t_ren3 = t_ren3_q;
   always_ff @(posedge clk)
-    if (rst) begin t_ren <= '0; t_ren2 <= '0; t_ren3 <= 1'b0; t_rben <= '0; t_rben2 <= '0; end
+    if (rst) begin t_ren <= '0; t_ren2 <= '0; t_ren3_q <= 1'b0; t_rben_q <= '0; t_rben2_q <= '0; end
     else if (en) begin
-      t_ren <= t_ren_c; t_ren2 <= t_ren2_c; t_ren3 <= t_ren3_c;
+      t_ren <= t_ren_c; t_ren2 <= t_ren2_c; t_ren3_q <= t_ren3_c;
       t_raddr <= t_raddr_c; t_raddr2 <= t_raddr2_c; t_raddr3 <= t_raddr3_c;
-      t_rben <= t_rben_c; t_rben2 <= t_rben2_c; t_rbad <= t_rbad_c; t_rbad2 <= t_rbad2_c;
+      t_rben_q <= t_rben_c; t_rben2_q <= t_rben2_c; t_rbad <= t_rbad_c; t_rbad2 <= t_rbad2_c;
     end
   // (the addresses follow the position alone: a lane's counts only while its enable is up)
   always_comb begin

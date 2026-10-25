@@ -117,3 +117,30 @@ chain beside the DSP cascade, a 24-bit output mux, and a skewed ternary flag per
 TMM's weights reach the PE as 0 / +1 / -1 bytes the DSP multiplies exactly. Commit 9e36232f
 folds the ternary products into the DSP (QUAD's 2-bit code decoded in front of A); the MXU
 alone is to be synthesized out of context (`r5_synth_check.tcl mxu`) before the next full build.
+
+### MXU out of context after the PE fold (9e36232f, the user's PC, `r5_synth_check.tcl mxu`)
+
+SYNTHESIS ESTIMATED (MCOLS 8, D 128, out of context): 55,276 LUTs (42,990 logic, 12,214 SRL),
+57,391 FFs, 1,146 DSP48, 42 RAMB36 + 7 RAMB18, no latches; before the fold the MXU was 99,269 /
+114,417 in the same check. The full design has not been built on it yet.
+
+### Timing fixes for the next r5-m8 build (2026-10-25, after 9e36232f)
+
+Each answers one of 0f9f9b1d's failing groups; none changes a cycle (Verilator checks each copy
+against its original every cycle). Not yet synthesized: their effect is unmeasured.
+
+| Path (0f9f9b1d) | Change |
+|---|---|
+| VPU tail lane 7 `otpu_fmul` -2.715 ns (its DSP at DSP48_X5Y147, in the array's column) | `otpu_mxu_place.tcl` fences the array's DSP columns: their 184 free sites PROHIBIT (`OTPU_MXU_FENCE`, on by default with the placement; `build_r5_timing.ps1 -NoFence` off) |
+| `u_quant t_rben -> u_tmem` bank RAM -0.801 ns (6.2 ns route) | `t_rben`, `t_rben2`, `t_ren3` registers `max_fanout 16` |
+| `u_dma t_re_q -> u_tmem` bank RAM -0.583 ns (5.6 ns route) | `t_re_q`, `t_rb_q` `max_fanout 16` |
+| `u_mem qw_n -> sw_rdy -> grant -> u_tmem rpvb` -1.83 ns | `sw_rdy` from flip-flops (`qw_ok`, loaded with qw_n's next value's compare) |
+| TMEM pumped bank `evr` (~512 loads) -0.39 ns at 300 MHz | `max_fanout 64` |
+| `m0.qd` 2,104 loads into the weight decode | copies of the decode's controls (`wq_*`, `max_fanout 64`) |
+| 9e36232f's PE fold: `pop_q.quad` / `qs` into every PE's A decode and INMODE (~9 k loads) | a copy per array column (`pe_qs`, `pe_qd`, `max_fanout 64`) |
+
+Not addressed (they need a cycle or a floorplan): TMEM's block RAM outputs into the MXU / DMA /
+VPU / quantizer across core_clk2x -> core (-1.0 to -1.18 ns, 2.1 ns logic + 4.5-5 ns route), the
+sequencer's start into the MXU and VPU (7.2-7.4 ns route), and the quantizer's combinational TMEM
+grant as the clock enable of its ~8.5 k registers. The smaller MXU (~44 k LUTs fewer) should
+shorten all of them; the next build measures by how much.
