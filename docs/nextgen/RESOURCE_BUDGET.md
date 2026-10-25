@@ -204,3 +204,18 @@ RAM, TMEM outputs -> MXU / DMA / VPU (-0.13..-0.17), the sequencer's IR -> IMEM.
 `_claude\r5m8_loc.cmd` = Codex's Route, then `tools/finalize_r5.ps1` (new:
 `tools/vivado/r5_finalize.tcl`: the source build's margins removed, a post-route phys_opt while
 setup fails, the PCIe userclk1 ECO, build.tcl's reports and gate, otpu.bit only at WNS / WHS >= 0).
+
+### The night of 2026-10-25/26: r5m8_final and after
+
+- 150 MHz from the locality placement, routed (1.7 h, 8 threads): core -0.254 / clk2x -0.431 ns
+  with the margin, **WNS -0.281 ns without it**, WHS +0.023: no closure at 150 MHz.
+- Vivado exited without a message three more times: in the finalize's post-route phys_opt, in
+  userclk1_reroute's route_design (finalize without phys_opt), and in the 137.5 MHz build's parent
+  writing synth_checked.dcp after its synthesis had finished (R5_SYNTH_GATE PASS). Vivado's header
+  showed 68.5 GB RAM, a 4.3 GB page file and ~25 GB of virtual memory available.
+- `build_r5_timing.ps1 -Mode Impl` on db36f818 (run by mistake instead of the 137.5 one) failed in
+  link_design: "Internal Data Exception: ProcHandler::InvalidParam", before the first IP XDC; its
+  impl_1 was reset (the old stage checkpoints are in reports_prev_20261026_002337). Cause unknown;
+  -Mode Impl is not to be relied on until understood.
+- Next: a fresh full 137.5 MHz build (`-Threads 0`: Vivado's default threads, the flow db36f818
+  completed with), `_claude\r5m8_137b.cmd`.

@@ -6,6 +6,7 @@ the author's r150o placement recipe; the default) or m4 (MCOLS=4, 133.33 MHz, r4
   .\tools\build_r5_timing.ps1 -Mode Build [-Variant m4] [-NoFence]
   .\tools\build_r5_timing.ps1 -Mode Impl -OutDir build\vivado-r5-timing-<rev>
 -NoFence (m8): leave the MXU's DSP columns' free sites to the placer (otpu_mxu_place.tcl's fence).
+-Threads N: general.maxThreads in the runs (default 8; 0 leaves Vivado's default, 2 on Windows).
 -CoreMhz (m8): another core clock than 150 MHz (core_clk2x twice it; core_clock.tcl needs an even
 MMCM divider: 141.67 = 850 / 6, 137.5 = 825 / 6), e.g. 137.5; default OutDir
 build\vivado-r5-m8-<MHz>-<rev>. The CFG_HASH does not change (the clock is not in the Config).
@@ -27,6 +28,7 @@ param(
     [string]$OutDir,
     [switch]$NoFence,
     [string]$CoreMhz = '',
+    [int]$Threads = 8,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
@@ -53,7 +55,7 @@ $buildEnv = @{
     # r5-m8 db36f818 (after phys_opt -0.503 ns, TMEM's pumped RAM outputs -> the units): the
     # clk2x -> core checks at 0.45 ns of margin while placing and routing (removed for the
     # bitstream), 8 threads, the phys_opt passes at AggressiveExplore, the router at Explore
-    OTPU_X2C_MARGIN = '0.45'; OTPU_MAX_THREADS = '8'
+    OTPU_X2C_MARGIN = '0.45'; OTPU_MAX_THREADS = $(if ($Threads -gt 0) { "$Threads" } else { '' })
     OTPU_PHYSOPT_DIRECTIVE = 'AggressiveExplore'; OTPU_ROUTE_DIRECTIVE = 'Explore'
     OTPU_POSTROUTE_PHYSOPT_DIRECTIVE = 'AggressiveExplore'
     OTPU_TMEM_PBLOCK = ''; OTPU_XDMA_PBLOCK = ''; OTPU_STRICT_R5 = '1'
