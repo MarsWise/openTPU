@@ -4,14 +4,20 @@ the author's r150o placement recipe; the default) or m4 (MCOLS=4, 133.33 MHz, r4
   .\tools\build_r5_timing.ps1 -Mode Prepare
   .\tools\build_r5_timing.ps1 -Mode Synth
   .\tools\build_r5_timing.ps1 -Mode Build [-Variant m4] [-NoFence]
+  .\tools\build_r5_timing.ps1 -Mode Impl -OutDir build\vivado-r5-timing-<rev>
 -NoFence (m8): leave the MXU's DSP columns' free sites to the placer (otpu_mxu_place.tcl's fence).
 Prepare creates the project only. Synth runs IP/core synthesis and structural gates.
 Build runs synthesis, implementation and writes a bitstream only if setup/hold pass.
-No fetch, checkout, merge, programming or reuse of an older RTL checkpoint.
+Impl reruns implementation only, on an existing project's finished synthesis (OutDir required):
+for implementation changes (constraints, directives, margins) on the same RTL. It refuses when
+anything synthesized changed between the project's SOURCE_COMMIT.txt and HEAD (only docs/,
+opentpu/, tests/, tools/, sim/, boards/ypcb-00338/vivado/ and the .tcl constraints may differ),
+moves the previous reports to reports_prev_<time>, and records HEAD in IMPL_COMMIT.txt.
+No fetch, checkout, merge or programming.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Prepare', 'Synth', 'Build')][string]$Mode = 'Prepare',
+    [ValidateSet('Prepare', 'Synth', 'Build', 'Impl')][string]$Mode = 'Prepare',
     [ValidateSet('m8', 'm4')][string]$Variant = 'm8',
     [int]$Jobs = 8,
     [string]$Vivado = 'C:\Xilinx\Vivado\2024.2\bin\vivado.bat',
@@ -39,6 +45,12 @@ $buildEnv = @{
     OTPU_MXU_WRAM_COL = '2'; OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
     OTPU_MXU_PLACE = '1'; OTPU_DDR_PHY_PLACE = '1'
     OTPU_MXU_FENCE = $(if ($NoFence) { '0' } else { '1' })
+    # r5-m8 db36f818 (after phys_opt -0.503 ns, TMEM's pumped RAM outputs -> the units): the
+    # clk2x -> core checks at 0.45 ns of margin while placing and routing (removed for the
+    # bitstream), 8 threads, the phys_opt passes at AggressiveExplore, the router at Explore
+    OTPU_X2C_MARGIN = '0.45'; OTPU_MAX_THREADS = '8'
+    OTPU_PHYSOPT_DIRECTIVE = 'AggressiveExplore'; OTPU_ROUTE_DIRECTIVE = 'Explore'
+    OTPU_POSTROUTE_PHYSOPT_DIRECTIVE = 'AggressiveExplore'
     OTPU_TMEM_PBLOCK = ''; OTPU_XDMA_PBLOCK = ''; OTPU_STRICT_R5 = '1'
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
@@ -52,7 +64,9 @@ $v = if ($Variant -eq 'm8') {
 if ($Variant -eq 'm4') {
     $buildEnv.TMEM_WORDS = $v.tmem
     foreach ($k in 'OTPU_SETUP_MARGIN', 'OTPU_MXU_DSP_COLS', 'OTPU_MXU_BRAM_COLS', 'OTPU_MXU_WRAM_COL',
-                   'OTPU_PLACE_DIRECTIVE', 'OTPU_MXU_PLACE', 'OTPU_DDR_PHY_PLACE', 'OTPU_MXU_FENCE') {
+                   'OTPU_PLACE_DIRECTIVE', 'OTPU_MXU_PLACE', 'OTPU_DDR_PHY_PLACE', 'OTPU_MXU_FENCE',
+                   'OTPU_X2C_MARGIN', 'OTPU_PHYSOPT_DIRECTIVE', 'OTPU_ROUTE_DIRECTIVE',
+                   'OTPU_POSTROUTE_PHYSOPT_DIRECTIVE') {
         $buildEnv[$k] = ''
     }
 }
@@ -62,6 +76,30 @@ Write-Output "Output: $OutDir"
 if ($Plan) { $buildEnv.GetEnumerator() | Sort-Object Name | Format-Table -AutoSize; return }
 & git -C $repoRoot diff HEAD --quiet --
 if ($LASTEXITCODE -ne 0) { throw 'Commit tracked source changes before preparing a release project' }
+$synthCommit = $sourceCommit
+if ($Mode -eq 'Impl') {
+    if (-not $PSBoundParameters.ContainsKey('OutDir')) { throw 'Impl needs -OutDir (an existing project)' }
+    if (-not (Test-Path -LiteralPath (Join-Path $OutDir 'otpu.xpr'))) { throw "No project in $OutDir" }
+    $manifest0 = Join-Path $OutDir 'SOURCE_COMMIT.txt'
+    if (-not (Test-Path -LiteralPath $manifest0)) { throw "No SOURCE_COMMIT.txt in $OutDir" }
+    $synthCommit = (Get-Content -LiteralPath $manifest0 -Raw).Trim()
+    $changed = @(& git -C $repoRoot diff --name-only $synthCommit HEAD --)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot compare $synthCommit with HEAD" }
+    $synthChanged = @($changed | Where-Object {
+        $_ -notmatch '^(docs|opentpu|tests|tools|sim)/' -and
+        $_ -notmatch '^boards/ypcb-00338/vivado/(build|margins|impl_directives|create_project|userclk1_reroute)\.tcl$' -and
+        $_ -notmatch '^boards/ypcb-00338/constraints/[^/]+\.tcl$' -and
+        $_ -notmatch '^[^/]+\.md$' })
+    if ($synthChanged.Count) {
+        throw ("Synthesized sources changed since $synthCommit (run -Mode Build): " + ($synthChanged -join ', '))
+    }
+    if (Get-Process -Name vivado -ErrorAction SilentlyContinue) {
+        throw 'A Vivado process is running: let it finish (or stop it) before rerunning implementation'
+    }
+    $buildEnv.OTPU_REGEN_MARGIN = '1'
+    Write-Output ("Impl: synthesis of $synthCommit reused; implementation from HEAD $sourceCommit " +
+                  "($($changed.Count) files differ, none synthesized)")
+}
 $savedEnv = @{}
 try {
     foreach ($key in $buildEnv.Keys) {
@@ -72,9 +110,11 @@ try {
     $manifest = Join-Path $OutDir 'SOURCE_COMMIT.txt'
     if (Test-Path -LiteralPath (Join-Path $OutDir 'otpu.xpr')) {
         if (-not (Test-Path -LiteralPath $manifest) -or
-            (Get-Content -LiteralPath $manifest -Raw).Trim() -ne $sourceCommit) {
+            (Get-Content -LiteralPath $manifest -Raw).Trim() -ne $synthCommit) {
             throw 'Existing project belongs to a different or unknown source revision; choose a new OutDir'
         }
+    } elseif ($Mode -eq 'Impl') {
+        throw "No project in $OutDir"
     } else {
         & $Vivado -mode batch -nojournal -log (Join-Path $OutDir 'create_project.log') `
             -source (Join-Path $repoRoot 'boards\ypcb-00338\vivado\create_project.tcl') `
@@ -82,21 +122,31 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Vivado project creation failed' }
         Set-Content -LiteralPath $manifest -Value $sourceCommit -Encoding ascii
     }
+    if ($Mode -eq 'Impl') {
+        $rep = Join-Path $OutDir 'reports'
+        if (Test-Path -LiteralPath $rep) {
+            $prev = Join-Path $OutDir ('reports_prev_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            Move-Item -LiteralPath $rep -Destination $prev
+            Write-Output "Previous reports moved to $prev"
+        }
+        Set-Content -LiteralPath (Join-Path $OutDir 'IMPL_COMMIT.txt') -Value $sourceCommit -Encoding ascii
+    }
     if ($Mode -ne 'Prepare') {
-        $flowMode = if ($Mode -eq 'Synth') { 'synth' } else { 'full' }
+        $flowMode = if ($Mode -eq 'Synth') { 'synth' } elseif ($Mode -eq 'Impl') { 'impl' } else { 'full' }
         & $Vivado -mode batch -nojournal -log (Join-Path $OutDir "$flowMode.log") `
             -source (Join-Path $repoRoot 'boards\ypcb-00338\vivado\build.tcl') `
             -tclargs $OutDir $Jobs $flowMode
         if ($LASTEXITCODE -ne 0) { throw "Vivado $flowMode failed; see $OutDir" }
     }
     $metadata = [ordered]@{
-        source_commit = $sourceCommit; build_id = $revision; part = 'xc7k480tffg1156-2'
+        source_commit = $synthCommit; impl_commit = $sourceCommit; build_id = $revision
+        part = 'xc7k480tffg1156-2'
         cfg_hash = $v.hash; mode = $Mode; variant = $Variant; core_mhz = $v.mhz
         clk2x_mhz = $v.clk2x; mcols = $v.mcols; mxu_e = $v.mcols; lanes = 8; act_rows = 16
         tmem_words = [int]$v.tmem
         environment = $buildEnv
     }
-    if ($Mode -eq 'Build') {
+    if ($Mode -eq 'Build' -or $Mode -eq 'Impl') {
         $metadata['bitstream_sha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath `
             (Join-Path $OutDir 'otpu.bit')).Hash.ToLowerInvariant()
     }

@@ -144,3 +144,31 @@ VPU / quantizer across core_clk2x -> core (-1.0 to -1.18 ns, 2.1 ns logic + 4.5-
 sequencer's start into the MXU and VPU (7.2-7.4 ns route), and the quantizer's combinational TMEM
 grant as the clock enable of its ~8.5 k registers. The smaller MXU (~44 k LUTs fewer) should
 shorten all of them; the next build measures by how much.
+
+## r5-m8 build db36f818 (2026-10-25, the user's PC; the fixes above + the PE fold)
+
+PLACEMENT ESTIMATED (with the build's 0.15 ns setup margin on the core clocks; routing was running
+when this was written, on 2 threads):
+
+| | 0f9f9b1d | db36f818 |
+|---|---|---|
+| MXU out of context (r5m8_next) | 99,269 LUT / 114,417 FF | 49,286 / 57,713 (0 latches, 1,146 DSP) |
+| design after phys_opt | 234,749 LUT / 242,597 FF | 193,845 / 182,866 (u_mxu 46,429 LUT) |
+| placed WNS | -2.715 ns | -1.059 ns |
+| after phys_opt WNS / TNS | -1.677 ns | -0.503 ns / -367 ns (2,280 endpoints) |
+| congestion (placer) | level 5, North 100 %, South 111 % | level 5, East 110 % (u_tmem, u_mxu), South 105 % |
+| the router's first estimate | WNS -1.59 | WNS -0.459, WHS -0.695 (before the hold fix) |
+
+The VPU tail's lane 7 path (the fence) and `qw_n -> sw_rdy` are gone from the worst list; the
+TMEM request registers went from -0.80 / -0.58 to about -0.30 ns. What fails now is one kind of
+path: TMEM's pumped block RAM outputs (core_clk2x) into the units' registers (core_clk) --
+quantizer r3 / x1 / x2, DMA dsw / t_rq, MXU alpha / xo, TMEM's held -- -0.45..-0.50 ns, 2.1 ns of
+logic (the RAM's clock-to-out and a LUT) + 4.0-4.3 ns of route; and `rl_pq -> u_mxu lost_q`
+(-0.44 ns, 5.1 ns route).
+
+The next implementation (no RTL change: `build_r5_timing.ps1 -Mode Impl` on this synthesis,
+`_claude\r5m8_impl.cmd`): clk2x -> core checked at 0.45 ns of margin instead of 0.15 while
+placing and routing (OTPU_X2C_MARGIN, removed for the bitstream), phys_opt and post-route phys_opt
+at AggressiveExplore, the router at Explore, 8 threads (OTPU_MAX_THREADS). If the paths still
+fail: a read-data register at TMEM's outputs (read latency 2, each unit's read pipeline one cycle
+longer; ISA unchanged) -- an RTL change across MXU, DMA, VPU, quantizer and collective.

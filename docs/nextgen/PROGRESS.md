@@ -275,6 +275,12 @@ Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIE
   4-bit MLP 19 passed 1 skipped; test_board.py all 159 passed after two fixes (the qw_ok check
   armed before a slice's first reset, simulation only; op_checks' VOP MAC SCALAR, which the ISA
   forbids, dropped: otpu-diag would have reported it failing on an r5 card).
+- Build db36f818 (the fixes + fold): MXU out of context 49,286 LUTs; placed WNS -1.059 ns, after
+  phys_opt -0.503 ns (with the 0.15 ns margin), 193,845 LUTs / 182,866 FFs. The rest fails on TMEM's
+  pumped RAM outputs into the units (clk2x -> core). Prepared: an implementation-only rerun on the
+  same synthesis (`build_r5_timing.ps1 -Mode Impl`, `_claude\r5m8_impl.cmd`) with a 0.45 ns
+  clk2x -> core margin, AggressiveExplore phys_opt, Explore routing, 8 threads
+  (RESOURCE_BUDGET.md "r5-m8 build db36f818").
 - Host software: torchdev resident weights (addd2e7c) and the program cache (9166b633): SmolVLA
   tiny 553 calls -> 87 traced, 466 reused, 1.56 MB of weights once; actions unchanged (rel L2
   0.0205).

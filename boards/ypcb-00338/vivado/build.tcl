@@ -24,6 +24,22 @@ file mkdir $out/reports
 set fast [expr {[info exists ::env(OTPU_FAST)] && $::env(OTPU_FAST) eq "1"}]
 if {!$fast && [file exists $here/impl_directives.tcl]} { source $here/impl_directives.tcl }
 
+# OTPU_MAX_THREADS (unset: Vivado's default, 2 on Windows): general.maxThreads in the synthesis and
+# implementation runs (their processes, through a TCL.PRE hook on their first step) and here.
+# r5's m8 db36f818 routed on 2 threads. Vivado caps it (8 on Windows).
+if {[info exists ::env(OTPU_MAX_THREADS)] && [string trim $::env(OTPU_MAX_THREADS)] ne ""} {
+  set nt [string trim $::env(OTPU_MAX_THREADS)]
+  if {![string is integer -strict $nt] || $nt < 1 || $nt > 32} { error "OTPU_MAX_THREADS '$nt': 1 to 32" }
+  set th $out/otpu_threads.tcl
+  set fh [open $th w]
+  puts $fh "set_param general.maxThreads $nt"
+  puts $fh "puts \"otpu_threads: general.maxThreads \[get_param general.maxThreads\]\""
+  close $fh
+  set_param general.maxThreads $nt
+  set_property STEPS.SYNTH_DESIGN.TCL.PRE $th [get_runs synth_1]
+  set_property STEPS.OPT_DESIGN.TCL.PRE $th [get_runs impl_1]
+}
+
 # Opt-in checkpoints and reports at every physical stage (the r5 timing build). The normal
 # flow has no intermediate reports, so a stopped place/route otherwise loses its evidence.
 if {[info exists ::env(OTPU_STAGE_REPORT_DIR)] && $::env(OTPU_STAGE_REPORT_DIR) ne ""} {
@@ -90,6 +106,21 @@ if {!$impl_only} {
   if {[get_property PROGRESS [get_runs synth_1]] != "100%"} { error "impl: no finished synthesis to reuse" }
   # constraint edits mark synthesis out of date; keep its netlist anyway
   set_property NEEDS_REFRESH false [get_runs synth_1]
+  # OTPU_REGEN_MARGIN=1: the setup margins from this run's environment (margins.tcl), not the
+  # project's creation (build_r5_timing.ps1 -Mode Impl)
+  if {[info exists ::env(OTPU_REGEN_MARGIN)] && $::env(OTPU_REGEN_MARGIN) eq "1"} {
+    source $here/margins.tcl
+    set mf [otpu_write_margins $out]
+    set have [get_files -quiet -of_objects [get_filesets constrs_1] *otpu_margin.tcl]
+    if {$mf ne "" && $have eq ""} {
+      add_files -fileset constrs_1 -norecurse $mf
+      set_property PROCESSING_ORDER LATE [get_files $mf]
+      set_property USED_IN_SYNTHESIS false [get_files $mf]
+    } elseif {$mf eq "" && $have ne ""} {
+      remove_files -fileset constrs_1 $have
+    }
+    puts "impl: setup margins [expr {$mf eq "" ? "none" : "from $mf"}]"
+  }
 }
 if {$synth_only} {
   puts "SYNTH_ONLY complete: $out/reports (implementation not launched)"
@@ -108,6 +139,16 @@ if {[info exists ::env(OTPU_PLACE_DIRECTIVE)] && [string trim $::env(OTPU_PLACE_
 puts "impl_1: place_design -directive [get_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]],\
   phys_opt_design -directive [get_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]]"
 if {!$fast} { set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1] }
+# OTPU_PHYSOPT_DIRECTIVE / OTPU_ROUTE_DIRECTIVE / OTPU_POSTROUTE_PHYSOPT_DIRECTIVE (unset: the
+# strategy's): the post-placement phys_opt's, the router's and the post-route phys_opt's directives
+foreach {knob step} {OTPU_PHYSOPT_DIRECTIVE PHYS_OPT_DESIGN OTPU_ROUTE_DIRECTIVE ROUTE_DESIGN
+                     OTPU_POSTROUTE_PHYSOPT_DIRECTIVE POST_ROUTE_PHYS_OPT_DESIGN} {
+  if {[info exists ::env($knob)] && [string trim $::env($knob)] ne ""} {
+    set_property STEPS.${step}.ARGS.DIRECTIVE [string trim $::env($knob)] [get_runs impl_1]
+  }
+}
+puts "impl_1: route_design -directive [get_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]],\
+  post-route phys_opt_design -directive [get_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]]"
 reset_run impl_1
 launch_runs impl_1 -jobs $jobs
 wait_on_run impl_1
@@ -141,12 +182,16 @@ if {$mf ne ""} {
   set fh [open $mf]; set mt [read $fh]; close $fh
   set groups [regexp -all -inline -line {^# margin (\S+) \{([^\}]*)\} \{([^\}]*)\} ([0-9.]+)$} $mt]
   if {![llength $groups]} { error "otpu_margin.tcl: no margin lines in $mf" }
+  # every group measured with all margins on (a later group, x2c, replaces part of an earlier's),
+  # then all removed
   foreach {- name from to m} $groups {
     set f [get_clocks $from]; set t [get_clocks $to]
     set mp [lindex [get_timing_paths -quiet -setup -max_paths 1 -nworst 1 -from $f -to $t] 0]
     set ms [expr {$mp eq "" ? "n/a" : [get_property SLACK $mp]}]
-    foreach a $f { foreach b $t { set_clock_uncertainty -setup -from $a -to $b 0 } }
     lappend margin_lines [format "MARGIN %s %s ns (otpu_margin.tcl): the worst setup slack with it %s ns" $name $m $ms]
+  }
+  foreach {- name from to m} $groups {
+    foreach a [get_clocks $from] { foreach b [get_clocks $to] { set_clock_uncertainty -setup -from $a -to $b 0 } }
   }
   foreach l $margin_lines { puts $l }
 }

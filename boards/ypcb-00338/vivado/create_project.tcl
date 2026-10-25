@@ -147,42 +147,12 @@ add_files -fileset constrs_1 -norecurse [list $cons/otpu_top_ld.xdc \
 set late [list $cons/otpu_mem_ch.tcl $cons/otpu_top_native.tcl]
 if {$CLK2X} { lappend late $cons/otpu_clk2x.tcl }
 lappend late $cons/otpu_mxu_place.tcl $cons/otpu_ddr_phy_place.tcl
-# setup margins (ns; unset or 0: none): implementation times the checks named below with that much
-# more setup uncertainty, so a route that meets them has that much slack at the real clocks.
-# OTPU_SETUP_MARGIN: every check between the core clocks (core_clk, core_clk2x). OTPU_SYS_MARGIN:
-# LiteDRAM's sys clock to itself (the controllers, the PHY's read data into the ECC decoders),
-# which carries no uncertainty of its own (otpu_litedram.xdc's are on the ld MMCMs' clock pairs:
-# not here, as build.tcl sets these back to 0). Generated here (otpu_margin.tcl in OUT_DIR, one
-# "# margin NAME {FROM} {TO} NS" line a group); build.tcl reports each group's worst slack with
-# it, then removes it for the reports and the bitstream
-set margins {}
-foreach {knob name from to} {
-  OTPU_SETUP_MARGIN core {core_clk_otpu_bd_clk_wiz_0_0 core_clk2x_otpu_bd_clk_wiz_0_0}
-                         {core_clk_otpu_bd_clk_wiz_0_0 core_clk2x_otpu_bd_clk_wiz_0_0}
-  OTPU_SYS_MARGIN   sys  {crg_s7mmcm_clkout} {crg_s7mmcm_clkout}
-} {
-  set m [expr {[info exists ::env($knob)] && $::env($knob) ne "" ? $::env($knob) : 0}]
-  if {![string is double -strict $m] || $m < 0 || $m > 1} { error "$knob '$m': a margin in ns, 0 to 1" }
-  if {$m > 0} { lappend margins [list $name $from $to $m] }
-}
-if {[llength $margins]} {
-  set fh [open $out/otpu_margin.tcl w]
-  puts $fh "# otpu_margin.tcl (create_project.tcl, OTPU_SETUP_MARGIN / OTPU_SYS_MARGIN): more setup uncertainty"
-  puts $fh "# on the checks of each group (implementation only; build.tcl removes it)"
-  foreach g $margins { puts $fh "# margin [lindex $g 0] {[lindex $g 1]} {[lindex $g 2]} [lindex $g 3]" }
-  puts $fh "proc otpu_margin_set {name from to m} {"
-  puts $fh "  set f \[get_clocks -quiet \$from\]; set t \[get_clocks -quiet \$to\]"
-  puts $fh "  if {\[llength \$f\] != \[llength \$from\] || \[llength \$t\] != \[llength \$to\]} {"
-  puts $fh "    puts \"CRITICAL WARNING: \\\[otpu_margin.tcl\\\] \$name: clocks not found (\$from -> \$to): no setup margin\""
-  puts $fh "    return"
-  puts $fh "  }"
-  puts $fh "  foreach a \$f { foreach b \$t { set_clock_uncertainty -setup -from \$a -to \$b \$m } }"
-  puts $fh "  puts \"otpu_margin.tcl: setup margin \$m ns on \$name (\$from -> \$to)\""
-  puts $fh "}"
-  foreach g $margins { puts $fh "otpu_margin_set [lindex $g 0] {[lindex $g 1]} {[lindex $g 2]} [lindex $g 3]" }
-  close $fh
-  lappend late $out/otpu_margin.tcl
-}
+# setup margins (ns; unset or 0: none): margins.tcl (OTPU_SETUP_MARGIN, OTPU_X2C_MARGIN,
+# OTPU_SYS_MARGIN), generated as otpu_margin.tcl in OUT_DIR; build.tcl reports each group's worst
+# slack with it, then removes it for the reports and the bitstream
+source $here/margins.tcl
+set mf [otpu_write_margins $out]
+if {$mf ne ""} { lappend late $mf }
 # OTPU_TMEM_PBLOCK (pblock ranges, e.g. CLOCKREGION_X0Y3:CLOCKREGION_X1Y4; unset: none): the TMEM
 # (u_tmem: the pumped RAMs, their pumps, the arbitration) in a hard pblock there. With the core
 # clock off the memory's 133.33 MHz the channel whose PHY rows held the pumped TMEM read ECC errors
