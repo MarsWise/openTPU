@@ -1,5 +1,20 @@
 # Nextgen implementation progress
 
+## Local update (2026-10-25): isolated locality replay prepared
+
+- The `db36f818` m8 build completed routing (0 routing errors) but failed setup: core
+  -0.671 ns, clk2x -0.603 ns. The worker exited during post-route physopt; the user did not
+  stop it. Its exact failure mechanism remains unknown. Routed/earlier checkpoints survive.
+- Read the routed path analysis: 4,875 failing endpoint rows. Prepared a separate experiment
+  for four RMW FP multipliers and 25 pumped TMEM controllers (304 rows), without changing RTL.
+- `tools/replay_r5_locality.ps1` reuses the post-opt checkpoint and writes to a fresh directory;
+  it neither resets the original project nor synthesizes or writes a bitstream. Place mode
+  stops after placement/physopt; Route explicitly resumes from the new physical checkpoint.
+- Vivado Plan verifies all 29 soft pblocks / 1,963 fabric cells on the real netlist. The source
+  checkpoint hash and 105 clock/exception/delay constraint statements are unchanged. Eleven
+  offline checks pass. Physical timing of this experiment is **NOT RUN**.
+- Instructions and limitations: [R5_LOCALITY_EXPERIMENT.md](R5_LOCALITY_EXPERIMENT.md).
+
 ## Local update (2026-10-23): upstream and r5 timing recovery
 
 - Merged FeSens main `91df4109` (19 new commits after `9bd4d83c`) as `f139f524`:
