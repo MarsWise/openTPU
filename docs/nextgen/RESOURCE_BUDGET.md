@@ -186,3 +186,21 @@ message in its second phase (Physopt 32-745: "slack too large ... most effective
 -0.5 ns"); the run is marked failed, no bitstream (the r5 gate requires WNS >= 0 anyway).
 Next: `build_r5_timing.ps1 -Mode Impl` at 150 (`_claude\r5m8_impl.cmd`), or a full build at
 137.5 MHz (`-CoreMhz 137.5`, `_claude\r5m8_137.cmd`: +0.606 ns of period).
+
+### Codex's locality placement on db36f818's netlist (2026-10-25, `C:\myOpenTPU\r5-locality-place-01`)
+
+PLACEMENT ESTIMATED (the post-opt checkpoint replayed with soft pblocks around four MXU RMW fp32
+multipliers and 25 pumped TMEM controllers, their DSP / BRAM pinned where db36f818 had them;
+docs/nextgen/R5_LOCALITY_EXPERIMENT.md), with the 0.15 ns margin:
+
+| | db36f818 | locality |
+|---|---|---|
+| placed WNS / TNS | -1.059 / -725.8 ns | -0.482 / -158.6 ns |
+| after phys_opt WNS / TNS (failing) | -0.503 / -367.3 ns (2,280) | **-0.168 / -19.4 ns (329)** |
+| core / clk2x / core->clk2x / clk2x->core | -0.503 / -0.315 / -0.315 / -0.503 | -0.168 / -0.017 / -0.022 / -0.168 |
+
+Not routed yet; routing worsened db36f818 by ~0.17 ns. Remaining worst: MXU `ck` -> ACT scale
+RAM, TMEM outputs -> MXU / DMA / VPU (-0.13..-0.17), the sequencer's IR -> IMEM. Next:
+`_claude\r5m8_loc.cmd` = Codex's Route, then `tools/finalize_r5.ps1` (new:
+`tools/vivado/r5_finalize.tcl`: the source build's margins removed, a post-route phys_opt while
+setup fails, the PCIe userclk1 ECO, build.tcl's reports and gate, otpu.bit only at WNS / WHS >= 0).
