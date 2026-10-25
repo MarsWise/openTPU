@@ -152,8 +152,20 @@ puts "impl_1: route_design -directive [get_property STEPS.ROUTE_DESIGN.ARGS.DIRE
   post-route phys_opt_design -directive [get_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]]"
 reset_run impl_1
 launch_runs impl_1 -jobs $jobs
-wait_on_run impl_1
-if {[get_property PROGRESS [get_runs impl_1]] != "100%"} { error "implementation failed" }
+# A run that fails after routing (r5-m8 db36f818: its worker exited inside the post-route
+# phys_opt, no error message, the routed checkpoint complete) goes on from the routed
+# checkpoint, as if post-route phys_opt had changed nothing; any earlier failure stops.
+set routed_only 0
+if {[catch {wait_on_run impl_1} wmsg] || [get_property PROGRESS [get_runs impl_1]] != "100%"} {
+  set rdcp $out/otpu.runs/impl_1/otpu_fpga_top_ld_routed.dcp
+  if {[file exists $out/otpu.runs/impl_1/.route_design.end.rst] && [file exists $rdcp]} {
+    puts "CRITICAL WARNING: \[build.tcl\] impl_1 failed after route_design (the post-route\
+          phys_opt did not finish): going on from $rdcp"
+    set routed_only 1
+  } else {
+    error "implementation failed"
+  }
+}
 # the MXU's grid (constraints/otpu_mxu_place.tcl) ran on this netlist: an unmanaged Tcl
 # constraint's error is only a critical warning in the run, so its summary line must be there
 set fh [open $out/otpu.runs/impl_1/runme.log]; set ilog [read $fh]; close $fh
@@ -173,7 +185,7 @@ foreach name {tmem xdma} {
     error "otpu_${name}_pblock.tcl did not place its cell (no summary line in impl_1/runme.log)"
   }
 }
-open_run impl_1
+if {$routed_only} { open_checkpoint $rdcp } else { open_run impl_1 }
 
 # ---- the setup margins (create_project.tcl, OTPU_SETUP_MARGIN / OTPU_SYS_MARGIN): each group's
 # worst setup slack with its margin (the route's target), then without it for everything below
