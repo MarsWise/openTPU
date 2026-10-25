@@ -271,7 +271,10 @@ Run 4 (`claude_run.sh` = claude_run_r4.sh, tree 00be1641), PHYSICAL FPGA VERIFIE
   per column. Not yet built. RTL SIMULATED on the fixes (container, Verilator 5.046, each copy
   checked against its original every cycle): test_rtl `-k tmm` 41 passed (TMM / PAIR / QUAD, m4
   and m8), test_r5_board 1 passed, test_quant_rtl 37 passed; test_eltwise 18 passed 1 skipped
-  (GELU's erf without TFN), test_torchdev 14 passed 1 skipped (no LeRobot).
+  (GELU's erf without TFN), test_torchdev 14 passed 1 skipped (no LeRobot); test_rtl act-reads /
+  4-bit MLP 19 passed 1 skipped; test_board.py all 159 passed after two fixes (the qw_ok check
+  armed before a slice's first reset, simulation only; op_checks' VOP MAC SCALAR, which the ISA
+  forbids, dropped: otpu-diag would have reported it failing on an r5 card).
 - Host software: torchdev resident weights (addd2e7c) and the program cache (9166b633): SmolVLA
   tiny 553 calls -> 87 traced, 466 reused, 1.56 MB of weights once; actions unchanged (rel L2
   0.0205).

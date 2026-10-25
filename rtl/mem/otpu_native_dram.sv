@@ -287,6 +287,7 @@ module otpu_native_dram #(
   assign a_rdy_x = a_rdy;
   // sw_rdy from flip-flops: qw_ok[c] is qw_n[c] < WQD, loaded with qw_n's next value's compare
   // (r5's m8 0f9f9b1d: qw_n -> sw_rdy -> the slice's grant -> TMEM's replay copies, -1.83 ns)
+  // (equal to the compare from the first reset on; a slice may run cycles before it)
   (* max_fanout = 16 *) logic [1:0] qw_ok;
   assign sw_rdy = &qw_ok;
   wire sw_take = sw_req && sw_rdy;
@@ -949,9 +950,14 @@ module otpu_native_dram #(
     end
 `endif
 `ifndef SYNTHESIS
-  always @(posedge clk)
-    if (!rst && qw_ok !== {qw_n[1] < WQD, qw_n[0] < WQD})
+  // checked once a reset was seen (before it the registers hold their start values)
+  bit qw_rst;
+  initial qw_rst = 1'b0;
+  always @(posedge clk) begin
+    if (rst) qw_rst <= 1'b1;
+    if (!rst && qw_rst && qw_ok !== {qw_n[1] < WQD, qw_n[0] < WQD})
       $fatal(1, "otpu_native_dram: qw_ok %b is not qw_n %0d / %0d < %0d", qw_ok, qw_n[0], qw_n[1],
              WQD);
+  end
 `endif
 endmodule

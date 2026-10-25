@@ -167,8 +167,9 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
         if f in (I.V_OUTER, I.V_ARGMAX) or f in I.TFN_FUNCS:
             continue
         if f in I.READS_B:
-            modes = [("FULL", I.B_FULL), ("ROW", I.B_ROW), ("COL", I.B_COL),
-                     ("SCALAR", I.B_SCALAR)]
+            modes = [("FULL", I.B_FULL), ("ROW", I.B_ROW), ("COL", I.B_COL)]
+            if f != I.V_MAC:                        # VOP MAC takes no SCALAR b (the ISA)
+                modes.append(("SCALAR", I.B_SCALAR))
         else:
             modes = [("", I.B_FULL)]
         group = ("vpu-new" if f in (I.V_RDOT, I.V_LOG2) else "vpu-reduce" if f in I.REDUCE
