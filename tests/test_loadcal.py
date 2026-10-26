@@ -118,6 +118,35 @@ def test_the_load_runs_on_the_isa_simulator(tmem):
     assert np.isfinite(out).all() and (np.abs(out).sum(1) > 0).all()
 
 
+@pytest.mark.parametrize("rows,pair", [(4, True), (2, False)])
+def test_the_ternary_load_runs_tmm_on_the_isa_simulator(rows, pair):
+    """OTPU_LOAD_KIND=ternary[:rows]: each MM of the load is a TMM (PAIR on the m8 card's 8
+    columns at 4 rows) over packed ternary rows, its results x W^T * scale."""
+    from opentpu import isa as I
+    from opentpu import quant as Q
+    assert L.load_kind("") == ("fp4", L.ROWS) and L.load_kind("ternary") == ("ternary", 4)
+    assert L.load_kind("ternary:2") == ("ternary", 2)
+    with pytest.raises(ValueError):
+        L.load_kind("int8")
+    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072, MCOLS=8, PAIR=pair, TPAIR=pair)
+    img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=2, rows=rows, kind="ternary")
+    assert sum(ins.op == I.TMM for ins in prog) == 2, "the load's MMs are not TMMs"
+    dram = np.concatenate([img, np.zeros(cfg.DRAM_BYTES - len(img), np.uint8)])
+    got = np.asarray(Machine(cfg, [prog], [dram]).run().slices[0].dram)
+    x = img[a["x"]:a["x"] + 4 * rows * L.H].view(np.float32).reshape(rows, L.H)
+    rb = Q.pack_ternary_mxu(np.zeros((1, L.H), np.int8), cfg.D).shape[1]
+    rng = np.random.default_rng(0)
+    w = rng.choice(np.array([-1, 0, 1], np.int8), (L.R, L.H))
+    sc = rng.uniform(0.05, 0.2, L.R).astype(np.float32)
+    assert np.array_equal(img[a["w"]:a["w"] + L.R * rb].reshape(L.R, rb),
+                          Q.pack_ternary_mxu(w, cfg.D))
+    want = (x @ w.T.astype(np.float32)) * sc
+    out = got[a["out"]:a["out"] + 4 * 2 * rows * L.R].view(np.float32).reshape(2 * rows, L.R)
+    for i in range(2):
+        y = out[i * rows:(i + 1) * rows]
+        assert float(np.linalg.norm(y - want) / np.linalg.norm(want)) < 0.02
+
+
 def test_a_host_calibration_after_the_cpu_s_is_the_one_loadcal_starts_from(monkeypatch):
     """memcal cal --force holds the core's CPU and calibrates from the host: loadcal then starts
     from the host's taps, bitslips and bit offsets, not the CPU's stale mailbox (run 4c)."""

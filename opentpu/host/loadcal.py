@@ -50,6 +50,7 @@ from . import ddrcal
 
 ENV = "OTPU_LOAD_CENTER"
 ENV_SLIPS = "OTPU_LOAD_SLIPS"
+ENV_KIND = "OTPU_LOAD_KIND"
 MIN_WINDOW = 3              # taps under load for a lane to take its centre there
 NTAPS = 32                  # IDELAYE2 taps
 NSLIPS = 8                  # read bitslips
@@ -247,12 +248,30 @@ def _kernel():
     return load
 
 
+def load_kind(env: str | None = None) -> tuple[str, int]:
+    """The load's weights and rows (OTPU_LOAD_KIND): "fp4" (default: prefill's 16 rows against
+    fp4 weights) or "ternary[:ROWS]" (TMM over ROWS rows, default 4: batched BitNet decode's
+    steps, which on r5-m8 with PAIR fill all 8 columns and read ECC errors on channel 0 at the
+    fp4 load's taps, bitnet_vllm run 2)."""
+    v = (os.environ.get(ENV_KIND, "") if env is None else env).strip() or "fp4"
+    kind, _, n = v.partition(":")
+    if kind not in ("fp4", "ternary"):
+        raise ValueError(f"{ENV_KIND}={v!r}: fp4 or ternary[:ROWS]")
+    return kind, int(n) if n else (ROWS if kind == "fp4" else 4)
+
+
 def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: int = 0,
-          rows: int = ROWS):
-    """The load's image, layout (byte offsets) and program."""
+          rows: int = ROWS, kind: str = "fp4"):
+    """The load's image, layout (byte offsets) and program; kind "ternary": the weights are
+    TMM's packed ternary rows (one fp32 scale a row) and each MM a TMM over `rows` rows (PAIR /
+    QUAD where the configuration has them, as the engine's)."""
     from opentpu import quant as Q
     from opentpu.llm.qwen3 import _qdesc, _tdesc
-    rb, sb = Q.row_bytes(H, "fp4", 128), Q.scale_bytes(H, "fp4", 128)
+    D = cfg.D
+    if kind == "ternary":
+        rb, sb = Q.pack_ternary_mxu(np.zeros((1, H), np.int8), D).shape[1], 4
+    else:
+        rb, sb = Q.row_bytes(H, "fp4", 128), Q.scale_bytes(H, "fp4", 128)
     a = {"w": 0, "ws": n_mm * R * rb}
     a["x"] = a["ws"] + n_mm * R * sb
     a["src"] = (a["x"] + 4 * rows * H + (1 << 20) - 1) >> 20 << 20
@@ -261,7 +280,11 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
     a["prog"] = (a["out"] + 4 * n_mm * rows * R + 4095) // 4096 * 4096
     img = np.zeros(a["prog"], np.uint8)
     rng = np.random.default_rng(seed)
-    q, sc = Q.quantize_mxu(rng.standard_normal((R, H)).astype(np.float32), "fp4", 128)
+    if kind == "ternary":
+        q = Q.pack_ternary_mxu(rng.choice(np.array([-1, 0, 1], np.int8), (R, H)), D)
+        sc = rng.uniform(0.05, 0.2, R).astype(np.float32)
+    else:
+        q, sc = Q.quantize_mxu(rng.standard_normal((R, H)).astype(np.float32), "fp4", 128)
     q = np.ascontiguousarray(q).view(np.uint8).ravel()
     sc = np.ascontiguousarray(sc).view(np.uint8).ravel()
     for i in range(n_mm):
@@ -269,7 +292,9 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
         img[a["ws"] + i * sc.size:a["ws"] + (i + 1) * sc.size] = sc
     img[a["x"]:a["x"] + 4 * rows * H] = rng.standard_normal(rows * H).astype(np.float32).view(np.uint8)
     img[a["src"]:a["src"] + TILE] = rng.integers(0, 1 << 32, NS * NS, np.uint32).view(np.uint8)
-    m = SimpleNamespace(w=_qdesc(a["w"], a["ws"], n_mm * R, H, 128, "fp4"),
+    w = (_qdesc(a["w"], a["ws"], n_mm * R, H, D, Q.TERNARY) if kind == "ternary"
+         else _qdesc(a["w"], a["ws"], n_mm * R, H, 128, "fp4"))
+    m = SimpleNamespace(w=w,
                         x=_tdesc(a["x"], (rows, H)), src=_tdesc(a["src"], (NS * NS,)),
                         dma=_tdesc(a["dma"], (n_dma, NS * NS)), out=_tdesc(a["out"], (n_mm * rows, R)),
                         rows=rows, reuse=cfg.TMEM_WORDS < 131072)
@@ -351,7 +376,8 @@ def center(b, log=print, data: Path | None = None, reps: int = REPS, mib: int = 
     t0 = time.time()
     bist_write(chans, base, region, hz)
     cfg = device_config(info, DRAM_BYTES=1 << 30)
-    img, lay, prog = build(cfg)
+    kind, rows = load_kind()
+    img, lay, prog = build(cfg, rows=rows, kind=kind)
     b.write(0, img)
     b.load(lay["prog"], prog)
     b.start()
@@ -377,7 +403,7 @@ def center(b, log=print, data: Path | None = None, reps: int = REPS, mib: int = 
             set_slips(k, [s + x["slip"] for s, x in zip(cs[0][i], ls)], cs[1][i])
         set_taps(k, [x["tap"] for x in ls])
     total = reps * beats
-    out = {"time": time.time(), "seconds": round(time.time() - t0, 1),
+    out = {"time": time.time(), "seconds": round(time.time() - t0, 1), "load": [kind, rows],
            "core_khz": info.get("core_khz"), "sys_hz": hz, "reps": reps, "mib": mib,
            "slips": list(ds),
            "channels": {ch: {"lanes": lanes[ch],
@@ -396,7 +422,8 @@ def center(b, log=print, data: Path | None = None, reps: int = REPS, mib: int = 
                 was = window([row[m] for row in errs[ch][0]])[1]
                 moved += (f"; lane {m}: bitslip {cs[0][ch][m]} -> {cs[0][ch][m] + x['slip']}, "
                           f"window {was} -> {x['taps']} under load")
-        log(f"DDR3 channel {ch}: read taps under the core's load {[x['tap'] for x in ls]} "
+        log(f"DDR3 channel {ch}: read taps under the core's load ({kind}, {rows} rows) "
+            f"{[x['tap'] for x in ls]} "
             f"(calibrated {cal[ch]}; windows {[x['taps'] for x in ls]} taps)"
             + "".join(f"; lane {m}: window {x['taps']} under load, kept its calibrated tap"
                       for m, x in enumerate(ls) if x["narrow"]) + moved)

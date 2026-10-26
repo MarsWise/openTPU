@@ -307,3 +307,22 @@ attention block ends: upstream's serve path); `_bitnet_mlp` drops each [rows, F]
 `Steps` then splits the rows into groups). Tests: test_bitnet_engine 10, test_vllm_plugin 9,
 test_batch_steps 11, test_serve_batching 7 passed. The ECC event: the run 2 script scrubs and
 clears first and reads the counters after each case.
+
+### BitNet through vLLM, batched, run 2 (2026-10-26 20:19-20:24, `bitnet_vllm.sh` at 91164a59) -- PHYSICAL
+
+| slots, head | total tok/s | card per step | tokens vs engine | ECC ch0 after (corrected / uncorrectable; ch1 0 / 0) |
+|---|---|---|---|---|
+| 1, int8 | 14.16 | (prefill runs) | MATCH | 0 / 0, 56.0 C |
+| 2, int8 | -- | -- | RuntimeError ECC_DED during a run | 7 / 1 |
+| 4, int8 | **27.58** | 13.2 M cycles = 96 ms (1 program, reused 62x) | 4 MATCH | 62 / 17 |
+| 8, int8 | 28.92 | 2 runs of 4 | 7 MATCH, 1 MISMATCH (with ECC_DED set) | 154 / 48 |
+| 4, int4 | **29.41** | 12.0 M cycles = 87 ms | 4 MATCH | 209 / 61, 59.1 C |
+
+The span steps work: 4 rows a step cost 1.72x one row's 55.8 ms (the weights read once, PAIR on
+8 columns). But channel 0's DDR3 reads fail under this load: the read windows loadcal measured
+in r5a under its fp4 load were 3-5 taps on channel 0 (lanes 0-1 at taps 1, 1); the batched TMM
+load, all 8 columns busy, closes them further (docs/litedram.md 10: the core clock 137.5 MHz is
+not the controllers' 133.33). Results read while ECC_DED is set are not trustworthy (the 8-slot
+MISMATCH). Next: `ddr_tmm.sh` measures the windows under a TMM load
+(`OTPU_LOAD_KIND=ternary:4`, loadcal.build kind "ternary") and centres the taps there; the
+fallback is a core clock equal to the controllers' (133.33 MHz) in the next build.
