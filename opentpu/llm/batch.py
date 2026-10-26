@@ -452,8 +452,13 @@ class Steps:
         if sig not in self._fit:
             if len(self._ready) > 8:
                 self._ready.clear()
-            progs = self._get(key)
-            self._fit[sig] = self._size(progs) <= self.limit
+            try:
+                progs = self._get(key)
+            except CompileError as e:       # its tiles over TMEM (BitNet's [rows, F] MLP
+                if "TMEM" not in str(e) or len(rows) == 1:  # tiles at 8 rows): fewer rows
+                    raise
+                progs = None
+            self._fit[sig] = progs is not None and self._size(progs) <= self.limit
             if self._fit[sig]:
                 self._ready[key] = progs
         if self._fit[sig] or len(rows) == 1:

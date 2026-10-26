@@ -289,3 +289,21 @@ Tiny BitNet through vLLM, 2 slots, 3 requests: decode batched (`decode_rows` > `
 tokens == the engine's fed token by token. `vllm_smoke.py`: one reference engine, `reset()`
 between prompts, closed at the end; `--head-format`. Card run: `bitnet_vllm.sh` (slots 1 / 2 / 4 /
 8 int8, 4 int4).
+
+### BitNet through vLLM, batched, run 1 (2026-10-26 19:49-19:51, `bitnet_vllm.sh` at 451e4144) -- PHYSICAL
+
+| slots | result |
+|---|---|
+| 1 | 14.45 tok/s, MATCH, PASS |
+| 2 | 11.34 tok/s total, both MATCH, PASS: batched (31 runs of 2 rows) but 148 ms a step: each step's rows program compiled on the host (`run_rows`), the card idle meanwhile |
+| 4 | CompileError: TMEM exhausted (a [4, 6912] MLP tile, 76,368 of 131,072 words in use) |
+| 8 | RuntimeError: STATUS ECC_DED during a run; ECC at the end ch0 5 corrected / 1 uncorrectable, ch1 0 / 0, 55.4 C |
+| 4, int4 head | TMEM exhausted as 4 |
+
+Fixed after (ISA SIMULATED / layout): greedy rows without logprobs go through
+`opentpu/llm/batch.py`'s steps (picked on the device, a span program serving its rows until an
+attention block ends: upstream's serve path); `_bitnet_mlp` drops each [rows, F] tile when dead
+(at most three live): 2B4T's dimensions on the m8 configuration compile 1-4 rows (5+ over TMEM;
+`Steps` then splits the rows into groups). Tests: test_bitnet_engine 10, test_vllm_plugin 9,
+test_batch_steps 11, test_serve_batching 7 passed. The ECC event: the run 2 script scrubs and
+clears first and reads the counters after each case.

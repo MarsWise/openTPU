@@ -1398,13 +1398,26 @@ def _bitnet_mlp(x, lw, spec: Spec):
     W_down is one part (Image.dchunks: ternary)."""
     if ol.num_programs() != 1:
         raise ol.CompileError("BitNet's MLP (subln) runs on one slice")
+    # each [rows, F] tile is dropped (del) as soon as it is dead: the compiler frees a tile's
+    # TMEM when its last reference goes, so at most three of them are live at once (a batched
+    # step's rows: R x F words each, F = 6,912 for 2B4T)
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
-    g = ol.dot(xs, lw.wg)                       # [1, F]
+    g = ol.dot(xs, lw.wg)                       # [rows, F]
     u = ol.dot(xs, lw.wu)
-    r = ol.maximum(g, 0.0) if spec.act == "relu2" else g
-    a = (r * r) * u if spec.act == "relu2" else silu(g) * u
+    del xs
+    if spec.act == "relu2":
+        r = ol.maximum(g, 0.0)
+        del g
+        t = r * r
+        del r
+    else:
+        t = silu(g)
+        del g
+    a = t * u
+    del t, u
     a = rmsnorm(a, ol.load(lw.g_fsub), spec.eps)
     y = ol.dot(a, lw.wd[:, 0:spec.ffn])
+    del a
     return x + y
 
 

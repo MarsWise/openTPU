@@ -92,8 +92,10 @@ def build_engine(path, backend: str, cap: int, slots: int, dev: str = "/dev/xdma
         c = device_config(spec, cap, batch=B, rows=PREFILL_ROWS, lookup=True, S=1,
                           wformat=kw["wformat"], head_format=kw.get("head_format"))
         cfg = dataclasses.replace(c, DRAM_BYTES=2 * c.DRAM_BYTES)
+    # B > 1 with the resident image: the batch area of opentpu/llm/batch.py's steps (greedy
+    # decode rows picked on the device by span programs)
     eng = Engine(spec, W, cap=cap, cfg=cfg, backend=be, resident=resident,
-                 prompt_runs=prompt_runs, batch=B, **kw)
+                 prompt_runs=prompt_runs, batch=B, batch_area=B > 1 and bool(resident), **kw)
     return eng, spec
 
 
@@ -132,6 +134,11 @@ def sample(logits: np.ndarray, params, rng: np.random.Generator) -> int:
         q[keep] = p[keep]
         p = q / q.sum()
     return int(rng.choice(p.size, p=p))
+
+
+def _greedy(params) -> bool:
+    """A request the device's batched step serves: greedy, no logprobs asked."""
+    return float(params.temperature or 0.0) < 1e-5 and params.logprobs is None
 
 
 def _logprobs(ids, lps) -> LogprobsLists | None:
@@ -193,6 +200,10 @@ class OpenTPUWorker(WorkerBase):
                                            self.opts.get("cfg"))
         self.B = self.eng.batch
         self.free = list(range(self.B))[::-1]
+        self.steps = None
+        if getattr(self.eng, "bat", None) is not None:
+            from ..llm import batch as BA
+            self.steps = BA.Steps(self.eng)
         logger.info("openTPU: %s on %s, %d KV slot(s) of %d positions, image %.0f MiB, %.1f s",
                     Path(mc.model).name, self.opts["backend"], self.B, self.cap,
                     self.eng.image.nbytes / 2**20, time.perf_counter() - t0)
@@ -330,6 +341,24 @@ class OpenTPUWorker(WorkerBase):
                 self.stats["prefill_runs"] += 1
             if last:
                 logits[rid] = lg
+        # greedy rows without logprobs: one batched step on the device (llm/batch.py: every
+        # weight streamed once for all, each row's argmax picked on the card, a span program
+        # reused step after step); the others' logits come back for the host's sampler
+        dev = [r for r in decode if self.steps is not None and _greedy(r.params)]
+        decode = [r for r in decode if r not in dev]
+        if dev:
+            n0 = self.steps.runs
+            picks = self.steps.run([(r.slot, eng.poss[r.slot]) for r in dev],
+                                   [r.tokens[-1] for r in dev])
+            for r, t in zip(dev, picks):
+                logits[r.rid] = int(t)
+            self.stats["decode_runs"] += self.steps.runs - n0
+            self.stats["decode_rows"] += len(dev)
+            self.stats["device_picks"] = self.stats.get("device_picks", 0) + len(dev)
+            tm = self.steps.timing          # the card's cycles, the host's waits for programs
+            self.stats.update(step_cycles=tm["cycles"], step_programs=tm["programs"],
+                              step_reused=tm["reused"],
+                              step_compile_wait_s=round(tm["compile_wait_s"], 3))
         for i in range(0, len(decode), self.B):
             grp = decode[i:i + self.B]
             lg = eng.run_rows([(r.slot, eng.poss[r.slot]) for r in grp],
@@ -351,7 +380,11 @@ class OpenTPUWorker(WorkerBase):
         self._pending = None
         out, lps = [], {}
         for rid in ids:
-            if rid in logits:
+            if rid in logits and isinstance(logits[rid], int):     # the device's pick
+                r = self.reqs[rid]
+                r.tokens.append(logits[rid])
+                out.append([logits[rid]])
+            elif rid in logits:
                 r = self.reqs[rid]
                 row = np.asarray(logits[rid])
                 t = sample(row, r.params, r.rng)

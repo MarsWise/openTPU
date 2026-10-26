@@ -201,3 +201,61 @@ def test_tmm_quad_engine_is_bit_identical(ckpt, monkeypatch):
         out.append(np.array([eng.step(t) for t in TOKS[:4]]))
         assert modes and all(m == ("quad" if tq else "plain") for m in modes), set(modes)
     assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))
+
+
+def test_batched_steps_pick_the_engines_tokens(ckpt, monkeypatch):
+    """llm/batch.py's steps (Engine(batch=4, batch_area=True)) on BitNet: four sequences
+    decoded together, each token picked on the device, equal to each one decoded alone; with
+    the 4-row program over TMEM (raised here) the step runs as groups of fewer rows."""
+    from opentpu.compiler import CompileError
+    from opentpu.llm import batch as BA
+    spec, W = load_spec(ckpt), Weights(ckpt)
+    cfg = board_config(DRAM_BYTES=1 << 27)
+    P = [[1, 5, 9, 33], [64, 7, 200], [17, 3, 90, 12, 400], [8, 8]]
+    ref = []
+    for p in P:
+        e = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, **IMAGE)
+        out = [int(np.argmax(e.prefill(p)))]
+        for _ in range(4):
+            out.append(int(np.argmax(e.step(out[-1]))))
+        ref.append(out)
+    real = BA.compile_step
+    for tmem_rows in (None, 2):
+        if tmem_rows:
+            def small(image, area, rows, *a, **kw):
+                if len(rows) > tmem_rows:
+                    raise CompileError("TMEM exhausted: a tile of 4 rows (test)")
+                return real(image, area, rows, *a, **kw)
+            monkeypatch.setattr(BA, "compile_step", small)
+        e = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, batch=4, batch_area=True,
+                   resident=True, **IMAGE)
+        st = BA.Steps(e)
+        outs = [[int(np.argmax(e.prefill(p, seq=s)))] for s, p in enumerate(P)]
+        for _ in range(4):
+            got = st.run([(s, e.poss[s]) for s in range(4)], [o[-1] for o in outs])
+            for o, t in zip(outs, got):
+                o.append(int(t))
+        assert outs == ref
+        assert st.runs == (4 if tmem_rows is None else 8)
+
+
+def test_four_rows_of_2b4t_fit_the_m8_tmem(tmp_path):
+    """BitNet b1.58 2B4T's dimensions (layout only, no weights): a 4-row step compiles on the
+    r5-m8 card's configuration (128K-word TMEM): the MLP keeps at most three [rows, 6912]
+    tiles live."""
+    cfg_json = {"architectures": ["BitNetForCausalLM"], "model_type": "bitnet",
+                "hidden_size": 2560, "intermediate_size": 6912, "num_hidden_layers": 30,
+                "num_attention_heads": 20, "num_key_value_heads": 5, "vocab_size": 128256,
+                "head_dim": 128, "rope_theta": 500000.0, "rms_norm_eps": 1e-5,
+                "hidden_act": "relu2", "max_position_embeddings": 4096,
+                "tie_word_embeddings": True, "bos_token_id": 128000, "eos_token_id": 128001,
+                "quantization_config": {"quant_method": "bitnet", "linear_class": "autobitlinear",
+                                        "quantization_mode": "offline"}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg_json))
+    spec = load_spec(tmp_path)
+    cfg = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
+                       TFN=True, DSTEP=True, STREAM=True)
+    img = spec.image(cfg, 256, 4, 4, wformat="ternary", head_format="int8", lookup=True)
+    progs = img.compile_rows([(s, 40 + s) for s in range(4)], list(range(4)),
+                             getattr(img, "block", 256), tokens=[5] * 4)
+    assert max(map(len, progs)) * 8 <= cfg.IMEM_WORDS

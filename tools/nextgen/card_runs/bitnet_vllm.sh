@@ -1,9 +1,11 @@
 #!/bin/bash
-# Claude: BitNet b1.58 2B4T through vLLM on r5-m8 with the decode steps batched over the KV slots
-# (worker: BitNet no longer limited to one slot; each step's decode rows go through one run, every
-# TMM over all of them, M = slots). DDR3-bound: the weights are read once a step for all rows, so
-# the total tokens/s should grow with the slots. Slots 1 / 2 / 4 / 8 with the int8 LM head, 4 with
-# int4; each request's greedy tokens checked against openTPU's own engine. No load, no rescan.
+# Claude: BitNet b1.58 2B4T through vLLM on r5-m8 with the decode steps batched over the KV slots,
+# run 2: greedy rows go through llm/batch.py's steps (each row's token picked on the card, a span
+# program reused step after step instead of one compiled a step: run 1 had 2 rows at 148 ms a
+# step), the MLP's tiles freed early (4 rows fit TMEM; 8 run as 4 + 4). Slots 1 / 2 / 4 / 8
+# with the int8 LM head, 4 with int4; each request's greedy tokens checked against openTPU's own
+# engine; the DRAM's ECC counters scrubbed and cleared first, read after each case (run 1: one
+# uncorrectable event at 8 slots). No load, no rescan.
 set -u
 exec 9>/tmp/claude_run.lock
 flock -n 9 || { echo "== a claude run is in progress: not started"; exit 0; }
@@ -14,11 +16,23 @@ git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature && git mer
 echo "== $(date +%H:%M:%S) $(git log --oneline -1)"
 "$V/bin/python" -c "import vllm" 2>/dev/null || { echo "no vLLM in $V"; exit 1; }
 "$HOME/hfref/bin/uv" pip install -q --python "$V/bin/python" --no-deps -e "$R" 2>&1 | tail -1
+ecc() { "$R/.venv/bin/python" - "$@" <<'PY'
+import sys
+from opentpu.host.board import Board, XdmaTransport
+from opentpu.host import memcal
+b = Board(XdmaTransport("/dev/xdma0"), check=False)
+if sys.argv[1:] == ["clear"]:
+    b.scrub(force=True); memcal.ecc(b.t, clear=True)
+i = b.info(); print("   ECC", memcal.ecc(b.t), "ECC_DED", bool(i["status"] & (1 << 9)), "temp", i.get("temp_c"))
+PY
+}
+ecc clear
 run() {   # slots head
   echo "-- slots $1, prompts $1, head $2"
   OTPU_VLLM_BACKEND=board PYTHONPATH="$R" timeout 3600 "$V/bin/python" tools/vllm_smoke.py "$MD" --slots $1 \
-    --tokens 32 --max-model-len 256 --prompts $1 --head-format $2 2>&1 \
+    --tokens 64 --max-model-len 256 --prompts $1 --head-format $2 2>&1 \
     | grep -E "^vLLM|MATCH|RESULT|Error|Traceback|DeviceBusy|KV slot" | tee -a "$OUT/vllm.txt"
+  ecc | tee -a "$OUT/vllm.txt"
 }
 for s in 1 2 4 8; do run $s int8; done
 run 4 int4
