@@ -44,11 +44,15 @@ def test_bitstream_report_requires_manifest_hash(tmp_path):
 
 
 def test_known_bitstreams_match_on_build_hash_and_version():
-    """r4 and the pending r5 builds are known: the card's build, CFG_HASH and VERSION pick one."""
+    """r4, r5-m8 (2f2320e2) and the pending r5-m4 are known: the card's build, CFG_HASH and VERSION pick one."""
     contract = firmware_contract.load_contract(ROOT / "firmware_contract.json")
     r4 = {"build_id": 0xbb27096f, "cfg": {"hash": 0x3fb1359e}, "D": 128, "MCOLS": 4, "LANES": 8}
     assert firmware_contract._match_known(contract, r4)["name"].startswith("r4")
-    m8 = {"build_id": 0x12345678, "cfg": {"hash": 0x3b7f244e}, "D": 128, "MCOLS": 8, "LANES": 8}
+    m8 = {"build_id": 0x2f2320e2, "cfg": {"hash": 0x3b7f244e}, "D": 128, "MCOLS": 8, "LANES": 8}
     assert firmware_contract._match_known(contract, m8)["name"].startswith("r5-m8")
+    # the built r5-m8 is pinned: another m8 build with its hash is not it
+    assert firmware_contract._match_known(contract, dict(m8, build_id=0x12345678)) is None
+    m4 = {"build_id": 0x12345678, "cfg": {"hash": 0x603d5a6f}, "D": 128, "MCOLS": 4, "LANES": 8}
+    assert firmware_contract._match_known(contract, m4)["name"].startswith("r5-m4")   # pending
     bad = dict(r4, cfg={"hash": 0x4ffd1e17})
     assert firmware_contract._match_known(contract, bad) is None

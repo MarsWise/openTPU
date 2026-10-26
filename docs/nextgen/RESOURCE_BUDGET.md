@@ -219,3 +219,16 @@ setup fails, the PCIe userclk1 ECO, build.tcl's reports and gate, otpu.bit only 
   -Mode Impl is not to be relied on until understood.
 - Next: a fresh full 137.5 MHz build (`-Threads 0`: Vivado's default threads, the flow db36f818
   completed with), `_claude\r5m8_137b.cmd`.
+
+## r5-m8 bitstream: 2f2320e2 at 137.5 MHz (2026-10-26, the user's PC) -- TIMING MET
+
+`build_r5_timing.ps1 -Mode Build -CoreMhz 137.5 -Threads 0` (`_claude\r5m8_137b.cmd`), 02:03-05:52.
+SYNTHESIS / IMPLEMENTATION (routed, sign-off at the real clocks, margins removed): **WNS +0.021 ns,
+WHS +0.016 ns**, every clock positive (core_clk 7.273 ns +0.021, fmax 137.9; core_clk2x 3.636 ns
++0.022; crg +0.033; userclk1 +0.025 after the ECO; userclk2 +0.023). Before the ECO / margin
+removal: after phys_opt WNS -0.188 / TNS -0.706 ns with core 0.15 + x2c 0.45 ns (17 endpoints);
+the router closed at +0.019 with them. Utilization: 194,890 LUTs (65.3 %), 182,737 FFs, 62,647
+slices (83.9 %), 560.5 BRAM tiles (58.7 %), 1,299 DSP48 (74.8 %). Methodology: TIMING-54 x12
+(critical warning class, scoped exceptions between clocks, as before), no DRC errors (the bitstream
+was written). `otpu.bit` sha256 `270afa7afde39927909609b60711e276705ce0a32a780f41fddb52216068c23b`,
+CFG_HASH 3b7f244e, build id 0x2f2320e2. Not loaded on the card yet (PHYSICAL: NOT RUN).

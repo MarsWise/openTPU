@@ -1,5 +1,18 @@
 # Nextgen implementation progress
 
+## Local update (2026-10-26): r5-m8 bitstream built, timing met at 137.5 MHz
+
+- `2f2320e2`, m8 (MCOLS 8, MXU_E 8, TMEM 128K, TFN / MAC / T4 / TMM PAIR + QUAD), core 137.5 MHz,
+  core_clk2x 275: routed WNS +0.021 / WHS +0.016 ns, every clock positive; otpu.bit sha256
+  270afa7a...; firmware_contract.json records it (RESOURCE_BUDGET.md "r5-m8 bitstream").
+- 150 MHz did not close: db36f818 -0.52 ns, Codex's locality placement -0.281 ns (routed). The
+  remaining paths (TMEM's pumped outputs into the units, the MXU epilogue's fp32 normalisation) need
+  RTL (a TMEM read register; fp_mul_s2 split) for 150.
+- Card validation prepared, not run (needs the user's yes for the JTAG load): `_claude5_1_jtag.cmd`
+  (sha256-checked volatile load), `r5_2_pcie.cmd` (rescan + `r5_check.sh`), then `claude_run.cmd`
+  with `tools/nextgen/card_runs/claude_run_r5a.sh` (memcal + loadcal, selftest, r5_card_check, TMM,
+  YOLOX, SmolVLA, BitNet, vLLM, qual, the full pytest).
+
 ## Local update (2026-10-25): isolated locality replay prepared
 
 - The `db36f818` m8 build completed routing (0 routing errors) but failed setup: core

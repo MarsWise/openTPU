@@ -51,10 +51,10 @@
       }
     },
     {
-      "name": "r5-m8: m8 150 MHz (r150o recipe) + TMM PAIR / QUAD + TFN / MAC / QST T4",
-      "build_id": "pending",
+      "name": "r5-m8: m8 137.5 MHz (core_clk2x 275) + TMM PAIR / QUAD + TFN / MAC / QST T4 (2f2320e2: WNS +0.021, WHS +0.016)",
+      "build_id": "0x2f2320e2",
       "cfg_hash": "0x3b7f244e",
-      "bitstream_sha256": "pending",
+      "bitstream_sha256": "270AFA7AFDE39927909609B60711E276705CE0A32A780F41FDDB52216068C23B",
       "version": {
         "D": 128,
         "MCOLS": 8,
