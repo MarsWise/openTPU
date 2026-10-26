@@ -74,7 +74,10 @@ def build_engine(path, backend: str, cap: int, slots: int, dev: str = "/dev/xdma
     if bitnet:
         from ..llm.bitnet import IMAGE, Weights
         W, kw = Weights(path), dict(IMAGE)
-        slots = 1                           # (its MLP runs on one slice, one sequence)
+        if head_format:                     # (the LM head; the projections stay ternary)
+            kw["head_format"] = head_format
+        # slots: one slice (its MLP's sub-norm spans the whole row), any number of sequences:
+        # their decode rows go through one run (run_rows), each TMM over all of them (M > 1)
         if backend == "isa" and cfg is None:
             from ..isasim import board_config
             cfg = board_config(DRAM_BYTES=1 << 28)

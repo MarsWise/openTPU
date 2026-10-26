@@ -3,7 +3,7 @@ simulator or the card, its greedy tokens checked against openTPU's own Engine on
 backend (run after vLLM's engine is shut down: one user of the card at a time).
 
 Usage: OTPU_VLLM_BACKEND=board python tools/vllm_smoke.py MODEL_DIR [--slots 4] [--tokens 16]
-           [--max-model-len 512] [--prompts 3]
+           [--max-model-len 512] [--prompts 3] [--head-format int4]
 Needs vLLM 0.32.0 in the environment (docs/nextgen/VLLM_INTEGRATION.md). Prints per-request
 tokens, vLLM's wall time and tokens/s, and MATCH / MISMATCH per prompt.
 """
@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--tokens", type=int, default=16)
     ap.add_argument("--max-model-len", type=int, default=512)
     ap.add_argument("--prompts", type=int, default=3)
+    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4"],
+                    help="the LM head's format (default: the model's)")
     a = ap.parse_args()
     os.environ.setdefault("OTPU_VLLM_BACKEND", "isa")
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -35,7 +37,8 @@ def main():
           ([7, 23, 12, 40, 5, 17, 9, 31][:a.prompts])]
     t0 = time.time()
     llm = LLM(model=a.model, skip_tokenizer_init=True, max_model_len=a.max_model_len,
-              max_num_seqs=a.slots, additional_config={"opentpu": {"slots": a.slots}})
+              max_num_seqs=a.slots, additional_config={"opentpu": {"slots": a.slots,
+                                                "head_format": a.head_format}})
     print(f"vLLM engine up in {time.time() - t0:.1f}s on {os.environ['OTPU_VLLM_BACKEND']}")
     sp = SamplingParams(temperature=0.0, max_tokens=a.tokens, ignore_eos=True, detokenize=False)
     t0 = time.time()
@@ -50,18 +53,25 @@ def main():
     gc.collect()
     from opentpu.vllm.worker import build_engine
     ok = True
-    for p, g in zip(ps, got):
-        e, _ = build_engine(a.model, os.environ["OTPU_VLLM_BACKEND"], a.max_model_len, 1)
-        lg, ref = e.prefill(p), []
-        for _ in range(a.tokens):
-            ref.append(int(np.argmax(lg)))
-            if len(ref) < a.tokens:
-                lg = e.step(ref[-1])
-        del e
-        gc.collect()
-        m = g == ref
-        ok &= m
-        print(f"{'MATCH' if m else 'MISMATCH'} prompt[{len(p)}]: vllm {g} engine {ref}")
+    # one reference engine (one KV slot), reset between the prompts and closed at the end: a
+    # second Engine on the card would find the first still holding /dev/xdma0 (DeviceBusy)
+    e, _ = build_engine(a.model, os.environ["OTPU_VLLM_BACKEND"], a.max_model_len, 1,
+                        head_format=a.head_format)
+    try:
+        for p, g in zip(ps, got):
+            e.reset()
+            lg, ref = e.prefill(p), []
+            for _ in range(a.tokens):
+                ref.append(int(np.argmax(lg)))
+                if len(ref) < a.tokens:
+                    lg = e.step(ref[-1])
+            m = g == ref
+            ok &= m
+            print(f"{'MATCH' if m else 'MISMATCH'} prompt[{len(p)}]: vllm {g} engine {ref}")
+    finally:
+        close = getattr(e.backend, "close", None)
+        if close is not None:
+            close()
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

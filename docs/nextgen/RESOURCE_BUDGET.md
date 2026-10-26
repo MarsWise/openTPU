@@ -260,3 +260,32 @@ PAIR 246.0, QUAD 507.2 MAC/cycle (139.5 GOPS at 137.5 MHz; M = 1 uses one column
 | qual.sh | not run (no qual models on the host) |
 | selftest | every stage PASS but ecc: loadcal's tap sweep left ~9e8 counts a channel and ECC_DED (the run did not clear them; r5_2_pcie's selftest without loadcal: 0 / 0) |
 | host pytest | 41 failed, 1,162 passed, 471 skipped: 36 RTL tests without Verilator on the host (FileNotFoundError: now skipped), 2 source-pattern tests after the r5-m8 fixes (fixed), 3 host-environment ones (pass in the container) |
+
+### BitNet at full speed on r5-m8 (2026-10-26 19:23-19:27, `bitnet_max.sh` at 433abb1c) -- PHYSICAL
+
+BitNet b1.58 2B4T, prompt "Explain in a few sentences why the sky is blue.", 128 greedy tokens,
+`tools/bitnet_engine.py --backend board --mode generate --head-format <f>`:
+
+| LM head | decode wall | device ms/token | first tokens == int8's |
+|---|---|---|---|
+| int8 | **17.52 tok/s** | 55.8 | (reference) |
+| fp4 | 20.90 tok/s | 46.5 | 6 of 128 |
+| int4 | **20.91 tok/s** | ~46.5 | 8 of 128 (text closest to int8's) |
+| nvfp4 | 20.59 tok/s | ~47 | 6 of 128 |
+
+The head is 330 of ~850 MB read a token; a 4-bit head takes ~165 MB off: +19 %. Decode stays
+DDR3-bound (~15 of 17 GB/s).
+
+| Item | Result |
+|---|---|
+| TMM QUAD (bench_tmm K 2560, N 1024) | M = 1: 505.0 MAC/cycle; **M = 2: 1010.8 MAC/cycle, 278 GOPS** (all 8 m8 columns) |
+| vLLM slots 1 | 14.43 tok/s, MATCH, RESULT PASS |
+| vLLM slots 2 / 4 | 14.19 / 13.94 tok/s total: no gain. The worker built BitNet with one KV slot (`slots = 1`), vLLM's max_num_seqs was cut to 1, the requests ran one after another (`decode_runs` 0). The smoke's second reference Engine then found the first still holding xdma0 (DeviceBusy) |
+| ECC at the end | 0 / 0 per channel, no DED; 56.2 C |
+
+Fixed after (SOFTWARE VERIFIED, ISA): the worker gives BitNet `slots` KV slots and the
+`head_format` option; a step's decode rows of all slots are one `run_rows` (each TMM over M rows).
+Tiny BitNet through vLLM, 2 slots, 3 requests: decode batched (`decode_rows` > `decode_runs`),
+tokens == the engine's fed token by token. `vllm_smoke.py`: one reference engine, `reset()`
+between prompts, closed at the end; `--head-format`. Card run: `bitnet_vllm.sh` (slots 1 / 2 / 4 /
+8 int8, 4 int4).

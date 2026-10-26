@@ -210,8 +210,9 @@ def test_preempted_requests_are_recomputed(ckpt, env, llm):
 
 def test_bitnet_through_vllm(env, tmp_path_factory):
     """BitNet b1.58 (packed ternary checkpoint, quantization_config "bitnet"): vLLM accepts it
-    through the platform's registered stand-ins and the worker runs it as TMM's ternary image;
-    greedy tokens == the engine's."""
+    through the platform's registered stand-ins and the worker runs it as TMM's ternary image,
+    with two KV slots: three requests, their decode steps batched over the slots (each TMM over
+    both rows); greedy tokens == the engine's fed token by token, one sequence at a time."""
     import sys
     from pathlib import Path
     from vllm import LLM
@@ -220,26 +221,30 @@ def test_bitnet_through_vllm(env, tmp_path_factory):
 
     from opentpu.vllm.worker import build_engine
     d = make_ckpt(tmp_path_factory.mktemp("bitnet_vllm"))
-    llm = LLM(model=str(d), skip_tokenizer_init=True, max_model_len=128, max_num_seqs=1)
-    p = [1, 5, 9, 33, 64]
-    got, _ = _gen(llm, [p], max_tokens=6)
-    e, spec = build_engine(d, "isa", 128, 1)
-    assert spec.subln and e.image.wformat == "ternary" and e.resident
+    llm = LLM(model=str(d), skip_tokenizer_init=True, max_model_len=128, max_num_seqs=2,
+              additional_config={"opentpu": {"slots": 2}})
+    ps = [[1, 5, 9, 33, 64], [7, 200, 311], [17, 3, 90, 12, 400, 2, 8]]
+    got, _ = _gen(llm, ps, max_tokens=6)
+    st = _stats(llm)
+    assert st["decode_runs"] > 0 and st["decode_rows"] > st["decode_runs"], st
+    e, spec = build_engine(d, "isa", 128, 2)
+    assert spec.subln and e.image.wformat == "ternary" and e.resident and e.batch == 2
     from opentpu.isasim import board_config
     from opentpu.llm.bitnet import IMAGE, Weights
     from opentpu.llm.qwen3 import Engine
     # the reference feeds the prompt token by token (the decode program): the worker's prompt
     # runs of several rows must give the same tokens (before attn_sub_norm was in qwen3_rows
     # both sides ran the same wrong rows program and agreed)
-    e = Engine(spec, Weights(d), cap=128, cfg=board_config(DRAM_BYTES=1 << 27), pipeline=False,
-               **IMAGE)
-    for t in p:
-        lg = e.step(t)
-    ref = []
-    for _ in range(6):
-        ref.append(int(np.argmax(lg)))
-        lg = e.step(ref[-1])
-    assert got[0] == ref
+    for p, g in zip(ps, got):
+        e = Engine(spec, Weights(d), cap=128, cfg=board_config(DRAM_BYTES=1 << 27),
+                   pipeline=False, **IMAGE)
+        for t in p:
+            lg = e.step(t)
+        ref = []
+        for _ in range(6):
+            ref.append(int(np.argmax(lg)))
+            lg = e.step(ref[-1])
+        assert g == ref
     del llm
 
 

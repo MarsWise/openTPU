@@ -11,7 +11,7 @@ card. This is separate from `otpu-serve` (openTPU's own OpenAI-compatible server
 |---|---|---|
 | entry point | `pyproject.toml` `vllm.platform_plugins: opentpu = opentpu.vllm:platform_plugin` | active only with `OTPU_VLLM_BACKEND=isa|board|board-sim`; never beside a GPU by accident |
 | platform | `opentpu/vllm/platform.py` `OpenTPUPlatform` | `PlatformEnum.OOT`, `device_name="opentpu"`, host tensors on CPU (no CUDA identity); sets `worker_cls`, TP=PP=DP=1, eager, no async scheduling, block size 16, prefix caching off; refuses spec decode / LoRA / vLLM quantization; `validate_request` refuses whole-vocabulary logprobs (-1), prompt logprobs, penalties, logit bias, allowed/bad words, min_tokens, structured outputs (HTTP 400) |
-| worker | `opentpu/vllm/worker.py` `OpenTPUWorker(WorkerBase)` | `load_model` builds the Engine with `slots` KV slots (Qwen3, Llama-likes; BitNet with one slot); a request owns a slot while scheduled; prompt chunks run as prefill runs of its slot, all one-token requests as one batched `run_rows` over the slots; host sampling (greedy / temperature / top-k / top-p / min-p, seeded per request) and vLLM's sample logprobs (raw log-softmax of the device's logits, top-k + the sampled token's rank); recompute on preemption; abort frees the slot |
+| worker | `opentpu/vllm/worker.py` `OpenTPUWorker(WorkerBase)` | `load_model` builds the Engine with `slots` KV slots (Qwen3, Llama-likes, BitNet; option `head_format` for the LM head); a request owns a slot while scheduled; prompt chunks run as prefill runs of its slot, all one-token requests as one batched `run_rows` over the slots; host sampling (greedy / temperature / top-k / top-p / min-p, seeded per request) and vLLM's sample logprobs (raw log-softmax of the device's logits, top-k + the sampled token's rank); recompute on preemption; abort frees the slot |
 | KV accounting | `get_kv_cache_spec` / `determine_available_memory` | one `FullAttentionSpec` (int8, the model's KV heads and head dim) per attention layer; vLLM's block pool = slots × ⌈max_model_len/16⌉ + 1 null block, so vLLM never admits more than the slots hold. vLLM's block ids are accounting only: the device cache of a request is its slot's contiguous positions |
 | BitNet | `opentpu/vllm/__init__.py` `register_models` (entry point `vllm.general_plugins`), `opentpu/vllm/models.py` | vLLM 0.32.0 has no BitNet: `BitNetForCausalLM` is registered as a stand-in class vLLM only inspects (instantiating it raises) and the checkpoint's `quantization_config` `bitnet` as a stand-in QuantizationConfig (offline autobitlinear only); the worker loads the packed ternary checkpoint into the TMM image |
 | smoke tool | `tools/vllm_smoke.py` | a checkpoint through `vllm.LLM` on a backend, tokens vs the Engine on the same backend |
@@ -30,8 +30,9 @@ Evidence (`tests/test_vllm_plugin.py`, vLLM 0.32.0, torch 2.14.1 CPU in the cont
   logits at each step (1e-5), rank 1 for the greedy token;
 - `vllm serve` (engine core in its own process): a streamed `/v1/completions` gives the Engine's
   greedy tokens; `presence_penalty` → HTTP 400 and the server goes on;
-- a tiny BitNet b1.58 checkpoint (real layout: packed U8 ternary) through `vllm.LLM`: greedy
-  tokens == the Engine's TMM image.
+- a tiny BitNet b1.58 checkpoint (real layout: packed U8 ternary) through `vllm.LLM` with two
+  KV slots and three requests: decode steps batched over the slots, greedy tokens == the Engine's
+  TMM image fed token by token.
 
 Not yet: prompt logprobs, penalties, structured outputs, prefix
 caching (the device has slot-to-slot page copies, `serve/kvio.py`: not wired to vLLM's block
