@@ -338,3 +338,26 @@ taps' centre under load does not explain channel 0's errors (the BIST scan, last
 channel, reads clean at these taps). Open: channel 0's write side (its common write window
 653 ps against channel 1's 1,105 ps, r5a's calibration) under the batched steps' writes,
 or noise the BIST load does not make. Single-sequence decode stays clean (bitnet_max: 0 / 0).
+
+### DDR3 diagnosis part A (2026-10-26 21:18, `ddr_diag_a.sh` at 9aff02ad) -- PHYSICAL, and the cause
+
+- Calibration (the core's CPU): channel 0 CK step 54, common write window 653 ps, read taps
+  [13, 14, 13, 14, 5, 5, 5, 7, 7]; channel 1 CK step -44, 1,105 ps.
+- Host pattern tests (512 MiB a channel, 2 passes, random data written and read back over PCIe):
+  idle, under loadcal's fp4 load and under its TMM load: **0 words wrong, ECC 0 / 0 on both
+  channels**.
+- Decode modes with the ECC counters after every run (BitNet 2B4T, 4 KV slots): one sequence's
+  step 0 of 32 runs with errors; run_rows 4 rows 2 of 16 (3 corrected); batch.py steps 4 rows 5
+  of 32 (6 corrected); steps 2 rows **17 of 32 (28 corrected, 6 uncorrectable)**; all channel 0.
+- Cause (ISA simulator's store trace, `opentpu/llm/batch.py` `_sinks`): each row's pick was a
+  4-byte store to tout + 4 r, so rows 0 and 1 (2 and 3) wrote the halves of one 64-bit ECC
+  word back to back; tout's first beat is on channel 0. A partial store is a read-modify-write
+  in the ECC path; two to the same word in a row read back as ECC errors. One sequence's decode
+  has single partial stores only (the KV row scales: one 4-byte QST a position). Fix: tout one
+  64-byte beat a row (`TOUT_STRIDE`). RTL follow-up (r6): order two partial writes to the same
+  ECC word in the memory path (or merge them), as the host's sub-beat writes are merged already.
+- Diffusion Policy pusht on the card failed at its widest U-Net convs: the linear kernel sized its
+  x tile for 128K TMEM words, which the stream engine's descriptors split at 64K, and a
+  4,096-channel kernel-5 conv has K 20,480 over ACT RAM's 16,384. Fixed: `ol.tmem_contiguous()`,
+  K in ranges into accumulators of all N. ISA SIMULATED: a random policy of pusht's shapes, one
+  DDPM step on the r5-m8 configuration: 100.00% of the MACs on the device, actions rel L2 0.0004.

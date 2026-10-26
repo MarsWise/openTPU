@@ -24,6 +24,25 @@ import time
 import numpy as np
 
 
+def pusht_shaped(seed: int = 0):
+    """A random policy of lerobot/diffusion_pusht's shapes (offline: 96x96 image cropped to 84,
+    2-D state and actions, horizon 16, U-Net 512 / 1,024 / 2,048, ResNet-18 with GroupNorm)."""
+    import torch
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
+    from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    cfg = DiffusionConfig(n_obs_steps=2, horizon=16, n_action_steps=8, crop_shape=(84, 84),
+                          crop_is_random=False, pretrained_backbone_weights=None,
+                          use_group_norm=True, spatial_softmax_num_keypoints=32,
+                          num_inference_steps=100)
+    cfg.input_features = {
+        "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 96, 96)),
+        "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(2,))}
+    cfg.output_features = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(2,))}
+    torch.manual_seed(seed)
+    return DiffusionPolicy(cfg).float().eval(), cfg
+
+
 def tiny_policy(seed: int = 0):
     """A random Diffusion Policy built offline: pusht's layout at small sizes (a 32x32 image,
     2-D state and actions, horizon 16, U-Net dims 32 / 64 / 128, ResNet-18 with GroupNorm)."""
@@ -65,6 +84,11 @@ def inputs(cfg, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tiny", action="store_true")
+    ap.add_argument("--pusht-shaped", action="store_true",
+                    help="a random policy of diffusion_pusht's shapes (offline)")
+    ap.add_argument("--card-config", action="store_true",
+                    help="--backend isa with the r5-m8 card's configuration (MCOLS 8, 128K TMEM, "
+                         "PAIR / TPAIR / TQUAD / TFN / DSTEP / STREAM)")
     ap.add_argument("--policy", default=None)
     ap.add_argument("--backend", default="isa", choices=["isa", "board"])
     ap.add_argument("--check-isa", action="store_true")
@@ -74,16 +98,19 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
     a = ap.parse_args()
-    if not (a.tiny or a.policy):
-        ap.error("--tiny or --policy")
+    if not (a.tiny or a.policy or a.pusht_shaped):
+        ap.error("--tiny, --pusht-shaped or --policy")
     import torch
     from opentpu import torchdev as TD
-    pol, cfg = tiny_policy(a.seed) if a.tiny else real_policy(a.policy)
+    pol, cfg = (tiny_policy(a.seed) if a.tiny else pusht_shaped(a.seed) if a.pusht_shaped
+                else real_policy(a.policy))
     dm = pol.diffusion
     if a.steps:
         dm.num_inference_steps = a.steps
     nparam = sum(p.numel() for p in pol.parameters())
-    print(f"Diffusion Policy {'tiny (random, offline)' if a.tiny else a.policy}: "
+    what = ("tiny (random, offline)" if a.tiny else "pusht-shaped (random, offline)"
+            if a.pusht_shaped else a.policy)
+    print(f"Diffusion Policy {what}: "
           f"{nparam / 1e6:.1f} M params, horizon {cfg.horizon}, {dm.num_inference_steps} "
           f"{cfg.noise_scheduler_type} steps, U-Net {tuple(cfg.down_dims)}, "
           f"{cfg.vision_backbone}")
@@ -94,7 +121,12 @@ def main():
         ref = dm.generate_actions(b, noise=noise.clone())
         t_ref = time.time() - t0
     dev = copy.deepcopy(pol)
-    runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa)
+    rcfg = None
+    if a.card_config and a.backend == "isa":
+        from opentpu.isasim import board_config
+        rcfg = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
+                            TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    runner = TD.Runner(a.backend, cfg=rcfg, dev=a.dev, check_isa=a.check_isa)
     cov = TD.Coverage()
     n = TD.to_device(dev, runner, cov, wsplit=a.wsplit)
     print(f"{n} modules (nn.Linear / nn.Conv2d / nn.Conv1d / nn.ConvTranspose1d) on the device "

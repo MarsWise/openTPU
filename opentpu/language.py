@@ -55,6 +55,18 @@ def tmem_words() -> int:
     return current().cfg.TMEM_WORDS
 
 
+def tmem_contiguous() -> int:
+    """The largest tile TMEM can hold in one piece: with the stream engine on a TMEM over 64K
+    words its descriptors sit at the top of the first 64K (the Builder's desc_area), which
+    splits TMEM in two."""
+    b = current()
+    W = b.cfg.TMEM_WORDS
+    if b.desc_area and W > 1 << 16:
+        a, c = (1 << 16) - b.desc_area, W - (1 << 16)    # (max is ol.max here)
+        return a if a >= c else c
+    return W - (b.desc_area if W <= 1 << 16 else 0)
+
+
 def act_blocks() -> int:
     """ACT RAM depth in D-blocks: the most K-blocks a stationary operand can have."""
     return current().cfg.ACT_BLOCKS

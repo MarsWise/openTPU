@@ -41,11 +41,23 @@ def linear(x, w, b, y, M: int, K: int, N: int, act: str = "none", wlo=None):
     Kp = kp(K, D)
     f = ACTS[act]
     nc = min(NC, N)
+    # K in ranges of at most KC columns when Kp is over what one quantized operand takes (ACT
+    # RAM's blocks, QACT's field): each range quantized and multiplied into accumulators of
+    # all N columns (a U-Net's 4,096-channel kernel-5 conv: K 20,480)
+    from ..compiler import QACT_KB_MAX
+    KC = min(ol.act_blocks(), QACT_KB_MAX) * D
+    split = Kp > KC
+    if split:
+        nc = N
     # rows a tile: ACT_ROWS, fewer when [R, Kp] + [R, nc] with the bias does not fit TMEM (a
-    # wide K: SmolVLA's 12,288-wide connector, R 16 would need 196 K words of 64 K)
+    # wide K: SmolVLA's 12,288-wide connector, R 16 would need 196 K words of 64 K), and each
+    # tile in one piece: the x tile within TMEM's largest contiguous part (64K words on the m8
+    # card's 128K with the stream engine's descriptors at 64K)
     room = ol.tmem_words() - N - 2048
-    R = max(1, min(ol.current().cfg.act_rows, room // (Kp + nc)))
-    if Kp + nc > room:
+    one = ol.tmem_contiguous() - 1024
+    R = max(1, min(ol.current().cfg.act_rows, room // (Kp + nc), one // (Kp + 1),
+                   one // (nc + 1)))
+    if Kp + nc > room or Kp + 1 > one or nc + 1 > one:
         raise ol.CompileError(f"linear: K = {K} ({Kp} words a row) does not fit TMEM "
                               f"({ol.tmem_words()} words) with {N} outputs")
     bias = ol.load(b)
@@ -54,6 +66,22 @@ def linear(x, w, b, y, M: int, K: int, N: int, act: str = "none", wlo=None):
     for m0 in range(0, M, R):
         n = min(R, M - m0)
         ol.load(x[m0:m0 + n, :], out=xt[0:n, :])
+        if split:
+            yt = out[0:n, 0:N]
+            yt.set(bias[None, :])
+            for k0 in range(0, Kp, KC):
+                k1 = min(Kp, k0 + KC)
+                q = ol.quantize(xt[0:n, k0:k1])
+                for c0 in range(0, N, NC):
+                    c = min(NC, N - c0)
+                    ol.dot(q, w[c0:c0 + c, k0:k1], acc=yt[:, c0:c0 + c])
+                    if wlo is not None:
+                        ol.dot(q, wlo[c0:c0 + c, k0:k1], acc=yt[:, c0:c0 + c])
+                del q
+            if f is not None:
+                yt.set(f(yt))
+            ol.store(y[m0:m0 + n, :], yt)
+            continue
         q = ol.quantize(xt[0:n, :])
         for c0 in range(0, N, nc):
             c = min(nc, N - c0)
