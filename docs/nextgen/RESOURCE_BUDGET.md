@@ -361,3 +361,42 @@ or noise the BIST load does not make. Single-sequence decode stays clean (bitnet
   4,096-channel kernel-5 conv has K 20,480 over ACT RAM's 16,384. Fixed: `ol.tmem_contiguous()`,
   K in ranges into accumulators of all N. ISA SIMULATED: a random policy of pusht's shapes, one
   DDPM step on the r5-m8 configuration: 100.00% of the MACs on the device, actions rel L2 0.0004.
+
+### Models on r5-m8 (2026-10-26 21:19-22:13, `models_r5.sh` at 9aff02ad) -- PHYSICAL
+
+Upstream's perf method (`tools/qual/perf.py`: 512-token prompt, 64 greedy tokens); upstream's
+README numbers (build B, 133.33 MHz, MCOLS 4) for comparison. DRAM at 94-96% of 17.1 GB/s.
+
+| model | weights | decode device / wall tok/s | upstream device / wall | prefill device tok/s |
+|---|---|---|---|---|
+| Qwen3.5-2B | int8 | **8.39 / 8.35** | 8.02 / 8.00 | 66.9 |
+| Qwen3.5-2B | fp4, head fp4 | **15.20 / 15.01** | (12.09 with int8 head) | 70.2 |
+| Qwen3.5-2B | fp4, head int8 | ECC_DED during the run (below) | 12.09 / 12.03 | -- |
+| Qwen3.5-2B chat fp4 + int8 head, --strict-fpga | | 12.6 / 11.94 | | |
+| Qwen3.5-2B chat + MTP drafter | | **19.1 / 16.09**, acceptance 0.67 | | |
+| Qwen3-0.6B | int8 / fp4 | 24.76 / 23.50; 35.81 / 31.04 | 21.6 / 21.3; 31.3 / 30.7 | 184 / 194 |
+| Qwen3.5-0.8B | int8 / fp4 | 19.92 / 19.24; 27.61 / 26.32 | 17.6 / 16.3; 24.5 / 23.3 | 108 / 111 |
+| LFM2.5-230M | int8 / fp4 | 66.80 / 61.38; 96.25 / 85.51 | 59.0 / 52.3; 85.8 / 82.1 | 589 / 607 |
+
+Qwen3.5-2B's chat answer (fp4) is coherent ("Rayleigh scattering ..."), the same with MTP.
+SmolVLA tiny with activations / norms on the card: card == ISA, 100% of the MACs on the device.
+Diffusion Policy tiny: card == ISA (100% MACs). Failed: Diffusion pusht and SmolVLA base, both
+"TMEM exhausted" in the linear kernel (the 64K split, fixed in c4b6e989).
+
+**ECC**: the first ECC_DED came during Qwen3.5-2B fp4 + int8 head (one sequence), after which
+the runs were not checked (STATUS ECC_DED sticky); at the end channel 0 2,084 corrected / 583
+uncorrectable, channel 1 7 / 0. So channel 0's errors are not only the batched steps' picks:
+Qwen3.5 (DeltaNet state writes, 22 MB a token) and the torchdev models' many small runs read
+back wrong too. Their outputs since the first ECC_DED are not proven correct.
+
+### DDR3 diagnosis part B (2026-10-26 22:13-22:15, `ddr_diag_b.sh`) -- PHYSICAL
+
+`memcal cal --force`: channel 0 again CK step 54, common write window 636 ps (38 steps; channel
+1 1,105 ps), read windows 9-10 taps idle; loadcal fp4: channel 0 windows [3, 4, 3, 4, 5, 5, 5,
+4, 5] under load. Pattern test under TMM: 0 / 0. Decode modes: step 0 / 32, run_rows 0 / 16,
+steps 4 rows 2 / 32 runs (2 corrected), steps 2 rows 13 / 32 (12 corrected, 4 uncorrectable).
+The recalibration changes nothing material. Common to every failing workload: the device's
+stores (partial beats are a read-modify-write in `otpu_mem_ch`) between streamed reads, on
+channel 0, whose write window is the narrow one. Host DMA writes (whole beats, long bursts) and
+loadcal's loads read back clean. Next: `ddr_diag rmw` (streamed loads with no / whole-beat /
+partial / two partial stores, on each channel) separates the store kinds.

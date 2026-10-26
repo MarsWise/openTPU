@@ -3,6 +3,13 @@
 
     python tools/ddr_diag.py pattern [--mib 512] [--load none|fp4|ternary:4] [--passes 2]
     python tools/ddr_diag.py steps MODEL_DIR [--n 32]
+    python tools/ddr_diag.py rmw [--iters 200000]
+
+rmw: the accelerator streams 4 MiB of DRAM (64 KiB tiles, every DRAM row in turn) and between
+two tile loads stores to one 64-byte beat: nothing (reads only), a whole beat (64 B), one 4-byte
+word (a partial beat: the channel module's read-modify-write), or two 4-byte words of the same
+beat back to back (as the batched steps' picks were); each at a beat on channel 0 and one on
+channel 1 (Board.beat_at). Reports the ECC counters per case: which traffic reads back wrong.
 
 pattern: per channel, random data written by the host (PCIe DMA) at channel offsets from 1 GiB,
 read back and compared; idle (--load none) or while the core runs loadcal's load (its MXU work
@@ -24,6 +31,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -172,6 +180,74 @@ def cmd_steps(a) -> int:
     return 0
 
 
+def _rmw_kernel():
+    from opentpu import language as ol
+
+    @ol.jit
+    def k(m, n_iter: int, kind: str):
+        t = ol.empty([16384])
+        s = ol.load(m.src)
+        for _ in ol.range(n_iter):
+            for j in range(4):
+                ol.load(m.big[j, :], out=t)
+                if kind == "full":
+                    ol.store(m.dst, s)
+                elif kind == "partial":
+                    ol.store(m.dst[0:1], s[0:1])
+                elif kind == "two":
+                    ol.store(m.dst[0:1], s[0:1])
+                    ol.store(m.dst[1:2], s[1:2])
+    return k
+
+
+TROWS = 64
+
+
+def cmd_rmw(a) -> int:
+    from opentpu.host.board import Board, XdmaTransport, beat_at, device_config
+    from opentpu.llm.qwen3 import _tdesc
+    b = Board(XdmaTransport(a.dev), check=False)
+    t, info = b.t, b.info()
+    cfg = device_config(info, DRAM_BYTES=1 << 30)
+    chash = bool((info.get("caps") or {}).get("chash"))
+    big, src = 1 << 22, 1 << 20                 # 4 MiB streamed at 4 MiB; the source words at 1 MiB
+    dsts = {}
+    for addr in range(16 << 20, (16 << 20) + 512, 64):    # one beat on each channel
+        dsts.setdefault(beat_at(addr, chash)[0], addr)
+    prog_at = 32 << 20
+    rng = np.random.default_rng(1)
+    img = np.zeros(prog_at, np.uint8)
+    img[big:big + (4 << 20)] = rng.integers(0, 256, 4 << 20, np.uint8)
+    img[src:src + 64] = rng.integers(0, 256, 64, np.uint8)
+    b.scrub(force=True)
+    b.write(0, img)
+    print(f"card build {info.get('build_id') or 0:#x}, temp {info.get('temp_c')}; chash {chash}; "
+          f"{a.iters} iterations of 4 x 64 KiB loads; beats {dsts}")
+    bad = 0
+    for kind in ("none", "full", "partial", "two"):
+        for ch in ((0,) if kind == "none" else (0, 1)):
+            m = SimpleNamespace(big=_tdesc(big, (TROWS, 16384)), src=_tdesc(src, (16,)),
+                                dst=_tdesc(dsts[ch], (16,)))
+            prog = _rmw_kernel().trace(cfg, 0, {"m": m, "n_iter": a.iters, "kind": kind}).finish()
+            b.load(prog_at, prog)
+            _ecc(t)
+            t0 = time.time()
+            try:
+                b.start()
+                st = b.wait(timeout=600)
+                err = ""
+            except RuntimeError as e:
+                st, err = {}, " (" + str(e)[:60] + ")"
+            e = _ecc(t)
+            bad += sum(x[0] + x[1] for x in e)
+            print(f"{kind:8s} store beat on channel {ch if kind != 'none' else '-'}: "
+                  f"ECC ch0 {e[0][0]} / {e[0][1]}, ch1 {e[1][0]} / {e[1][1]}; "
+                  f"{time.time() - t0:.1f} s{err}")
+    print(f"temp {b.info().get('temp_c')}")
+    b.scrub(force=True)
+    return 0 if not bad else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -186,8 +262,11 @@ def main() -> int:
     s.add_argument("--n", type=int, default=32)
     s.add_argument("--backend", default="board", choices=["board", "isa"])
     s.add_argument("--dev", default="/dev/xdma0")
+    r = sp.add_parser("rmw")
+    r.add_argument("--iters", type=int, default=200000)
+    r.add_argument("--dev", default="/dev/xdma0")
     a = ap.parse_args()
-    return cmd_pattern(a) if a.cmd == "pattern" else cmd_steps(a)
+    return {"pattern": cmd_pattern, "steps": cmd_steps, "rmw": cmd_rmw}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
 # with ECC 0 / 0. 2) Diffusion Policy pusht's wide U-Net convs (TMEM split at 64K by the stream
 # engine's descriptors; K 20,480 over ACT RAM): the linear kernel's tiles in one TMEM part, K in
 # ranges. Expect pusht at 10 and 100 steps against float32. No bitstream load, no rescan, no
-# calibration change.
+# calibration change. 0) first: which DRAM traffic reads back wrong (ddr_diag rmw); 4) SmolVLA base.
 set -u
 exec 9>/tmp/claude_run.lock
 flock -n 9 || { echo "== another claude run is in progress: not started"; exit 0; }
@@ -30,6 +30,9 @@ i = b.info(); print("   ECC", memcal.ecc(b.t), "ECC_DED", bool(i["status"] & (1 
 PY
 }
 ecc scrub
+echo; echo "== $(date +%H:%M:%S) 0. which traffic reads back wrong: streamed loads with no / whole-beat / partial / two partial stores, on each channel"
+timeout 1800 python tools/ddr_diag.py rmw --iters 200000 2>&1 | tail -9 | tee "$OUT/rmw.txt"
+ecc scrub
 echo; echo "== $(date +%H:%M:%S) 1. decode modes, ECC after every run (expect 0 everywhere)"
 PYTHONPATH="$R" timeout 3600 "$HOME/hfref/bin/python" tools/ddr_diag.py steps "$MD" --n 32 2>&1 | grep -viE "warn|regex|tokenizer you are" | tail -7 | tee "$OUT/steps.txt"
 echo; echo "== $(date +%H:%M:%S) 2. BitNet through vLLM, batched, ECC per case"
@@ -51,6 +54,11 @@ if "$LV/bin/python" -c "import lerobot, diffusers" 2>/dev/null; then
       --steps $st --save "$OUT/diffusion_pusht_$st.npz" 2>&1 | grep -viE "warn" | tail -14 | tee "$OUT/diffusion_pusht_$st.txt"
     ecc
   done
+  echo; echo "== $(date +%H:%M:%S) 4. SmolVLA base (its 12,288-wide connector: the linear kernel's tiles now in one TMEM part)"
+  ecc clear
+  PYTHONPATH="$R" timeout 10800 "$LV/bin/python" tools/smolvla_run.py --policy lerobot/smolvla_base --backend board --device-rows \
+    --save "$OUT/smolvla_base_rows.npz" 2>&1 | grep -viE "warn" | tail -16 | tee "$OUT/smolvla_base.txt"
+  ecc
 else
   echo "no lerobot / diffusers in $LV"
 fi
