@@ -23,3 +23,14 @@ compatibility, RTL execution fraction, or device performance.
 Before adding a row as supported, record the exact checkpoint repository/revision and file hashes,
 converter/quantizer, tokenizer/processor, operator graph, hardware execution locations, golden
 reference comparisons, and reproducible run command.
+
+## Diffusion Policy (LeRobot) -- 2026-10-26
+
+`tools/diffusion_run.py`: LeRobot's Diffusion Policy (ResNet-18 image encoder with GroupNorm and
+spatial softmax, conditional 1-D U-Net, DDPM) with every nn.Conv2d, nn.Conv1d,
+nn.ConvTranspose1d and nn.Linear on the device (torchdev `DeviceConv1d` / `DeviceConvTranspose1d`:
+im2col / col2im on the host, the GEMM on the MXU). GroupNorm, Mish, spatial softmax and the
+scheduler's update on the host (counted). ISA SIMULATED: a random small policy (12.3 M params,
+5 steps): 100.00% of the MACs on the device, actions rel L2 0.018 vs float32
+(`tests/test_conv1d_diffusion.py`). lerobot/diffusion_pusht on the card: `models_r5.sh` (not run
+yet). Image diffusion (a U-Net / DiT for pictures) is not in the tree.

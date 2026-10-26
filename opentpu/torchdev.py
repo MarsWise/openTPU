@@ -324,7 +324,7 @@ def host_counter(cov: Coverage):
                     cov.add("host", "sdpa", 2 * numel(q) * k.shape[-2])
                 elif name == "einsum":
                     cov.add("host", "einsum", 0)        # counted below by the inner op
-                elif name in ("conv1d", "conv2d"):
+                elif name in ("conv1d", "conv2d", "conv_transpose1d"):
                     x, w = args[0], args[1]
                     out = func(*args, **kwargs)
                     cov.add("host", name, out.numel() // out.shape[1] * w.numel())
@@ -348,7 +348,8 @@ class DeviceLinear:
     """Replaces an nn.Linear's forward: y = x W^T + b on the device (kernels/linear.py).
     wsplit: int8 hi + lo weights (conv.split_weight; two MMs)."""
 
-    def __init__(self, lin, runner: Runner, cov: Coverage, name: str = "", wsplit: bool = False):
+    def __init__(self, lin, runner: Runner, cov: Coverage, name: str = "", wsplit: bool = False,
+                 op: str = "linear"):
         from .kernels import linear as L
         from .runtime import Weight
         D = runner.cfg.D
@@ -363,7 +364,7 @@ class DeviceLinear:
             self.w, self.wlo = Weight(hi, fmt="int8"), Weight(lo, fmt="int8")
         else:
             self.w, self.wlo = Weight(packed, fmt="int8"), None
-        self.runner, self.cov, self.name = runner, cov, name
+        self.runner, self.cov, self.name, self.op = runner, cov, name, op
 
     def __call__(self, x):
         import torch
@@ -394,7 +395,7 @@ class DeviceLinear:
                 self._step = step
                 continue
             m0 += n
-        self.cov.add("device", "linear", M * self.K * self.N)
+        self.cov.add("device", self.op, M * self.K * self.N)
         return torch.from_numpy(np.ascontiguousarray(y)).reshape(*shp[:-1], self.N).to(dt)
 
 
@@ -444,6 +445,84 @@ class DeviceConv2d:
             self.cov.add("device", "conv2d", OH * OW * self.Cout * self.Cin * self.K * self.K)
             outs.append(y.reshape(OH, OW, self.Cout).transpose(2, 0, 1))
         return torch.from_numpy(np.ascontiguousarray(np.stack(outs))).to(dt)
+
+
+class _Gemm:
+    """y = x W^T (x [M, K], W [N, K] float32) as kernels/linear.py on the device, no bias."""
+
+    def __init__(self, w, runner: Runner, cov: Coverage, name: str, wsplit: bool, op: str):
+        import torch
+        lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=False)
+        with torch.no_grad():
+            lin.weight.copy_(torch.from_numpy(np.ascontiguousarray(w, np.float32)))
+        self.lin = DeviceLinear(lin, runner, cov, name, wsplit, op=op)
+
+    def __call__(self, a):
+        import torch
+        return self.lin(torch.from_numpy(np.ascontiguousarray(a, np.float32))).numpy()
+
+
+class DeviceConv1d:
+    """Replaces an nn.Conv1d's forward (groups 1, no dilation, zeros padding): the host lays the
+    input out as rows of Cin x k (im2col, a layout move), the device multiplies them by the
+    weight [Cout, Cin k] (kernels/linear.py), the host adds the bias."""
+
+    def __init__(self, conv, runner: Runner, cov: Coverage, name: str = "",
+                 wsplit: bool = False):
+        pad = conv.padding
+        if conv.groups != 1 or conv.dilation != (1,) or conv.padding_mode != "zeros" \
+                or isinstance(pad, str):
+            raise NotImplementedError(f"{name}: conv {conv} not on the device kernel")
+        w = conv.weight.detach().float().cpu().numpy()
+        self.Cout, self.Cin, self.k = w.shape
+        self.s, self.p = conv.stride[0], pad[0]
+        self.b = (conv.bias.detach().float().cpu().numpy() if conv.bias is not None
+                  else np.zeros(self.Cout, np.float32))
+        self.g = _Gemm(w.reshape(self.Cout, -1), runner, cov, name, wsplit, "conv1d")
+
+    def __call__(self, x):
+        import torch
+        dt = x.dtype
+        xb = np.pad(x.detach().float().cpu().numpy(), ((0, 0), (0, 0), (self.p, self.p)))
+        B, _, L = xb.shape
+        Lo = (L - self.k) // self.s + 1
+        idx = np.arange(Lo)[:, None] * self.s + np.arange(self.k)[None, :]     # [Lo, k]
+        cols = xb[:, :, idx].transpose(0, 2, 1, 3).reshape(B * Lo, self.Cin * self.k)
+        y = self.g(cols).reshape(B, Lo, self.Cout) + self.b
+        return torch.from_numpy(np.ascontiguousarray(y.transpose(0, 2, 1))).to(dt)
+
+
+class DeviceConvTranspose1d:
+    """Replaces an nn.ConvTranspose1d's forward (groups 1, no dilation, no output padding): the
+    device computes every input position's contribution x W ([B L, Cin] x [Cin, Cout k]), the
+    host adds the overlapping ones into the output (col2im) and the bias."""
+
+    def __init__(self, conv, runner: Runner, cov: Coverage, name: str = "",
+                 wsplit: bool = False):
+        if conv.groups != 1 or conv.dilation != (1,) or conv.output_padding != (0,) \
+                or conv.padding_mode != "zeros":
+            raise NotImplementedError(f"{name}: conv {conv} not on the device kernel")
+        w = conv.weight.detach().float().cpu().numpy()          # [Cin, Cout, k]
+        self.Cin, self.Cout, self.k = w.shape
+        self.s, self.p = conv.stride[0], conv.padding[0]
+        self.b = (conv.bias.detach().float().cpu().numpy() if conv.bias is not None
+                  else np.zeros(self.Cout, np.float32))
+        self.g = _Gemm(w.reshape(self.Cin, -1).T, runner, cov, name, wsplit, "conv_transpose1d")
+        self.cov = cov
+
+    def __call__(self, x):
+        import torch
+        dt = x.dtype
+        xb = x.detach().float().cpu().numpy()
+        B, _, L = xb.shape
+        c = self.g(xb.transpose(0, 2, 1).reshape(B * L, self.Cin)).reshape(B, L, self.Cout, self.k)
+        full = np.zeros((B, self.Cout, (L - 1) * self.s + self.k), np.float32)
+        for j in range(self.k):
+            full[:, :, j:j + (L - 1) * self.s + 1:self.s] += c[:, :, :, j].transpose(0, 2, 1)
+        Lo = (L - 1) * self.s - 2 * self.p + self.k
+        y = full[:, :, self.p:self.p + Lo] + self.b[None, :, None]
+        self.cov.elems["col2im"] += y.size
+        return torch.from_numpy(np.ascontiguousarray(y)).to(dt)
 
 
 def key_prefixes(mask):
@@ -667,7 +746,8 @@ def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
 
 def to_device(model, runner: Runner, cov: Coverage, select=None, wsplit: bool = False,
               convs: bool = True, rows: bool = False) -> int:
-    """Every nn.Linear (and, with convs, every nn.Conv2d the kernel takes) of `model`
+    """Every nn.Linear (and, with convs, every nn.Conv2d the kernel takes, nn.Conv1d and
+    nn.ConvTranspose1d) of `model`
     (select(name, module) -> bool, default all) runs on the device; with rows, also its
     activations, LayerNorms and RMSNorms (row_module). Returns the number of modules moved."""
     import torch.nn as nn
@@ -680,6 +760,10 @@ def to_device(model, runner: Runner, cov: Coverage, select=None, wsplit: bool = 
             n += 1
         elif convs and isinstance(m, nn.Conv2d):
             m.forward = DeviceConv2d(m, runner, cov, name, wsplit)
+            n += 1
+        elif convs and isinstance(m, (nn.Conv1d, nn.ConvTranspose1d)):
+            kind = DeviceConv1d if isinstance(m, nn.Conv1d) else DeviceConvTranspose1d
+            m.forward = kind(m, runner, cov, name, wsplit)
             n += 1
         elif rows:
             r = row_module(m, runner, cov, name)
