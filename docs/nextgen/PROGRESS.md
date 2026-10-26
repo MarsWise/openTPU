@@ -1,5 +1,13 @@
 # Nextgen implementation progress
 
+## Local update (2026-10-26, evening): handoff to Codex / Copilot
+
+HANDOFF_2026-10-26.md is the state: r5-m8 PHYSICAL results (BitNet 17.5 / 20.9 tok/s, Qwen3.5-2B
+int8 8.39 / fp4 15.20 / MTP 19.1, small LLMs 10-17% over upstream, YOLOX COCO 0.2825 at 0.22 s,
+SmolVLA tiny and Diffusion Policy pusht 10 steps with 100% MACs on the card), vLLM batched decode
+(27-29 tok/s) blocked by DDR3 channel 0 ECC errors under device stores (open; rmw_check.sh
+decides logic vs physical), ~170 commits to publish (push_fork.cmd).
+
 ## Local update (2026-10-26): r5-m8 bitstream built, timing met at 137.5 MHz
 
 - `2f2320e2`, m8 (MCOLS 8, MXU_E 8, TMEM 128K, TFN / MAC / T4 / TMM PAIR + QUAD), core 137.5 MHz,

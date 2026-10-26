@@ -409,3 +409,8 @@ int4: each stopped on ECC_DED (channel 0: 0 / 1, 2 / 1, 1 / 1, 4 / 1). So the pi
 word was not the cause (2 rows: 17 -> 7 runs with errors, within the spread). Channel 0's errors
 follow the device's stores among streamed reads; `rmw_check.sh` (ddr_diag rmw with a 64 KiB
 tile-store case) tells partial beats from any store.
+
+Diffusion Policy `lerobot/diffusion_pusht` (262.7 M params) at 10 DDPM steps in the same run:
+100% of 12.29 G MACs on the card (conv1d 11.37 G, conv2d 0.59 G, conv_transpose1d 0.25 G, linear
+0.08 G), actions rel L2 **0.0019** vs float32 (max |d| 0.0031), no ECC_DED; card 29.8 M cycles
+(0.22 s) in a 131 s wall run (533 kernel runs: the host's per-call overhead). PHYSICAL.
