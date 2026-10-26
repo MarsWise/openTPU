@@ -353,8 +353,8 @@ or noise the BIST load does not make. Single-sequence decode stays clean (bitnet
   4-byte store to tout + 4 r, so rows 0 and 1 (2 and 3) wrote the halves of one 64-bit ECC
   word back to back; tout's first beat is on channel 0. A partial store is a read-modify-write
   in the ECC path; two to the same word in a row read back as ECC errors. One sequence's decode
-  has single partial stores only (the KV row scales: one 4-byte QST a position). Fix: tout one
-  64-byte beat a row (`TOUT_STRIDE`). RTL follow-up (r6): order two partial writes to the same
+  has single partial stores only (the KV row scales: one 4-byte QST a position). Fix tried: tout one
+  64-byte beat a row (`TOUT_STRIDE`); the card's fix_check below shows it was not the cause. RTL follow-up (r6): order two partial writes to the same
   ECC word in the memory path (or merge them), as the host's sub-beat writes are merged already.
 - Diffusion Policy pusht on the card failed at its widest U-Net convs: the linear kernel sized its
   x tile for 128K TMEM words, which the stream engine's descriptors split at 64K, and a
@@ -400,3 +400,12 @@ stores (partial beats are a read-modify-write in `otpu_mem_ch`) between streamed
 channel 0, whose write window is the narrow one. Host DMA writes (whole beats, long bursts) and
 loadcal's loads read back clean. Next: `ddr_diag rmw` (streamed loads with no / whole-beat /
 partial / two partial stores, on each channel) separates the store kinds.
+
+### fix_check (2026-10-26 22:16, at c4b6e989: the picks one beat a row) -- PHYSICAL
+
+Decode modes: step 0 / 32 runs; run_rows 1 / 16 (1 corrected); steps 4 rows 7 / 32 (7
+corrected); steps 2 rows 7 / 32 (5 corrected, 2 uncorrectable). vLLM 2 / 4 / 8 slots and 4 with
+int4: each stopped on ECC_DED (channel 0: 0 / 1, 2 / 1, 1 / 1, 4 / 1). So the picks' shared ECC
+word was not the cause (2 rows: 17 -> 7 runs with errors, within the spread). Channel 0's errors
+follow the device's stores among streamed reads; `rmw_check.sh` (ddr_diag rmw with a 64 KiB
+tile-store case) tells partial beats from any store.

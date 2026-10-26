@@ -9,7 +9,8 @@ rmw: the accelerator streams 4 MiB of DRAM (64 KiB tiles, every DRAM row in turn
 two tile loads stores to one 64-byte beat: nothing (reads only), a whole beat (64 B), one 4-byte
 word (a partial beat: the channel module's read-modify-write), or two 4-byte words of the same
 beat back to back (as the batched steps' picks were); each at a beat on channel 0 and one on
-channel 1 (Board.beat_at). Reports the ECC counters per case: which traffic reads back wrong.
+channel 1 (Board.beat_at); or the loaded 64 KiB tile stored back whole (long bursts of whole
+beats on both channels, a read / write turnaround each). Reports the ECC counters per case: which traffic reads back wrong.
 
 pattern: per channel, random data written by the host (PCIe DMA) at channel offsets from 1 GiB,
 read back and compared; idle (--load none) or while the core runs loadcal's load (its MXU work
@@ -197,6 +198,8 @@ def _rmw_kernel():
                 elif kind == "two":
                     ol.store(m.dst[0:1], s[0:1])
                     ol.store(m.dst[1:2], s[1:2])
+                elif kind == "tile":           # 64 KiB of whole beats, both channels
+                    ol.store(m.out[j, :], t)
     return k
 
 
@@ -224,10 +227,10 @@ def cmd_rmw(a) -> int:
     print(f"card build {info.get('build_id') or 0:#x}, temp {info.get('temp_c')}; chash {chash}; "
           f"{a.iters} iterations of 4 x 64 KiB loads; beats {dsts}")
     bad = 0
-    for kind in ("none", "full", "partial", "two"):
-        for ch in ((0,) if kind == "none" else (0, 1)):
+    for kind in ("none", "full", "partial", "two", "tile"):
+        for ch in ((0,) if kind in ("none", "tile") else (0, 1)):
             m = SimpleNamespace(big=_tdesc(big, (TROWS, 16384)), src=_tdesc(src, (16,)),
-                                dst=_tdesc(dsts[ch], (16,)))
+                                dst=_tdesc(dsts[ch], (16,)), out=_tdesc(24 << 20, (4, 16384)))
             prog = _rmw_kernel().trace(cfg, 0, {"m": m, "n_iter": a.iters, "kind": kind}).finish()
             b.load(prog_at, prog)
             _ecc(t)
@@ -240,7 +243,7 @@ def cmd_rmw(a) -> int:
                 st, err = {}, " (" + str(e)[:60] + ")"
             e = _ecc(t)
             bad += sum(x[0] + x[1] for x in e)
-            print(f"{kind:8s} store beat on channel {ch if kind != 'none' else '-'}: "
+            print(f"{kind:8s} store beat on channel {ch if kind not in ('none', 'tile') else '-'}: "
                   f"ECC ch0 {e[0][0]} / {e[0][1]}, ch1 {e[1][0]} / {e[1][1]}; "
                   f"{time.time() - t0:.1f} s{err}")
     print(f"temp {b.info().get('temp_c')}")
