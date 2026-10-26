@@ -8,7 +8,11 @@
 - 150 MHz did not close: db36f818 -0.52 ns, Codex's locality placement -0.281 ns (routed). The
   remaining paths (TMEM's pumped outputs into the units, the MXU epilogue's fp32 normalisation) need
   RTL (a TMEM read register; fp_mul_s2 split) for 150.
-- Card validation prepared, not run (needs the user's yes for the JTAG load): `_claude5_1_jtag.cmd`
+- **On the card (2026-10-26 14:15): build 0x2f2320e2 runs, CFG_HASH matches, otpu-selftest ALL PASS
+  incl. vext (TFN / MAC / QST T4 == ISA, first time on hardware), ECC 0 / 0, TMM QUAD 507.2 MAC/cycle
+  bit-exact** (PHYSICAL; RESOURCE_BUDGET.md "r5-m8 2f2320e2 on the card"). Next: claude_run_r5a.
+- Card validation prepared (the user's yes for the JTAG load was given and the load done): `_claude
+5_1_jtag.cmd`
   (sha256-checked volatile load), `r5_2_pcie.cmd` (rescan + `r5_check.sh`), then `claude_run.cmd`
   with `tools/nextgen/card_runs/claude_run_r5a.sh` (memcal + loadcal, selftest, r5_card_check, TMM,
   YOLOX, SmolVLA, BitNet, vLLM, qual, the full pytest).

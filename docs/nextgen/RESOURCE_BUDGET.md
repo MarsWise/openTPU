@@ -232,3 +232,15 @@ slices (83.9 %), 560.5 BRAM tiles (58.7 %), 1,299 DSP48 (74.8 %). Methodology: T
 (critical warning class, scoped exceptions between clocks, as before), no DRC errors (the bitstream
 was written). `otpu.bit` sha256 `270afa7afde39927909609b60711e276705ce0a32a780f41fddb52216068c23b`,
 CFG_HASH 3b7f244e, build id 0x2f2320e2. Not loaded on the card yet (PHYSICAL: NOT RUN).
+
+### r5-m8 2f2320e2 on the card (2026-10-26 14:15, host 192.168.0.157) -- PHYSICAL FPGA VERIFIED (bring-up)
+
+Volatile JTAG load (`r5_1_jtag.cmd`: sha256 checked, DONE=1), PCIe rescan, `r5_check.sh`:
+PCIe Gen2 x8 (5.0 GT/s x8), /dev/xdma0; build 0x2f2320e2, CAPS2 tpair / tquad / tfn, core_khz
+137500, MCOLS 8, D 128, TMEM 131072, CFG_HASH 3b7f244e == the host's. The core's CPU calibrated both
+DDR3 channels (12.8 s). otpu-selftest ALL PASS: link, config, calib, scrub 4 GiB, regs, addr,
+pattern, bandwidth (h2c 2.19 / c2h 1.69 GB/s), kernel, vops, stream / DSTEP, tmm (9 programs ==
+ISA), **vext (21 programs: TFN x10 on tiles and edge values, VOP MAC, QST T4 == ISA)**, ecc 0 / 0
+on both channels. TMM at M = 1 (K 2560, N 1024), bit-exact with the ISA simulator: plain 128.1,
+PAIR 246.0, QUAD 507.2 MAC/cycle (139.5 GOPS at 137.5 MHz; M = 1 uses one column's worth, as on r4).
+`tools/firmware_contract.py --card` raised KeyError 'part' on a known entry without one (fixed).

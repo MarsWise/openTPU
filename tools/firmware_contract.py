@@ -103,7 +103,7 @@ def card_report(contract: dict, dev: str) -> dict:
         "cfg_hash": None if not info["cfg"] else f"{info['cfg']['hash']:#010x}",
         "bitstream_sha256": expected["bitstream_sha256"],
         "name": expected.get("name", contract["firmware"].get("name")),
-        "part": expected["part"],
+        "part": expected.get("part", contract["firmware"]["part"]),
     }
 
 
