@@ -326,3 +326,15 @@ not the controllers' 133.33). Results read while ECC_DED is set are not trustwor
 MISMATCH). Next: `ddr_tmm.sh` measures the windows under a TMM load
 (`OTPU_LOAD_KIND=ternary:4`, loadcal.build kind "ternary") and centres the taps there; the
 fallback is a core clock equal to the controllers' (133.33 MHz) in the next build.
+
+### ddr_tmm (2026-10-26 21:06-21:08, `ddr_tmm.sh` at 359d5960) -- PHYSICAL
+
+loadcal under its fp4 load and under a TMM load (4 rows, PAIR on 8 columns) measured the same
+read windows: channel 0 [3, 4, 3-4, 5, 5, 5, 5, 4-5, 5] taps (taps [1, 1, 11, 12, 4, 4, 3, 5-6,
+6]), channel 1 [4-5, 4, 4, 3, 5, 4, 3, 3, 5]; no lane narrow. After centring under TMM and a scrub
+(ECC 0 / 0), BitNet through vLLM still stopped on ECC_DED within each case: 4 slots int8 ch0
+11 / 1, 8 slots 2 / 1, 4 slots int4 12 / 1; channel 1 0 / 0 throughout; 57-58 C. So the read
+taps' centre under load does not explain channel 0's errors (the BIST scan, last quarter of the
+channel, reads clean at these taps). Open: channel 0's write side (its common write window
+653 ps against channel 1's 1,105 ps, r5a's calibration) under the batched steps' writes,
+or noise the BIST load does not make. Single-sequence decode stays clean (bitnet_max: 0 / 0).
