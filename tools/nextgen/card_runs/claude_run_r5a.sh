@@ -77,6 +77,8 @@ log "4. SmolVLA: tiny on the card vs ISA (TFN GELU / SiLU, MAC LayerNorm, QST T4
 if "$LV/bin/python" -c "import lerobot" 2>/dev/null; then
   PYTHONPATH="$R" timeout 3600 "$LV/bin/python" tools/smolvla_run.py --tiny --backend board --check-isa 2>&1 | show | tail -12 | tee "$OUT/smolvla_tiny.txt"
   check ${PIPESTATUS[0]} "SmolVLA tiny card == ISA"
+  PYTHONPATH="$R" timeout 3600 "$LV/bin/python" tools/smolvla_run.py --tiny --backend board --check-isa --device-rows 2>&1 | show | tail -14 | tee "$OUT/smolvla_tiny_rows.txt"
+  check ${PIPESTATUS[0]} "SmolVLA tiny with activations / norms / add / mul on the card == ISA"
   PYTHONPATH="$R" timeout 10800 "$LV/bin/python" tools/smolvla_run.py --policy lerobot/smolvla_base --backend board --save "$OUT/smolvla_base.npz" 2>&1 | show | tail -20 | tee "$OUT/smolvla_base.txt"
 fi
 
