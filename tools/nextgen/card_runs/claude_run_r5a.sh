@@ -54,10 +54,16 @@ check ${PIPESTATUS[0]} "loadcal centred the read taps under load"
 python -m opentpu.host.selftest 2>&1 | tail -16 | tee "$OUT/selftest.txt"; grep -q "ALL PASS" "$OUT/selftest.txt"; check $? "selftest"
 python tools/r5_card_check.py 2>&1 | tee "$OUT/r5_card_check.txt"; check ${PIPESTATUS[0]} "r5 instructions on the card == ISA (TFN x10 + edges, MAC, QST T4, TMM PAIR/QUAD, SiLU speed)"
 
-log "2. TMM at M = 1: plain / PAIR / QUAD"
-for m in plain pair quad; do
-  timeout 600 python tools/bench_tmm.py --m 1 --k 2560 --n 1024 --mode $m 2>&1 | tail -4 | tee -a "$OUT/tmm_bench.txt"
-  check ${PIPESTATUS[0]} "TMM $m bit-exact"
+log "2. TMM plain / PAIR / QUAD at M = 1..8 (m8: each column one activation row x a weight block; M = 1 fills 1 / 2 / 4 of the 8)"
+# m8: PAIR takes 2M <= MCOLS columns, QUAD 4M: plain M <= 8, PAIR M <= 4, QUAD M <= 2 fill all 8
+for M in 1 2 4 8; do
+  for m in plain pair quad; do
+    [ $m = pair ] && [ $M -gt 4 ] && continue
+    [ $m = quad ] && [ $M -gt 2 ] && continue
+    echo "-- M=$M $m" | tee -a "$OUT/tmm_bench.txt"
+    timeout 600 python tools/bench_tmm.py --m $M --k 2560 --n 1024 --mode $m 2>&1 | tail -4 | tee -a "$OUT/tmm_bench.txt"
+    check ${PIPESTATUS[0]} "TMM $m M=$M bit-exact"
+  done
 done
 
 log "3. YOLOX-Nano: the graph on the card (TFN SiLU / sigmoid, rolling patches), every op vs the ISA; COCO 500 (r3: 0.2821 / 0.44 s, ws 0.2852)"
