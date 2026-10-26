@@ -152,8 +152,9 @@ def main():
         yd = plan.read(out, dec["val"]).reshape(-1, raw.shape[1])
     else:
         yd = decode(raw, [h.shape[:2] for h in heads], a.size)
+    khz = stats.get("core_khz") or 133333    # the card's CORE_KHZ (r5-m8 137.5 MHz)
     print(f"\nrun {t_run:.1f}s: {stats['instructions']} instructions"
-          + (f", {stats['cycles']} card cycles = {stats['cycles'] / 133.333e3:.1f} ms at 133.33 MHz"
+          + (f", {stats['cycles']} card cycles = {stats['cycles'] / khz:.1f} ms at {khz / 1e3:.2f} MHz"
              if stats["cycles"] else ""))
     print(f"head output [{raw.shape[0]}, {raw.shape[1]}] vs float: rel L2 {rel(raw, yr_raw):.4f}, "
           f"box (decoded) rel L2 {rel(yd[:, :4], yr[:, :4]):.4f}, objectness max|d| "
@@ -210,6 +211,7 @@ def run_board(board, plan, cfg, img, stats, check):
     import dataclasses
     from opentpu.isasim import Machine
     board.write(0, img)
+    stats["core_khz"] = board.info().get("core_khz")
     at = -(-(len(img) + PROG_AT_GAP) // 4096) * 4096
     ref = img.copy() if check else None
     c = dataclasses.replace(cfg, DRAM_BYTES=len(img))

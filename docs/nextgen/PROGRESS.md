@@ -11,6 +11,10 @@
 - **On the card (2026-10-26 14:15): build 0x2f2320e2 runs, CFG_HASH matches, otpu-selftest ALL PASS
   incl. vext (TFN / MAC / QST T4 == ISA, first time on hardware), ECC 0 / 0, TMM QUAD 507.2 MAC/cycle
   bit-exact** (PHYSICAL; RESOURCE_BUDGET.md "r5-m8 2f2320e2 on the card"). Next: claude_run_r5a.
+- Run r5a on the card: r5 instructions == ISA, YOLOX COCO-500 0.2825 at 0.22 s/image (r4 0.32-0.34),
+  BitNet 16.46 tok/s, vLLM 12.06 tok/s, SmolVLA tiny == ISA (RESOURCE_BUDGET.md "run r5a"). Fixed
+  after it: chunked device attention (SmolVLA base), vLLM worker releases the card at shutdown,
+  ECC cleared after loadcal, RTL-only tests skip without Verilator. Next run: claude_run_r5b.sh.
 - Card validation prepared (the user's yes for the JTAG load was given and the load done): `_claude
 5_1_jtag.cmd`
   (sha256-checked volatile load), `r5_2_pcie.cmd` (rescan + `r5_check.sh`), then `claude_run.cmd`

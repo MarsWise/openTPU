@@ -514,22 +514,48 @@ class DeviceAttention:
             for n, rows in segs:
                 if n == 0:
                     raise NotImplementedError("a query row that sees no key")
-                qq = np.zeros((H, len(rows), dp), np.float32)
-                qq[:, :, :dv] = q[rows].transpose(1, 0, 2)
-                kk = np.zeros((KVH, n, dp), np.float32)
-                vv = np.zeros((KVH, n, dp), np.float32)
-                kk[:, :, :dv] = k[:n].transpose(1, 0, 2)
-                vv[:, :, :dv] = v[:n].transpose(1, 0, 2)
-                y = self.runner.run(A.sdpa, out="o", q=Input(qq.reshape(-1, dp)),
-                                    k=Input(kk.reshape(-1, dp)), v=Input(vv.reshape(-1, dp)),
-                                    o=Output((len(rows), H * dv)),
-                                    kv=Input(np.zeros(A.kv_words(KVH, n, dv, D), np.float32)),
-                                    H=H, KVH=KVH, Lq=len(rows), Lk=n, dv=dv,
-                                    scale=scale)
-                o[rows] = y
+                o[rows] = self._run(q[rows], k[:n], v[:n], H, KVH, dv, dp, scale)
                 self.cov.add("device", "attention", 2 * H * len(rows) * n * dv)
             outs.append(o)
         return torch.from_numpy(np.stack(outs)).to(query_states.dtype)
+
+    def _run(self, q, k, v, H, KVH, dv, dp, scale):
+        """o [r, H * dv] = sdpa(q [r, H, dv], k / v [n, KVH, dv]) on the device. A program longer
+        than IMEM (SmolVLA base's long prefixes on r5-m8: 111,620 instructions) runs in query-row
+        chunks (each row sees the same keys), then, at one row, in KV-head groups (each KV head
+        with its H / KVH query heads); the chunk size is remembered per shape."""
+        from .kernels import sdpa as A
+        from .runtime import Input, Output
+        D = self.runner.cfg.D
+        r, n = q.shape[0], k.shape[0]
+        steps = self.__dict__.setdefault("_steps", {})
+        key = (H, KVH, n, dv)
+        step = steps.get(key, r)
+        if step < r:
+            return np.concatenate([self._run(q[i:i + step], k, v, H, KVH, dv, dp, scale)
+                                   for i in range(0, r, step)])
+        qq = np.zeros((H, r, dp), np.float32)
+        qq[:, :, :dv] = q.transpose(1, 0, 2)
+        kk = np.zeros((KVH, n, dp), np.float32)
+        vv = np.zeros((KVH, n, dp), np.float32)
+        kk[:, :, :dv] = k.transpose(1, 0, 2)
+        vv[:, :, :dv] = v.transpose(1, 0, 2)
+        try:
+            return self.runner.run(A.sdpa, out="o", q=Input(qq.reshape(-1, dp)),
+                                   k=Input(kk.reshape(-1, dp)), v=Input(vv.reshape(-1, dp)),
+                                   o=Output((r, H * dv)),
+                                   kv=Input(np.zeros(A.kv_words(KVH, n, dv, D), np.float32)),
+                                   H=H, KVH=KVH, Lq=r, Lk=n, dv=dv, scale=scale)
+        except ProgramTooLong as e:
+            if r > 1:
+                steps[key] = max(1, min(r - 1, int(r * e.cap * 0.9) // e.n))
+                return self._run(q, k, v, H, KVH, dv, dp, scale)
+            if KVH > 1:
+                G = H // KVH
+                return np.concatenate(
+                    [self._run(q[:, g * G:(g + 1) * G], k[:, g:g + 1], v[:, g:g + 1], G, 1, dv, dp,
+                               scale).reshape(r, G * dv) for g in range(KVH)], axis=1)
+            raise
 
 
 def hf_attention(model, att: DeviceAttention, name: str = "opentpu") -> int:

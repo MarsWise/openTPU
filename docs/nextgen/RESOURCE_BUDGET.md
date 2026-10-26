@@ -244,3 +244,19 @@ ISA), **vext (21 programs: TFN x10 on tiles and edge values, VOP MAC, QST T4 == 
 on both channels. TMM at M = 1 (K 2560, N 1024), bit-exact with the ISA simulator: plain 128.1,
 PAIR 246.0, QUAD 507.2 MAC/cycle (139.5 GOPS at 137.5 MHz; M = 1 uses one column's worth, as on r4).
 `tools/firmware_contract.py --card` raised KeyError 'part' on a known entry without one (fixed).
+
+### r5-m8 run r5a on the card (2026-10-26 14:19-14:34, `claude_run_r5a.sh` at 37c8049d) -- PHYSICAL
+
+| Item | Result |
+|---|---|
+| r5_card_check | PASS: TFN x10 (+ edge values), VOP MAC (FULL / ROW / COL / in place), QST T4, TMM PAIR / QUAD == ISA; SiLU by TFN 1.17x faster than the exp2 / recip chain |
+| TMM at M = 1 | plain 127.7, PAIR 252.9, QUAD 507.7 MAC/cycle, bit-exact |
+| YOLOX-Nano graph (--strict-fpga) | card == ISA per op; 4 of 4 detections, IoU 0.87-0.99 vs float |
+| COCO-500 | plain mAP50-95 **0.2825** at **0.22 s/image** (r4 0.2821 at 0.32-0.34); --wsplit **0.2831** at 0.25 s |
+| SmolVLA tiny | card == ISA, actions rel L2 0.0205 vs float32 |
+| SmolVLA base | ProgramTooLong: sdpa 111,620 instructions (fixed after: chunked attention) |
+| BitNet 2B4T generate | 16.46 tok/s (55.8 ms/token device), coherent text; chat --strict-fpga "The capital of France is Paris.", TTFT 1.11 s |
+| vLLM | 12.06 tok/s (r4 11.15); then DeviceBusy at the reference engine (fixed after: the worker releases the card at shutdown) |
+| qual.sh | not run (no qual models on the host) |
+| selftest | every stage PASS but ecc: loadcal's tap sweep left ~9e8 counts a channel and ECC_DED (the run did not clear them; r5_2_pcie's selftest without loadcal: 0 / 0) |
+| host pytest | 41 failed, 1,162 passed, 471 skipped: 36 RTL tests without Verilator on the host (FileNotFoundError: now skipped), 2 source-pattern tests after the r5-m8 fixes (fixed), 3 host-environment ones (pass in the container) |

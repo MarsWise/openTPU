@@ -257,3 +257,31 @@ def test_programs_are_traced_once_per_distinct_call(monkeypatch):
     with torch.no_grad():
         for x in xs:
             m(x)
+
+
+def test_attention_too_long_for_imem_runs_in_row_and_head_chunks():
+    """An attention whose program does not fit IMEM (SmolVLA base on r5-m8: sdpa 111,620
+    instructions into 4096) runs in query-row chunks, and at one row in KV-head groups; every
+    piece is the same attention, so the result equals the one-program run's bit for bit."""
+    torch = pytest.importorskip("torch")
+    from opentpu import torchdev as TD
+    g = torch.Generator().manual_seed(3)
+    Lq, Lk = 12, 40
+    q, k, v = (torch.randn(1, Lq, 4, 32, generator=g), torch.randn(1, Lk, 2, 32, generator=g),
+               torch.randn(1, Lk, 2, 32, generator=g))
+    mask = torch.ones(1, Lq, Lk, dtype=torch.bool)
+    outs, runs = [], []
+    # 289 instructions in one program; 200: row chunks; 80: one row is 110, a KV head's 56
+    for imem in (1 << 20, 8 * 200, 8 * 80):
+        r = TD.Runner("isa", cfg=Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16,
+                                        DRAM_BYTES=1 << 24, IMEM_WORDS=imem))
+        try:
+            outs.append(TD.DeviceAttention(r, TD.Coverage(), 4, 2)(mask, 1, 32, q, k, v).numpy())
+        except TD.ProgramTooLong:
+            outs.append(None)
+        runs.append(r.stats["runs"])
+    assert runs[0] == 1 and outs[0] is not None
+    for o, n in zip(outs[1:], runs[1:]):
+        assert o is not None and n > 1, runs
+        assert np.array_equal(o.view(np.uint32), outs[0].view(np.uint32)), n
+    assert runs[2] > runs[1]

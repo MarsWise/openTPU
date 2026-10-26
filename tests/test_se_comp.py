@@ -12,6 +12,9 @@ from opentpu import fp32 as F
 from opentpu import rtlsim
 from opentpu import tfn as T
 
+# every test here builds the stream engine's Verilator testbench (skipped without Verilator)
+pytestmark = pytest.mark.usefixtures("have_verilator")
+
 V_EXP2, V_RECIP, V_RSQRT, V_EXP2SUB, V_LOG2 = 9, 10, 11, 14, 15
 FUNCS = [V_EXP2, V_EXP2SUB, V_RECIP, V_RSQRT, V_LOG2]
 

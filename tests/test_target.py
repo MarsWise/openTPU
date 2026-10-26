@@ -695,7 +695,7 @@ def test_the_real_150_mhz_paths_start_at_flip_flops():
     assert re.search(r"r_ben\[p\] = \(.*off\[p\]\) \? '0 : rq_b\[p\];", sl)
     for f, regs in (("rtl/dma/otpu_dma.sv", ["t_rbv <= t_rben_c", "t_rb_q <= adv_nx ? (adv ? t_rben_c : t_rbv) : '0;"]),
                     ("rtl/vpu/otpu_vpu.sv", ["ta_ben <= ta_ben_c", "tb_bad <= tb_bad_c"]),
-                    ("rtl/vpu/otpu_quant.sv", ["t_rben <= t_rben_c", "t_rbad2 <= t_rbad2_c"])):
+                    ("rtl/vpu/otpu_quant.sv", ["t_rben_q <= t_rben_c", "t_rbad2 <= t_rbad2_c"])):
         u = src(f)
         assert "otpu_tmem_breq #(" in u and all(r in u for r in regs), f
     assert '(* keep = "true" *) logic [NRP-1:0][LANES-1:0] rpvb;' in tm

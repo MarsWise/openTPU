@@ -211,7 +211,13 @@ class OpenTPUWorker(WorkerBase):
         return
 
     def shutdown(self) -> None:
-        self.eng = None
+        """Releases the card now (its lock with it): vLLM's in-process engine core can keep the
+        worker referenced after shutdown, and a later user of the card in the same process
+        (tools/vllm_smoke.py's reference engine) then met DeviceBusy (r4 and r5-m8 runs)."""
+        eng, self.eng = self.eng, None
+        close = getattr(getattr(eng, "backend", None), "close", None)
+        if callable(close):
+            close()
 
     # ---- the KV accounting: the slots' positions as vLLM blocks
     def _attn_layers(self) -> list[str]:

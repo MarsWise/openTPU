@@ -329,7 +329,7 @@ def test_rsqrt_error_bound():
     assert np.array_equal(F.rsqrt(p), (1 / np.sqrt(p.astype(np.float64))).astype(np.float32))
 
 
-def test_rtl_fp_bit_exact(tmp_path):
+def test_rtl_fp_bit_exact(have_verilator, tmp_path):
     vec = _vectors()
     f = tmp_path / "vec.txt"
     np.savetxt(f, vec, fmt="%08x")
