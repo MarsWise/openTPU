@@ -87,7 +87,8 @@ def _down_cols(w_down, j, C: int):
     if any((q.data - p[0].data).static() != i * dd or (q.scale - p[0].scale).static() != i * ds
            for i, q in enumerate(p)):
         raise ol.CompileError("W_down's parts are not equally spaced")
-    return replace(p[0], data=p[0].data + j * dd, scale=p[0].scale + j * ds)
+    return replace(p[0], data=p[0].data + j * dd, scale=p[0].scale + j * ds,
+                   hsigns=None if p[0].hsigns is None else p[0].hsigns + j * ds)
 
 
 def _swiglu_down_loop(xs, w_gate, w_up, w_down, C: int, act=silu):

@@ -1043,12 +1043,12 @@ def main(argv=None):
                          "(per-position inputs, sampling the device's loop does not take): "
                          "print where each stage runs (opentpu/llm/placement.py)")
     ap.add_argument("--wformat", default=FM.AUTO,
-                    choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", FM.MIX],
+                    choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", "ternary_gsc", FM.MIX],
                     help="weight format of the layers (docs/quant.md; fp4 needs a bitstream "
                          "with 4-bit MM support): auto (default) is the model's recommended "
                          "mix of int8 and fp4 where it has one (mix, docs/formats.md), else "
                          "int8")
-    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4"],
+    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4", "ternary_gsc"],
                     help="weight format of the LM head (default: --wformat)")
     ap.add_argument("--no-prog-cache", action="store_true",
                     help="compile the decode loop's bucket programs in every process (by "

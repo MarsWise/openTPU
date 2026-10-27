@@ -33,6 +33,7 @@ F_DUP = 0x8                     # QACT: also write the rows to ACT rows rows..2*
 F_DUP4 = 0x10                   # QACT, with F_DUP: and to rows 2*rows..4*rows-1 (TMM QUAD)
 F_QUAD = 0x10                   # TMM (its weight-format field's bit4; Config.TQUAD): the K-split
 #                                 by four, a ternary chunk's four blocks in one advance
+F_GSC = 0x20                    # TMM: fp32 scale per row and D-element K block (Config.TGSC)
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
@@ -428,7 +429,8 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
 
 
 def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
-        ascale=None, rsc=False, pair=False, quad=False, ra=0, rb=0, rc=0, comment=""):
+        ascale=None, rsc=False, pair=False, quad=False, ra=0, rb=0, rc=0, comment="",
+        gsc=False):
     """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
 
     Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
@@ -448,13 +450,17 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
            f"TMM: n {n}, kb {kb}, m {m}, ab {ab}, ors {ors}")
     _check(0 <= rs < (1 << 32) and 0 <= srs < (1 << 32), f"TMM: rs {rs}, srs {srs}")
     _check(not rsc or not unit, "TMM: RSC is not used with UNIT")
-    _check(unit or rsc, "TMM: non-unit weights require row scales (RSC)")
+    _check(unit or rsc or gsc, "TMM: non-unit weights require row scales (RSC)")
+    if gsc:
+        _check(not (unit or rsc or pair or quad or ascale is not None),
+               "TMM GSC: UNIT, RSC, PAIR, QUAD and ASCALE are not supported")
+        _check(srs >= 4 * kb and srs % 4 == 0, "TMM GSC: scale row must hold KB fp32 words")
     if ascale is not None:
         _check(unit and acc, "TMM: ASCALE needs UNIT and ACC")
         ssa = ascale
     fl = (F_UNIT if unit else 0) | (F_ACC if acc else 0) | (F_RMAX if rmax else 0) | \
         (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0) | (F_PAIR if pair else 0) | \
-        (F_QUAD if quad else 0)
+        (F_QUAD if quad else 0) | (F_GSC if gsc else 0)
     _check(not (pair and quad), "TMM: PAIR and QUAD are exclusive")
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
                  w=_w(sa, ssa, out, n | (kb << 16), rs,

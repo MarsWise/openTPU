@@ -99,7 +99,13 @@ class Spec:
     @staticmethod
     def from_hf(model_dir) -> "Spec":
         c = json.loads((Path(model_dir) / "config.json").read_text())
-        rp = rope_parameters(c, model_dir)          # (Qwen3's YaRN: not supported)
+        rp = rope_parameters(c, model_dir, ("default", "yarn"))
+        theta = rp.get("rope_theta") or c.get("rope_theta") or 10000.0
+        extra = {}
+        if rp.get("rope_type", rp.get("type")) == "yarn":
+            from .yarn import parameters
+            dim = c.get("head_dim") or c["hidden_size"] // c["num_attention_heads"]
+            extra = parameters(c, rp, dim, theta)
         if c.get("use_sliding_window"):
             raise ValueError(f"{model_dir}: sliding-window attention is not supported")
         if c.get("attention_bias"):
@@ -112,10 +118,11 @@ class Spec:
                     n_q=c["num_attention_heads"], n_kv=c["num_key_value_heads"],
                     head_dim=c.get("head_dim") or c["hidden_size"] // c["num_attention_heads"],
                     ffn=c["intermediate_size"], vocab=c["vocab_size"], eps=c["rms_norm_eps"],
-                    theta=rp.get("rope_theta") or c.get("rope_theta") or 10000.0,
+                    theta=theta,
                     tied=c.get("tie_word_embeddings", True),
                     bos=c.get("bos_token_id", 151643),
-                    eos=tuple(eos) if isinstance(eos, list) else (eos,), mix=FM.mix_for(c))
+                    eos=tuple(eos) if isinstance(eos, list) else (eos,), mix=FM.mix_for(c),
+                    **extra)
 
     def check(self, cfg: Config) -> None:
         S, D = cfg.S, cfg.D
@@ -241,6 +248,16 @@ def load_weights(model_dir, mtp: bool = False) -> Weights:
     `mtp` (Qwen3.5's drafter,
     opentpu/llm/mtp.py). Gemma 4: gemma4.load_weights (its PLE table read by rows)."""
     cfg = Path(model_dir) / "config.json"
+    if cfg.exists() and json.loads(cfg.read_text()).get("model_type") == "prism_hadamard_qwen35":
+        if mtp:
+            raise ValueError("Bonsai 2 MTP has not been implemented")
+        from .bonsai2 import RotatedWeights
+        return RotatedWeights(model_dir)
+    if cfg.exists() and isinstance(json.loads(cfg.read_text()).get("quantization"), dict):
+        if mtp:
+            raise ValueError("MLX 1-bit checkpoint has no MTP loader")
+        from .mlx_weights import MLXWeights
+        return MLXWeights(model_dir)
     if cfg.exists() and json.loads(cfg.read_text()).get("model_type") in ("gemma4",
                                                                           "gemma4_text"):
         from .gemma4 import load_weights as gemma4_weights
@@ -480,7 +497,8 @@ def _lookup_build(put, S: int, W: dict, spec, cap: int, lk: dict) -> None:
     z = np.concatenate([np.full(cap, np.inf, np.float32), np.full(lk["block"], -np.inf,
                                                                   np.float32)])
     if "embed" in lk:
-        e = F.ftz(np.asarray(W["model.embed_tokens.weight"], np.float32))
+        e = F.ftz(W.embedding_table() if hasattr(W, "embedding_table") else
+                  np.asarray(W["model.embed_tokens.weight"], np.float32))
     elif lk["own"]:
         tab = W["model.embed_tokens.weight"]
         eq, es = Q.quantize_mxu(tab, "int8", lk["D"])
@@ -1426,7 +1444,13 @@ def _mlp(x, lw, spec: Spec):
         return _bitnet_mlp(x, lw, spec)
     sid = ol.program_id()
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
-    y = swiglu_down(xs, lw.wg, lw.wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
+    wg, wu = lw.wg, lw.wu
+    if getattr(spec, "native_bonsai", False):
+        from dataclasses import replace
+        from ..kernels.hadamard import stationary
+        xs = stationary(xs, wg)
+        wg, wu = (replace(w, hsigns=None, hblock=0) for w in (wg, wu))
+    y = swiglu_down(xs, wg, wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
     h_loc = lw.wd.shape[0]
     mine = slice(sid * h_loc, (sid + 1) * h_loc)
     return ol.all_gather(x[:, mine] + y)
@@ -2280,6 +2304,10 @@ class Engine:
                  snapshots: int = 0, batch_area: bool = False, tile_runs: bool | None = None,
                  tile_rows: int | None = None):
         from . import prefill as PF
+        if getattr(spec, "native_bonsai", False):
+            # Initial native firmware path: one token per run. It preserves full Hadamard
+            # blocks and uses the verified step decoder for prompt tokens as well.
+            rows, prompt_runs, tile_runs = 1, False, False
         self.spec, self.cap, self.block = spec, cap, block
         self.prog_cache = PC.enabled() if prog_cache is None else bool(prog_cache)
         self.prompt_runs = prompt_runs

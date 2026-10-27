@@ -574,7 +574,8 @@ class SimTransport:
         p.setdefault("ARCH_HASH", "32'h%08x" % arch_hash(build_config(
             t, MCOLS=p["MCOLS"], LANES=p["LANES"], ACT_ROWS=p["ACT_ROWS"],
             TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0),
-            TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0))))
+            TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0),
+            TGSC=p.get("TGSC", 0))))
         exe = rtlsim.build("tb_board", srcs, p)
         with simtmp.tempdir("otpu_board_") as d:
             for c in range(len(self.ch)):
@@ -1060,6 +1061,12 @@ class Board:
             else [np.asarray(words, "<u4")]
         if not self.gather:
             check_no_gather(progs)
+        from opentpu import isa as I
+        for words_ in progs:
+            opflags = words_[:len(words_) // 8 * 8:8]
+            if np.any(((opflags & 0xff) == I.TMM) & ((opflags >> 24) & I.F_GSC != 0)):
+                if not (self._info or self.info()).get("caps2", {}).get("tgsc", False):
+                    raise ConfigMismatch("TMM GSC requires new firmware with CAPS2 bit4 (TGSC)")
         waitc = self.waitc
         if waitc:
             if entries is None:
@@ -1348,12 +1355,14 @@ def device_config(info: dict, **kw):
     tpair = pair and bool((info.get("caps2") or {}).get("tpair"))
     tquad = pair and bool((info.get("caps2") or {}).get("tquad"))
     tfn = dstep and bool((info.get("caps2") or {}).get("tfn"))
+    tgsc = bool((info.get("caps2") or {}).get("tgsc"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
                           ("STREAM", stream, "the stream engine (CAPS bit26)"),
                           ("TPAIR", tpair, "TMM PAIR (CAPS2 bit1, with CAPS bit5)"),
                           ("TQUAD", tquad, "TMM QUAD (CAPS2 bit2, with CAPS bit5)"),
-                          ("TFN", tfn, "the table functions (CAPS2 bit3, with CAPS bit6)")):
+                          ("TFN", tfn, "the table functions (CAPS2 bit3, with CAPS bit6)"),
+                          ("TGSC", tgsc, "ternary group scales (CAPS2 bit4)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
@@ -1361,7 +1370,7 @@ def device_config(info: dict, **kw):
                                  f"bitstream)")
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
     dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
-           "TQUAD": tquad, "TFN": tfn,
+           "TQUAD": tquad, "TFN": tfn, "TGSC": tgsc,
            "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
@@ -1435,6 +1444,7 @@ def check_hash(info: dict, cfg=None) -> None:
                            and bool((info.get("caps2") or {}).get("tquad")),
                            TFN=bool(caps.get("dstep"))
                            and bool((info.get("caps2") or {}).get("tfn")),
+                           TGSC=bool((info.get("caps2") or {}).get("tgsc")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

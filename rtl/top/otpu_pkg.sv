@@ -314,7 +314,8 @@ package otpu_pkg;
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
           if (c.op == OP_TMM) begin
-            if (c.flags[7]) f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + 32'd4);
+            if (c.flags[7] || c.flags[5])
+              f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[5] ? (kb << 2) : 32'd4));
           end else if (!c.flags[0])
             f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[7] ? 32'd4 :
                          (c.flags[5:4] == 2'd0) ? 32'd4 + 32'(c.w4[31:24]) + kb :

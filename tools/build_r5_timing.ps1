@@ -29,6 +29,7 @@ param(
     [switch]$NoFence,
     [string]$CoreMhz = '',
     [int]$Threads = 8,
+    [switch]$TernaryGroupScales,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
@@ -40,12 +41,14 @@ if (-not $OutDir) {
     $OutDir = Join-Path $repoRoot $(if ($Variant -eq 'm8' -and $CoreMhz) { "build\vivado-r5-m8-$CoreMhz-$revision" }
                                     elseif ($Variant -eq 'm8') { "build\vivado-r5-timing-$revision" }
                                     else { "build\vivado-r5-$Variant-$revision" })
+    if ($TernaryGroupScales) { $OutDir += '-tgsc' }
 }
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 if ($Jobs -lt 1) { throw 'Jobs must be positive' }
 if (-not (Test-Path -LiteralPath $Vivado)) { throw "Vivado not found: $Vivado" }
 $buildEnv = @{
     OTPU_SEQ_WC_GEN = '1'; OTPU_TPAIR_GEN = '1'; OTPU_TQUAD_GEN = '1'; OTPU_TFN_GEN = '1'
+    OTPU_TGSC_GEN = $(if ($TernaryGroupScales) { '1' } else { '0' })
     TRACE_DEPTH = '16384'; COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'; OTPU_SYS_MARGIN = ''
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
@@ -84,6 +87,11 @@ if ($Variant -eq 'm4') {
                    'OTPU_POSTROUTE_PHYSOPT_DIRECTIVE') {
         $buildEnv[$k] = ''
     }
+}
+if ($TernaryGroupScales) {
+    if ($Variant -ne 'm8') { throw 'The native Bonsai 2 recipe is m8' }
+    $v.hash = (& python -c "import sys; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(configuration()):08x}')").Trim()
+    if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate TGSC CFG_HASH' }
 }
 Write-Output ("r5 timing: revision=$revision mode=$Mode variant=$Variant MCOLS=$($v.mcols) " +
               "core=$($v.mhz)MHz clk2x=$($v.clk2x)MHz hash=$($v.hash)")

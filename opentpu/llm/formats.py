@@ -53,6 +53,8 @@ def auto(spec, wformat: str) -> str:
     other wformat is itself."""
     if wformat != AUTO:
         return wformat
+    if getattr(spec, "native_bonsai", False):
+        return "ternary_gsc"
     return MIX if getattr(spec, "mix", "") else "int8"
 
 

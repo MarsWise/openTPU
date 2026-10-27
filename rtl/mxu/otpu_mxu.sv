@@ -42,6 +42,108 @@
 // finishes (and drains) the older one. The issuer yields DRAM ports to the DMA and QST
 // (a_gnt/b_gnt). A row's first advance pops only once all of the row's chunks and scales are in
 // the FIFOs, so a row never stalls in its middle and the array needs no clock enable.
+// Serial GSC adapter. Each D-element block uses the existing integer ternary datapath and
+// fp32 epilogue, then ACC adds its scaled result in K order. No weight scale is rounded to
+// an MX multiplier. This first implementation rereads each packed chunk for its four groups;
+// it preserves the packed storage size but does not promise PAIR/QUAD throughput.
+// Legacy commands retain the MXU's two-command queue. A GSC command starts only after it
+// drains, holds one external dependency entry until its last group, and forwards RMAX last.
+module otpu_tmm_gsc
+  import otpu_pkg::*;
+#(parameter int D = 128) (
+  input logic clk, rst, start, go,
+  input cmd_t cmd,
+  output logic rdy, done,
+  output logic m_start, m_go,
+  output cmd_t m_cmd,
+  input logic m_rdy, m_done
+);
+  typedef enum logic [2:0] {IDLE, ARM, ISSUE, RELEASE, RUN} state_t;
+  state_t state;
+  cmd_t held;
+  logic [7:0] k;
+  logic [1:0] pending, unreleased;
+  logic released;
+  wire gsc = cmd.op == OP_TMM && cmd.flags[5];
+  wire last_k = k + 8'd1 == held.w4[23:16];
+  always_comb begin
+    // Unit ready cannot depend on cmd: the sequencer registers cmd after observing ready.
+    // Accept GSC into held while a legacy command drains; forward its release/completion.
+    rdy = state == IDLE && m_rdy;
+    done = pending != 0 ? m_done : state == RUN && m_done && last_k;
+    m_start = state == IDLE ? start && !gsc : state == ISSUE && m_rdy;
+    m_go = state == RELEASE || (go && unreleased != 0) ||
+           (state == IDLE && go && !(start && gsc));
+    m_cmd = cmd;
+    if (state != IDLE) begin
+      m_cmd = held;
+      m_cmd.flags = 8'h80;                     // RSC, scale of this group alone
+      m_cmd.flags[1] = held.flags[1] || k != 0; // first term: original ACC, later terms: ACC
+      m_cmd.flags[2] = held.flags[2] && last_k;
+      m_cmd.w1 = held.w1 + (32'(k >> 2) * D);
+      m_cmd.w2 = held.w2 + (32'(k) << 2);
+      m_cmd.w4 = {6'd0, k[1:0], 8'd1, held.w4[15:0]};
+      m_cmd.w6[31:24] = held.w6[31:24] + k;
+    end
+  end
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      state <= IDLE;
+      pending <= 0;
+      unreleased <= 0;
+      released <= 0;
+      held <= '0;
+      k <= 0;
+    end else begin
+      if (state == IDLE || state == ARM) begin
+        case ({state == IDLE && start && !gsc, m_done && pending != 0})
+          2'b10: pending <= pending + 2'd1;
+          2'b01: pending <= pending - 2'd1;
+          default: ;
+        endcase
+        case ({state == IDLE && start && !gsc,
+               go && (unreleased != 0 || (state == IDLE && start && !gsc))})
+          2'b10: unreleased <= unreleased + 2'd1;
+          2'b01: unreleased <= unreleased - 2'd1;
+          default: ;
+        endcase
+      end
+      case (state)
+        IDLE: if (start && gsc) begin
+          held <= cmd;
+          k <= 0;
+          released <= go && unreleased == 0;
+          state <= ARM;
+        end
+        ARM: begin
+          if (go && unreleased == 0) released <= 1'b1;
+          if (pending == 0 && (released || (go && unreleased == 0))) state <= ISSUE;
+        end
+        ISSUE: if (m_rdy) state <= RELEASE;
+        RELEASE: state <= RUN;
+        RUN: if (m_done) begin
+          if (last_k) state <= IDLE;
+          else begin k <= k + 8'd1; state <= ISSUE; end
+        end
+        default: state <= IDLE;
+      endcase
+    end
+  end
+`ifndef SYNTHESIS
+  always @(posedge clk) if (!rst) begin
+    if (start && !rdy) $fatal(1, "TMM GSC: start without ready");
+    if (start && gsc && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
+        cmd.w4[31:24] != 0 || cmd.w4[23:16] == 0 || cmd.w4[15:0] == 0 ||
+        cmd.w7 < (32'(cmd.w4[23:16]) << 2) || cmd.w7[1:0] != 0))
+      $fatal(1, "TMM GSC: invalid flags, dimensions or scale stride");
+    if (state != IDLE && go && state != ARM)
+      $fatal(1, "TMM GSC: unexpected release while expanding a command");
+    if (state == IDLE && m_done && pending == 0)
+      $fatal(1, "TMM GSC: completion without a legacy command");
+  end
+`endif
+endmodule
+
 module otpu_mxu
   import otpu_pkg::*;
   import otpu_fp::*;
@@ -161,6 +263,9 @@ module otpu_mxu
       $fatal(1, "otpu_mxu: invalid TMM flags or D alignment");
     if (cmd_quad && 4 * int'(cmd.w6[23:16]) > MCOLS)
       $fatal(1, "otpu_mxu: TMM QUAD needs 4*M <= MCOLS");
+    if (cmd_ternary && cmd.w4[31:24] != 0 &&
+        (cmd.w4[31:26] != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
+      $fatal(1, "otpu_mxu: quarter select requires one unpaired block");
     if (int'(cmd.w6[23:16]) > ROWS) $fatal(1, "otpu_mxu: M %0d > ROWS %0d", cmd.w6[23:16], ROWS);
     if (int'(cmd.w6[23:16]) > MCOLS &&
         (cmd_ternary ? (int'(cmd.w4[23:16]) + 3) / 4 :
@@ -222,6 +327,7 @@ module otpu_mxu
     logic [MCOLS-1:0] hi;              // PAIR: the columns that take the odd blocks (j >= M)
     logic [MCOLS-1:0][1:0] qs;         // the block each column reads: PAIR {0, hi}; QUAD j / M
     logic [1:0]       kr;              // QUAD: KB mod 4, the last advance's blocks (0: four)
+    logic [1:0]       quarter;         // internal GSC subcommand: one of a chunk's four blocks
     logic [31:0]      mxo;             // RMAX output base: out + M * ors (no multiply later)
     logic [7:0]       M, ab;
     logic [MW-1:0]    run;             // drain lanes per cycle without a bank conflict
@@ -254,6 +360,7 @@ module otpu_mxu
     cmd_e.ternary = cmd_ternary;
     cmd_e.quad  = cmd_quad;
     cmd_e.kr    = cmd_KB8[1:0];
+    cmd_e.quarter = cmd_ternary ? cmd.w4[25:24] : 2'b00;
     for (int j = 0; j < MCOLS; j++) begin
       cmd_e.hi[j] = cmd_pair && 32'(j) >= 32'(cmd.w6[23:16]);
       cmd_e.qs[j] = !cmd_quad ? {1'b0, cmd_e.hi[j]} :
@@ -711,7 +818,7 @@ module otpu_mxu
       m0.first <= (ck == 16'd0);
       m0.h <= c_w4 && !c_pair && ck[0];
       m0.o <= c_pair && !(last_k && c_KB[0]);
-      m0.ts <= c_pair ? {ck[0], 1'b0} : ck[1:0];     // TMM PAIR: the low of the two
+      m0.ts <= c_pair ? {ck[0], 1'b0} : ck[1:0] + pop_e.quarter;
       m0.qd <= c_quad;
       m0.ov <= !(last_k && pop_e.kr != 2'd0) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
@@ -847,7 +954,7 @@ module otpu_mxu
     wq_qd <= pop && c_quad;
     wq_tn <= pop && c_ternary;
     wq_h <= pop && c_w4 && !c_pair && ck[0];
-    wq_ts <= !pop ? 2'b00 : c_pair ? {ck[0], 1'b0} : ck[1:0];
+    wq_ts <= !pop ? 2'b00 : c_pair ? {ck[0], 1'b0} : ck[1:0] + pop_e.quarter;
     wq_wf <= c_wf;
     wq_pr <= c_pair;
   end

@@ -69,6 +69,8 @@ class Safetensors:
             return u.view(np.float32).reshape(m["shape"])
         if dt == "F32":
             return np.asarray(raw).view("<f4").reshape(m["shape"])
+        if dt in ("F16", "U32"):
+            return np.asarray(raw).view("<f2" if dt == "F16" else "<u4").reshape(m["shape"])
         raise ValueError(f"{name}: dtype {dt}")
 
 

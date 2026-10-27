@@ -31,6 +31,7 @@ class Config:
     #                          two K blocks an advance (the K-split by two; CAPS2 bit1)
     TQUAD: bool = False      # TMM QUAD (QACT DUP4): ternary MMs of M <= MCOLS/4 rows four K
     #                          blocks an advance (the K-split by four; CAPS2 bit2)
+    TGSC: bool = False       # TMM: fp32 scale per row and D-element block (CAPS2 bit4)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -80,6 +81,7 @@ def board_config(**kw) -> Config:
                 PAIR=bool(int(env.get("OTPU_PAIR", 0))),
                 TPAIR=bool(int(env.get("OTPU_TPAIR", 0))),
                 TQUAD=bool(int(env.get("OTPU_TQUAD", 0))),
+                TGSC=bool(int(env.get("OTPU_TGSC", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -567,8 +569,12 @@ class Slice:
         unit, accf = bool(ins.flags & I.F_UNIT), bool(ins.flags & I.F_ACC)
         rsc, pair = bool(ins.flags & I.F_RSC), bool(ins.flags & I.F_PAIR)
         quad = bool(ins.flags & I.F_QUAD)
-        if ins.flags & (2 << I.WF_SHIFT):
-            raise SimError("TMM: the MM weight-format field is reserved (bit4: QUAD)")
+        gsc = bool(ins.flags & I.F_GSC)
+        quarter = w[3] >> 24
+        if quarter and (KB != 1 or quarter > 3 or pair or quad or gsc):
+            raise SimError("TMM: a quarter selects one block of one packed chunk")
+        if gsc and (not cfg.TGSC or unit or rsc or pair or quad or ins.flags & I.F_ASCALE):
+            raise SimError("TMM GSC: needs Config.TGSC and no UNIT/RSC/PAIR/QUAD/ASCALE")
         if pair and quad:
             raise SimError("TMM: PAIR and QUAD are exclusive")
         if pair and 2 * M > cfg.MCOLS:
@@ -581,7 +587,7 @@ class Slice:
             raise SimError("TMM: M, D or ACT RAM range out of bounds")
         if M > cfg.MCOLS and ins.flags & (I.F_RMAX | I.F_ASCALE):
             raise SimError("TMM: RMAX and ASCALE need M <= MCOLS")
-        if rsc == unit:
+        if not gsc and rsc == unit:
             raise SimError("TMM: select exactly one of UNIT or RSC")
         if ins.flags & I.F_ASCALE and not (unit and accf):
             raise SimError("TMM: ASCALE needs UNIT and ACC")
@@ -589,8 +595,9 @@ class Slice:
         if sa % D or rs % D or rs < row_bytes or \
                 sa + (N - 1) * rs + row_bytes > cfg.DRAM_BYTES:
             raise SimError("TMM: packed rows must be D-byte aligned and in range")
-        if not unit and (ssa % 4 or srs % 4 or srs < 4 or
-                         ssa + (N - 1) * srs + 4 > cfg.DRAM_BYTES):
+        scale_bytes = 4 * KB if gsc else 4
+        if not unit and (ssa % 4 or srs % 4 or srs < scale_bytes or
+                         ssa + (N - 1) * srs + scale_bytes > cfg.DRAM_BYTES):
             raise SimError("TMM: row scales must be word-aligned and in range")
         if ors < N:
             raise SimError("TMM: output row stride is smaller than N")
@@ -601,8 +608,10 @@ class Slice:
 
         sw = np.ones(N, dtype=np.float32)
         if not unit:
-            sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(4)[None, :]
-            sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32)
+            sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(scale_bytes)[None, :]
+            sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32).reshape(N, -1)
+            if not gsc:
+                sw = sw[:, 0]
         # the ACT row of each (output row, block): PAIR takes the odd blocks from row j + M,
         # QUAD block 4c + q from row j + q M
         R = 4 * M if quad else 2 * M if pair else M
@@ -618,12 +627,16 @@ class Slice:
         da = self.adoff[:R, ab:ab + KB][rsel, kk[None, :]]
         group = D // 4
         acc = np.zeros((M, N), dtype=np.int64)
+        y_gsc = self.tget(idx) if accf else None
         for k in range(KB):
+            if gsc:
+                acc.fill(0)
             codes = np.empty((N, D), dtype=np.uint8)
             for lane in range(D):
-                byte = self.dram[sa + np.arange(N) * rs + (k // 4) * D +
-                                 (lane + (k % 4) * D) // 4]
-                codes[:, lane] = (byte >> (2 * ((lane + (k % 4) * D) % 4))) & 0b11
+                wk = k + quarter
+                byte = self.dram[sa + np.arange(N) * rs + (wk // 4) * D +
+                                 (lane + (wk % 4) * D) // 4]
+                codes[:, lane] = (byte >> (2 * ((lane + (wk % 4) * D) % 4))) & 0b11
             if np.any(codes == 0b11):
                 raise SimError("TMM: reserved ternary code 11")
             weights = np.where(codes == 1, 1, np.where(codes == 2, -1, 0)).astype(np.int64)
@@ -634,6 +647,15 @@ class Slice:
                 dots = act[:, k, lo:hi].astype(np.int64) @ weights[:, lo:hi].T
                 row_sh = 11 - da[:, k, g].astype(np.int64)
                 acc += np.where(row_sh[:, None] >= 0, dots << np.maximum(row_sh[:, None], 0), 0)
+            if gsc:
+                part = F.mul(F.mul(F.i2f(acc), sw[None, :, k]),
+                             F.mul(act_scales[:, k, None], np.float32(2.0 ** -11)))
+                y_gsc = part if y_gsc is None else F.add(y_gsc, part)
+        if gsc:
+            self.tput(idx, y_gsc)
+            if ins.flags & I.F_RMAX:
+                self.tput(out + M * ors + np.arange(M), F.chain_max(y_gsc))
+            return
         y = F.mul(F.mul(F.i2f(acc), sw[None, :]),
                   F.mul(act_scales[:, 0, None], np.float32(2.0 ** -11)))
         if ins.flags & I.F_ASCALE:

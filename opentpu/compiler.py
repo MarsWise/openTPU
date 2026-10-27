@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -312,6 +312,9 @@ class QTensor:
     k0: int = 0
     rsc: bool = False
     ternary: bool = False
+    gsc: bool = False
+    hsigns: Affine | None = None
+    hblock: int = 0
 
     @staticmethod
     def weight(data, scale, n: int, k: int, fmt: str, D: int, **kw) -> "QTensor":
@@ -319,6 +322,9 @@ class QTensor:
         "nvfp4", opentpu/quant.py quantize_mxu's rows): element rows row_bytes apart, scale rows
         scale_bytes apart."""
         from . import quant as Q
+        if fmt == Q.TERNARY_GSC:
+            w = QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
+            return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
         if fmt == Q.TERNARY:                    # TMM's packed rows with RSC row scales
             return QTensor.ternary_weight(data, scale, n, k, D, **kw)
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), Q.row_bytes(k, fmt, D),
@@ -326,7 +332,7 @@ class QTensor:
 
     @staticmethod
     def ternary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
-                       srs: int = 4) -> "QTensor":
+                       srs: int = 4, gsc: bool = False) -> "QTensor":
         """Descriptor for TMM's low-pair-first packed ternary rows and optional row scales."""
         if n <= 0 or k <= 0 or k % D or D % 4:
             raise CompileError(f"ternary weight shape ({n}, {k}) needs positive K divisible by "
@@ -338,9 +344,11 @@ class QTensor:
                                f"bytes and be D={D}-byte aligned")
         if scale is not None and (srs % 4 or srs < 4):
             raise CompileError(f"ternary scale stride {srs} must be a multiple of 4 and >= 4")
+        if gsc and (D != 128 or scale is None or srs < 4 * k // D):
+            raise CompileError("ternary GSC needs D=128 and a fp32 scale per K block")
         return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
                        (n, k), stride, 0 if scale is None else srs, D,
-                       wf=I.W8, rsc=scale is not None, ternary=True)
+                       wf=I.W8, rsc=scale is not None and not gsc, ternary=True, gsc=gsc)
 
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
@@ -389,15 +397,19 @@ class QTensor:
         if self.scale is not None:
             # the rows' scale rows stay where they are (each starts with its Sw): a column
             # slice starts at block k0 of them, an immediate of the MM
-            if not c0.is_static and not self.rsc:
+            if not c0.is_static and not (self.rsc or self.gsc):
                 raise CompileError(f"a column slice of a scaled matrix at a run-time or "
                                    f"loop-dependent column ({c0}): its first block is MM's k0, "
                                    f"an immediate; store the matrix in column parts")
             scale = self.scale + r0 * self.srs
-            if not self.rsc:
+            if self.gsc:
+                scale = scale + c0.div_exact(self.D) * 4
+            elif not self.rsc:
                 k0 += c0.div_exact(self.D).static()
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
-                       rsc=self.rsc, ternary=self.ternary)
+                       rsc=self.rsc, ternary=self.ternary, gsc=self.gsc,
+                       hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
+                       hblock=self.hblock)
 
 
 VT_TILE = 256          # V^T cache tile (tokens): the attention block (qwen3.ATTN_BLOCK)
@@ -1636,7 +1648,9 @@ class Builder:
             raise CompileError(f"QACT of {KB} blocks: at most {QACT_KB_MAX} (its field); quantize "
                                f"the operand in ranges")
         src, rs, cs, rsc = x.base, (x.rs if len(x.shape) == 2 else x.cols), None, None
-        fused = self.fuse_cscale(x) if temp and rscale is None and cscale is None else None
+        # Native Hadamard projections need the original fp32 tile after QACT too. The scale
+        # fusion removes its producing multiply; preserve it on a TGSC configuration.
+        fused = self.fuse_cscale(x) if temp and not self.cfg.TGSC and rscale is None and cscale is None else None
         if fused is not None:
             src, rs, cs, rsc = fused
         if rscale is not None or cscale is not None:
@@ -1957,6 +1971,12 @@ class Builder:
             raise CompileError("dot(a, w): w must be a streamed QTensor descriptor")
         if acc is not None and out is not None:
             raise CompileError("dot: give either acc= (accumulate) or out= (overwrite)")
+        if w.hsigns is not None:
+            from .kernels.hadamard import hadamard
+            source = a.src if isinstance(a, Stationary) else a
+            self.check_live(source)
+            signs = self.load(Tensor(w.hsigns, (w.shape[1],), (1,)))
+            a = hadamard(source, signs, w.hblock)
         if acc_scale is not None:
             if acc is None or w.scale is not None:
                 raise CompileError("dot(acc_scale=...) needs acc= and an unscaled stream (V^T)")
@@ -1997,7 +2017,9 @@ class Builder:
             raise CompileError("dot(rowmax=True) needs M <= MCOLS and an output tile from "
                                "ol.empty/zeros/full (they reserve the row-max area)")
         unit = w.scale is None
-        if w.ternary and (w.D != self.cfg.D or (not unit and not w.rsc)):
+        if w.gsc and not self.cfg.TGSC:
+            raise CompileError("dot: ternary group scales require Config.TGSC / new firmware")
+        if w.ternary and (w.D != self.cfg.D or (not unit and not (w.rsc or w.gsc))):
             raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows
         # and an even first block
@@ -2028,11 +2050,12 @@ class Builder:
             m0 = 0
             for ab, mc in st.chunks:
                 if w.ternary:
-                    tquad = st.quad and getattr(self.cfg, "TQUAD", False)
-                    tpair = not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
-                    ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa,
+                    tquad = not w.gsc and st.quad and getattr(self.cfg, "TQUAD", False)
+                    tpair = not w.gsc and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
+                    ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa + (4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
-                                w.srs, unit=unit, rsc=not unit, pair=tpair, quad=tquad,
+                                w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc,
+                                pair=tpair, quad=tquad,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,

@@ -191,8 +191,8 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
             row_bytes = ((kb + 3) // 4) * D if op == I.TMM else kb * D
             rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
             if op == I.TMM:
-                if fl & I.F_RSC:
-                    rd.append(_mk(SP_DRAM, w[1], p1 + 4))
+                if fl & (I.F_RSC | I.F_GSC):
+                    rd.append(_mk(SP_DRAM, w[1], p1 + (4 * kb if fl & I.F_GSC else 4)))
             elif not fl & I.F_UNIT:
                 # a scale row's bytes up to block k0 + KB's (MX, docs/isa.md "Weight formats"):
                 # RSC Sw; int8x Sw and a byte a block; NVFP4 Sw, three reserved words and 8

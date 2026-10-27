@@ -16,7 +16,9 @@ MODELS = {"qwen3": "Qwen3-0.6B", "lfm2": "LFM2.5-230M", "qwen35": "Qwen3.5-0.8B"
           "qwen35-2b": "Qwen3.5-2B", "qwen35-4b": "Qwen3.5-4B", "gemma4": "gemma-4-E2B-it",
           "gemma4-e4b": "gemma-4-E4B-it", "lfm2-8b": "LFM2.5-8B-A1B",
           "qwen35-35b": "Qwen3.5-35B-A3B", "gemma4-26b": "gemma-4-26B-A4B-it",
-          "minicpmv-35b": "MiniCPM-V-4.7-35B-A3B"}
+          "minicpmv-35b": "MiniCPM-V-4.7-35B-A3B",
+          "bonsai4b": "Ternary-Bonsai-2-4B-mlx-2bit",
+          "bonsai2-4b": "Ternary-Bonsai-2-4B-mlx-2bit"}
 
 
 def model_dir(name) -> Path:
@@ -41,6 +43,9 @@ def load_spec(path):
     t = json.loads((Path(path) / "config.json").read_text()).get("model_type")
     if t == "qwen3":
         from .qwen3 import Spec
+    elif t == "prism_hadamard_qwen35":
+        from .bonsai2 import spec_from_hf
+        return spec_from_hf(path)
     elif t in ("lfm2", "lfm2_moe"):
         from .lfm2 import Spec
     elif t in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):

@@ -268,6 +268,7 @@ NSUB = 4                       # sub-blocks per K-block (QACT's offsets, int4 / 
 NVG = 8                        # nvfp4: E4M3 groups per K-block
 MXU_FORMATS = ("int8", "int4", "fp4", "nvfp4")
 TERNARY = "ternary"          # TMM's packed rows (2 bits a weight) with one fp32 scale a row (RSC)
+TERNARY_GSC = "ternary_gsc"  # exact ternary values, fp32 scales per group of D=128
 FOUR = ("int4", "fp4", "nvfp4")
 MMAX = 63                      # int4 / fp4: the largest 6-bit multiplier
 DW_MAX = 255                   # an offset byte
@@ -387,7 +388,7 @@ def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.nd
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:
     """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks;
     ternary: four K-blocks a D-byte chunk, TMM's)."""
-    if fmt == TERNARY:
+    if fmt in (TERNARY, TERNARY_GSC):
         return -(-K // (4 * D)) * D
     return K if fmt == "int8" else -(-K // (2 * D)) * D
 
@@ -400,6 +401,8 @@ def scale_bytes(K: int, fmt: str, D: int = 128, rsc: bool = False) -> int:
     if K % D:
         raise ValueError(f"inner dimension {K} is not a multiple of D={D}")
     KB = K // D
+    if fmt == TERNARY_GSC:
+        return 4 * KB
     if rsc or fmt == TERNARY:
         return 4
     if fmt == "int8":
@@ -618,6 +621,8 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
     applied): the row's s (its largest |w|) is its RSC scale, the signs TMM's packed rows."""
     if fmt == TERNARY:
         return quantize_ternary(W, D)
+    if fmt == TERNARY_GSC:
+        return pack_ternary_gsc(W, D)
     N = W.shape[0]
     if N <= QUANT_ROWS:
         return quantize_mx(W, fmt, D)
@@ -628,6 +633,19 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
     for i in range(QUANT_ROWS, N, QUANT_ROWS):
         q[i:i + QUANT_ROWS], sc[i:i + QUANT_ROWS] = quantize_mx(W[i:i + QUANT_ROWS], fmt, D)
     return q, sc
+
+
+def pack_ternary_gsc(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """Lossless repack of already-ternary grouped values. Refuse any other values."""
+    W = np.asarray(W, np.float32)
+    if D != 128 or W.ndim != 2 or W.shape[1] % D or not np.isfinite(W).all():
+        raise ValueError("TMM GSC needs finite [N,K] weights with groups of 128")
+    blocks = W.reshape(W.shape[0], -1, D)
+    scale = np.abs(blocks).max(axis=2)
+    if not np.all((blocks == 0) | (np.abs(blocks) == scale[..., None])):
+        raise ValueError("TMM GSC repacking refuses non-ternary groups")
+    return (pack_ternary_mxu(np.sign(W).astype(np.int8), D),
+            np.ascontiguousarray(scale, dtype='<f4').view(np.uint8).reshape(W.shape[0], -1))
 
 
 def quantize_ternary(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:

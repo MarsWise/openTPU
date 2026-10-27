@@ -1,5 +1,10 @@
 # r6: no host computation (plan, 2026-10-24)
 
+Update 2026-10-28: the first native TMM GSC adapter and VPU Hadamard path for Bonsai 2
+Ternary 4B are implemented. See [BONSAI_4B.md](BONSAI_4B.md) for the new TGSC firmware
+contract, synthesis and numerical evidence. Physical FPGA generation/timing of that new
+firmware remain a separate gate. The original planning notes below retain their dates.
+
 Goal: every model the project supports runs with **no computation on the host**. The host
 keeps only what is I/O by nature: decoding a file or a camera frame into pixels, the tokenizer
 and detokenizer (text <-> ids), writing the input and reading the final result, and choosing
