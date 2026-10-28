@@ -185,12 +185,16 @@ foreach name {tmem xdma} {
     error "otpu_${name}_pblock.tcl did not place its cell (no summary line in impl_1/runme.log)"
   }
 }
+# Capture the project constraint file before opening a standalone checkpoint.  Once the
+# checkpoint is opened, the active design can no longer expose the project's fileset even
+# though the checkpoint still contains the uncertainty that file applied during implementation.
+set mf [get_files -quiet -of_objects [get_filesets constrs_1] *otpu_margin.tcl]
+if {[llength $mf] > 1} { error "multiple otpu_margin.tcl files in constrs_1: $mf" }
 if {$routed_only} { open_checkpoint $rdcp } else { open_run impl_1 }
 
 # ---- the setup margins (create_project.tcl, OTPU_SETUP_MARGIN / OTPU_SYS_MARGIN): each group's
 # worst setup slack with its margin (the route's target), then without it for everything below
 set margin_lines {}
-set mf [get_files -quiet -of_objects [get_filesets constrs_1] *otpu_margin.tcl]
 if {$mf ne ""} {
   set fh [open $mf]; set mt [read $fh]; close $fh
   set groups [regexp -all -inline -line {^# margin (\S+) \{([^\}]*)\} \{([^\}]*)\} ([0-9.]+)$} $mt]
