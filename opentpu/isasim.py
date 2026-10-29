@@ -34,6 +34,7 @@ class Config:
     TGSC: bool = False       # TMM: fp32 scale per row and D-element block (CAPS2 bit4)
     VCMP: bool = False       # VOP CMP_GT, CMP_EQ and SEL (CAPS2 bit5)
     TBIN: bool = False       # TMM packed +/-1 weights (CAPS2 bit6)
+    TBGSC: bool = False      # BIN combined with per-block scales (CAPS2 bit7)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -86,6 +87,7 @@ def board_config(**kw) -> Config:
                 TGSC=bool(int(env.get("OTPU_TGSC", 0))),
                 VCMP=bool(int(env.get("OTPU_VCMP", 0))),
                 TBIN=bool(int(env.get("OTPU_TBIN", 0))),
+                TBGSC=bool(int(env.get("OTPU_TBGSC", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -576,8 +578,10 @@ class Slice:
         gsc = bool(ins.flags & I.F_GSC)
         binary = bool(w[3] & I.TMM_BIN)
         quarter = (w[3] >> 24) & 3 if binary else w[3] >> 24
-        if binary and (not cfg.TBIN or pair or quad or gsc or quarter or w[3] & 0xf8000000):
-            raise SimError("TMM BIN: needs Config.TBIN, without GSC/PAIR/QUAD/quarter")
+        if binary and (not cfg.TBIN or pair or quad or quarter or w[3] & 0xf8000000):
+            raise SimError("TMM BIN: needs Config.TBIN, without PAIR/QUAD/quarter")
+        if binary and gsc and not cfg.TBGSC:
+            raise SimError("TMM BIN GSC: needs Config.TBGSC")
         if quarter and (KB != 1 or quarter > 3 or pair or quad or gsc):
             raise SimError("TMM: a quarter selects one block of one packed chunk")
         if gsc and (not cfg.TGSC or unit or rsc or pair or quad or ins.flags & I.F_ASCALE):

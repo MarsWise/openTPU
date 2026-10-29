@@ -353,7 +353,7 @@ class QTensor:
 
     @staticmethod
     def binary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
-                      srs: int = 4) -> "QTensor":
+                      srs: int = 4, gsc: bool = False) -> "QTensor":
         """Descriptor for the independent +/-1, eight-weights-per-byte TMM format."""
         if n <= 0 or k <= 0 or D <= 0 or D % 8 or k % D:
             raise CompileError("binary weight shape needs K divisible by D and D divisible by 8")
@@ -363,9 +363,11 @@ class QTensor:
             raise CompileError("binary weight row stride must be D-byte aligned and cover K/8")
         if scale is not None and (srs % 4 or srs < 4):
             raise CompileError("binary scale stride must be a multiple of 4 and >= 4")
+        if gsc and (D != 128 or scale is None or srs < 4 * k // D):
+            raise CompileError("binary GSC needs D=128 and a fp32 scale per K block")
         return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
                        (n, k), stride, 0 if scale is None else srs, D,
-                       wf=I.W8, rsc=scale is not None, ternary=True, binary=True)
+                       wf=I.W8, rsc=scale is not None and not gsc, ternary=True, binary=True, gsc=gsc)
 
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
@@ -2043,6 +2045,8 @@ class Builder:
             raise CompileError("dot: ternary group scales require Config.TGSC / new firmware")
         if w.binary and not self.cfg.TBIN:
             raise CompileError("dot: binary weights require Config.TBIN / new firmware")
+        if w.binary and w.gsc and not self.cfg.TBGSC:
+            raise CompileError("dot: binary group scales require Config.TBGSC / new firmware")
         if w.ternary and (w.D != self.cfg.D or (not unit and not (w.rsc or w.gsc))):
             raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows

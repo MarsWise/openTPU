@@ -30,6 +30,7 @@ TFN = false                      # VOP table functions (CAPS2 bit3)
 TGSC = false                     # native ternary group scales (CAPS2 bit4)
 VCMP = false                     # compare/select (CAPS2 bit5)
 TBIN = false                     # packed binary weights (CAPS2 bit6)
+TBGSC = false                    # binary group scales (CAPS2 bit7)
 DSTEP = true
 STREAM = true
 SEQ_WC = true                   # the sequencer's wait entries (WAITC v2, docs/seq_vpu.md; release r2):

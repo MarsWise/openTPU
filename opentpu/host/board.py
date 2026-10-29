@@ -575,7 +575,7 @@ class SimTransport:
             t, MCOLS=p["MCOLS"], LANES=p["LANES"], ACT_ROWS=p["ACT_ROWS"],
             TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0),
             TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0),
-            TGSC=p.get("TGSC", 0), VCMP=p.get("VCMP", 0), TBIN=p.get("TBIN", 0))))
+            TGSC=p.get("TGSC", 0), VCMP=p.get("VCMP", 0), TBIN=p.get("TBIN", 0), TBGSC=p.get("TBGSC", 0))))
         exe = rtlsim.build("tb_board", srcs, p)
         with simtmp.tempdir("otpu_board_") as d:
             for c in range(len(self.ch)):
@@ -1076,6 +1076,10 @@ class Board:
             if np.any(((opflags & 0xff) == I.TMM) & ((opflags >> 24) & I.F_GSC != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tgsc", False):
                     raise ConfigMismatch("TMM GSC requires new firmware with CAPS2 bit4 (TGSC)")
+            if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0) &
+                      (((opflags >> 24) & I.F_GSC) != 0)):
+                if not (self._info or self.info()).get("caps2", {}).get("tbgsc", False):
+                    raise ConfigMismatch("TMM BIN GSC requires firmware with CAPS2 bit7 (TBGSC)")
         waitc = self.waitc
         if waitc:
             if entries is None:
@@ -1367,6 +1371,7 @@ def device_config(info: dict, **kw):
     tgsc = bool((info.get("caps2") or {}).get("tgsc"))
     vcmp = bool((info.get("caps2") or {}).get("vcmp"))
     tbin = bool((info.get("caps2") or {}).get("tbin"))
+    tbgsc = bool((info.get("caps2") or {}).get("tbgsc"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
                           ("STREAM", stream, "the stream engine (CAPS bit26)"),
@@ -1375,7 +1380,8 @@ def device_config(info: dict, **kw):
                           ("TFN", tfn, "the table functions (CAPS2 bit3, with CAPS bit6)"),
                           ("TGSC", tgsc, "ternary group scales (CAPS2 bit4)"),
                           ("VCMP", vcmp, "VOP CMP/SEL (CAPS2 bit5)"),
-                          ("TBIN", tbin, "TMM BIN (CAPS2 bit6)")):
+                          ("TBIN", tbin, "TMM BIN (CAPS2 bit6)"),
+                          ("TBGSC", tbgsc, "TMM BIN GSC (CAPS2 bit7)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
@@ -1383,7 +1389,7 @@ def device_config(info: dict, **kw):
                                  f"bitstream)")
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
     dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
-           "TQUAD": tquad, "TFN": tfn, "TGSC": tgsc, "VCMP": vcmp, "TBIN": tbin,
+           "TQUAD": tquad, "TFN": tfn, "TGSC": tgsc, "VCMP": vcmp, "TBIN": tbin, "TBGSC": tbgsc,
            "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
@@ -1460,6 +1466,7 @@ def check_hash(info: dict, cfg=None) -> None:
                            TGSC=bool((info.get("caps2") or {}).get("tgsc")),
                            VCMP=bool((info.get("caps2") or {}).get("vcmp")),
                            TBIN=bool((info.get("caps2") or {}).get("tbin")),
+                           TBGSC=bool((info.get("caps2") or {}).get("tbgsc")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

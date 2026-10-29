@@ -81,17 +81,18 @@ CAP2_TFN = 8            # the table functions (VOP 0x20..0x29 on the stream engi
 CAP2_TGSC = 16          # native ternary with fp32 scale per D-element block
 CAP2_VCMP = 32          # ordered comparisons and column-mask selection
 CAP2_TBIN = 64          # packed binary weights, eight signs per byte
+CAP2_TBGSC = 128        # binary weights with fp32 group scales
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
         return {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False,
-                "vcmp": False, "tbin": False}
+                "vcmp": False, "tbin": False, "tbgsc": False}
     return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR),
             "tquad": bool(v & CAP2_TQUAD), "tfn": bool(v & CAP2_TFN),
             "tgsc": bool(v & CAP2_TGSC), "vcmp": bool(v & CAP2_VCMP),
-            "tbin": bool(v & CAP2_TBIN)}
+            "tbin": bool(v & CAP2_TBIN), "tbgsc": bool(v & CAP2_TBGSC)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

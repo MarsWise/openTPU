@@ -42,9 +42,9 @@
 // finishes (and drains) the older one. The issuer yields DRAM ports to the DMA and QST
 // (a_gnt/b_gnt). A row's first advance pops only once all of the row's chunks and scales are in
 // the FIFOs, so a row never stalls in its middle and the array needs no clock enable.
-// Serial GSC adapter. Each D-element block uses the existing integer ternary datapath and
+// Serial GSC adapter. Each D-element block uses the existing integer ternary or binary datapath and
 // fp32 epilogue, then ACC adds its scaled result in K order. No weight scale is rounded to
-// an MX multiplier. This first implementation rereads each packed chunk for its four groups;
+// an MX multiplier. This implementation rereads each packed chunk for its four or eight groups;
 // it preserves the packed storage size but does not promise PAIR/QUAD throughput.
 // Legacy commands retain the MXU's two-command queue. A GSC command starts only after it
 // drains, holds one external dependency entry until its last group, and forwards RMAX last.
@@ -80,9 +80,10 @@ module otpu_tmm_gsc
       m_cmd.flags = 8'h80;                     // RSC, scale of this group alone
       m_cmd.flags[1] = held.flags[1] || k != 0; // first term: original ACC, later terms: ACC
       m_cmd.flags[2] = held.flags[2] && last_k;
-      m_cmd.w1 = held.w1 + (32'(k >> 2) * D);
+      m_cmd.w1 = held.w1 + (32'(held.w4[26] ? (k >> 3) : (k >> 2)) * D);
       m_cmd.w2 = held.w2 + (32'(k) << 2);
-      m_cmd.w4 = {6'd0, k[1:0], 8'd1, held.w4[15:0]};
+      m_cmd.w4 = held.w4[26] ? {4'd0, k[2], 1'b1, k[1:0], 8'd1, held.w4[15:0]} :
+                                {6'd0, k[1:0], 8'd1, held.w4[15:0]};
       m_cmd.w6[31:24] = held.w6[31:24] + k;
     end
   end
@@ -133,7 +134,7 @@ module otpu_tmm_gsc
   always @(posedge clk) if (!rst) begin
     if (start && !rdy) $fatal(1, "TMM GSC: start without ready");
     if (start && gsc && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
-        cmd.w4[31:24] != 0 || cmd.w4[23:16] == 0 || cmd.w4[15:0] == 0 ||
+        cmd.w4[31:27] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 || cmd.w4[15:0] == 0 ||
         cmd.w7 < (32'(cmd.w4[23:16]) << 2) || cmd.w7[1:0] != 0))
       $fatal(1, "TMM GSC: invalid flags, dimensions or scale stride");
     if (state != IDLE && go && state != ARM)
@@ -265,7 +266,8 @@ module otpu_mxu
     if (cmd_quad && 4 * int'(cmd.w6[23:16]) > MCOLS)
       $fatal(1, "otpu_mxu: TMM QUAD needs 4*M <= MCOLS");
     if (cmd_binary && (D % 8 != 0 || cmd.flags[4] || cmd.flags[5] || cmd.flags[6] ||
-                       cmd.w4[31:27] != 0 || cmd.w4[25:24] != 0))
+                       cmd.w4[31:28] != 0 ||
+                       ((cmd.w4[27] || cmd.w4[25:24] != 0) && cmd.w4[23:16] != 1)))
       $fatal(1, "otpu_mxu: invalid BIN format, flags or D alignment");
     if (cmd_ternary && !cmd_binary && cmd.w4[31:24] != 0 &&
         (cmd.w4[31:26] != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
@@ -332,7 +334,7 @@ module otpu_mxu
     logic [MCOLS-1:0] hi;              // PAIR: the columns that take the odd blocks (j >= M)
     logic [MCOLS-1:0][1:0] qs;         // the block each column reads: PAIR {0, hi}; QUAD j / M
     logic [1:0]       kr;              // QUAD: KB mod 4, the last advance's blocks (0: four)
-    logic [1:0]       quarter;         // internal GSC subcommand: one of a chunk's four blocks
+    logic [2:0]       quarter;         // internal GSC subcommand: one of four/eight blocks
     logic [31:0]      mxo;             // RMAX output base: out + M * ors (no multiply later)
     logic [7:0]       M, ab;
     logic [MW-1:0]    run;             // drain lanes per cycle without a bank conflict
@@ -366,7 +368,8 @@ module otpu_mxu
     cmd_e.binary = cmd_binary;
     cmd_e.quad  = cmd_quad;
     cmd_e.kr    = cmd_KB8[1:0];
-    cmd_e.quarter = cmd_ternary ? cmd.w4[25:24] : 2'b00;
+    cmd_e.quarter = cmd_binary ? {cmd.w4[27], cmd.w4[25:24]} :
+                    cmd_ternary ? {1'b0, cmd.w4[25:24]} : 3'b000;
     for (int j = 0; j < MCOLS; j++) begin
       cmd_e.hi[j] = cmd_pair && 32'(j) >= 32'(cmd.w6[23:16]);
       cmd_e.qs[j] = !cmd_quad ? {1'b0, cmd_e.hi[j]} :
@@ -827,7 +830,7 @@ module otpu_mxu
       m0.first <= (ck == 16'd0);
       m0.h <= c_w4 && !c_pair && ck[0];
       m0.o <= c_pair && !(last_k && c_KB[0]);
-      m0.ts <= c_binary ? ck[2:0] : c_pair ? {1'b0, ck[0], 1'b0} : {1'b0, ck[1:0] + pop_e.quarter};
+      m0.ts <= c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} : {1'b0, ck[1:0] + pop_e.quarter[1:0]};
       m0.qd <= c_quad;
       m0.ov <= !(last_k && pop_e.kr != 2'd0) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
@@ -965,7 +968,7 @@ module otpu_mxu
     wq_tn <= pop && c_ternary;
     wq_bn <= pop && c_binary;
     wq_h <= pop && c_w4 && !c_pair && ck[0];
-    wq_ts <= !pop ? 3'b000 : c_binary ? ck[2:0] : c_pair ? {1'b0, ck[0], 1'b0} : {1'b0, ck[1:0] + pop_e.quarter};
+    wq_ts <= !pop ? 3'b000 : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} : {1'b0, ck[1:0] + pop_e.quarter[1:0]};
     wq_wf <= c_wf;
     wq_pr <= c_pair;
   end
@@ -2052,22 +2055,21 @@ module otpu_mxu
   always @(posedge clk) if (!rst) begin
     if (start && q_n >= 2'd2) $fatal(1, "otpu_mxu: start with %0d commands queued", q_n);
     if (start && (i_act || i_ini)) $fatal(1, "otpu_mxu: start while the issuer streams");
-    if (pop && c_quad)
+    // w0 is the synchronous FIFO output, aligned with the registered m0 controls,
+    // not the pop that requests its address in the preceding cycle.
+    if (m0.v && m0.ternary && m0.qd)
       for (int i = 0; i < D; i++)
         for (int q = 0; q < 4; q++)
-          if ((!(last_k && pop_e.kr != 2'd0) || q < int'(pop_e.kr)) &&
-              w0[2 * (q * D + i) +: 2] == 2'b11)
-            $fatal(1, "otpu_mxu: reserved TMM symbol at advance %0d, quarter %0d, element %0d",
-                   ck, q, i);
-    if (pop && c_ternary && !c_quad && !c_binary)
+          if (m0.ov[q] && w0[2 * (q * D + i) +: 2] == 2'b11)
+            $fatal(1, "otpu_mxu: reserved TMM symbol at quarter %0d, element %0d", q, i);
+    if (m0.v && m0.ternary && !m0.qd && !m0.binary)
       for (int i = 0; i < D; i++) begin
         int q0;
-        q0 = c_pair ? 2 * int'(ck[0]) : int'(ck[1:0]);
+        q0 = int'(m0.ts);
         if (w0[2 * (q0 * D + i) +: 2] == 2'b11)
-          $fatal(1, "otpu_mxu: reserved TMM symbol at advance %0d, element %0d", ck, i);
-        if (c_pair && !(last_k && c_KB[0]) && w0[2 * ((q0 + 1) * D + i) +: 2] == 2'b11)
-          $fatal(1, "otpu_mxu: reserved TMM symbol at advance %0d (odd block), element %0d",
-                 ck, i);
+          $fatal(1, "otpu_mxu: reserved TMM symbol at quarter %0d, element %0d", q0, i);
+        if (pr0 && m0.o && w0[2 * ((q0 + 1) * D + i) +: 2] == 2'b11)
+          $fatal(1, "otpu_mxu: reserved TMM symbol in paired quarter %0d, element %0d", q0 + 1, i);
       end
     if (q_n != 0 && !cl_ld && pop_q != (pn ? n : h))
       $fatal(1, "otpu_mxu: pop_q is not the pop head's entry");

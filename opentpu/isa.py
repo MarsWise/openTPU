@@ -465,8 +465,8 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
         (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0) | (F_PAIR if pair else 0) | \
         (F_QUAD if quad else 0) | (F_GSC if gsc else 0)
     _check(not (pair and quad), "TMM: PAIR and QUAD are exclusive")
-    _check(not binary or not (gsc or pair or quad),
-           "TMM BIN: GSC, PAIR and QUAD are not supported")
+    _check(not binary or not (pair or quad),
+           "TMM BIN: PAIR and QUAD are not supported")
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
                  w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0), rs,
                       ors | (m << 16) | (ab << 24), srs), comment=comment)

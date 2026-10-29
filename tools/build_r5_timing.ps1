@@ -32,6 +32,7 @@ param(
     [switch]$TernaryGroupScales,
     [switch]$VectorCompare,
     [switch]$BinaryWeights,
+    [switch]$BinaryGroupScales,
     [switch]$Plan
 )
 $ErrorActionPreference = 'Stop'
@@ -53,6 +54,7 @@ $buildEnv = @{
     OTPU_TGSC_GEN = $(if ($TernaryGroupScales) { '1' } else { '0' })
     OTPU_VCMP_GEN = $(if ($VectorCompare) { '1' } else { '0' })
     OTPU_TBIN_GEN = $(if ($BinaryWeights) { '1' } else { '0' })
+    OTPU_TBGSC_GEN = $(if ($BinaryGroupScales) { '1' } else { '0' })
     TRACE_DEPTH = '16384'; COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'; OTPU_SYS_MARGIN = ''
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
@@ -92,12 +94,14 @@ if ($Variant -eq 'm4') {
         $buildEnv[$k] = ''
     }
 }
-if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights) {
+if ($BinaryGroupScales -and (-not $BinaryWeights -or -not $TernaryGroupScales)) { throw 'Binary group scales require BIN and GSC' }
+if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupScales) {
     if ($Variant -ne 'm8') { throw 'The native Bonsai 2 recipe is m8' }
     $gsc = [int][bool]$TernaryGroupScales
     $vcmp = [int][bool]$VectorCompare
     $tbin = [int][bool]$BinaryWeights
-    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin))):08x}')").Trim()
+    $tbgsc = [int][bool]$BinaryGroupScales
+    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc))):08x}')").Trim()
     if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate CFG_HASH' }
 }
 $buildLabel = if ($VectorCompare -or $BinaryWeights) { 'r6 experimental' } else { 'r5 timing' }
