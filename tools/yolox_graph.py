@@ -20,6 +20,10 @@ decode buffer's layout replaces. A placement report lists where every operator r
 class-aware NMS on a VCMP device and reads only fixed-size final detections. This
 path skips the CPU model/reference calculation. Input letterbox/resize still
 runs on the host; the complete path is not yet validated with a real r6 card.
+
+--fpga-u8: after host image decoding and letterbox resize, transfer packed uint8
+pixels and convert and place them in the model input buffer on the VU8 device.
+This does not move resize or image decoding to the device.
 """
 import argparse
 import hashlib
@@ -27,6 +31,18 @@ import sys
 import time
 
 import numpy as np
+
+
+def load_image_u8(path, size):
+    """The existing letterbox operation, retaining byte pixels instead of making fp32."""
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    r = min(size / im.height, size / im.width)
+    im = im.resize((int(im.width * r), int(im.height * r)), Image.BILINEAR)
+    out = np.full((size, size, 3), 114, np.uint8)
+    a = np.asarray(im, np.uint8)[:, :, ::-1]
+    out[:a.shape[0], :a.shape[1]] = a
+    return out
 
 
 def main():
@@ -43,11 +59,15 @@ def main():
     ap.add_argument("--strict-fpga", action="store_true")
     ap.add_argument("--fpga-nms", action="store_true",
                     help="run decoded YOLOX class selection and NMS on r6; report only final detections")
+    ap.add_argument("--fpga-u8", action="store_true",
+                    help="transfer uint8 pixels and convert them to fp32 on VU8 firmware")
     ap.add_argument("--max-detections", type=int, default=100)
     ap.add_argument("--confidence", type=float, default=0.3)
     ap.add_argument("--nms-iou", type=float, default=0.45)
     ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
+    if a.fpga_u8 and not a.image:
+        ap.error("--fpga-u8 requires an explicit image")
     if a.fpga_nms:
         a.strict_fpga = True
         if a.per_op or a.check_isa:
@@ -88,9 +108,11 @@ def main():
               f"ACT_ROWS={cfg.act_rows} ACT_BLOCKS={cfg.ACT_BLOCKS} TMEM={cfg.TMEM_WORDS}")
     else:
         cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536, LANES=8,
-                     DRAM_BYTES=1 << 28, VCMP=a.fpga_nms)
+                     DRAM_BYTES=1 << 28, VCMP=a.fpga_nms, VU8=a.fpga_u8)
     if a.fpga_nms and not cfg.VCMP:
         raise SystemExit("--fpga-nms requires r6 firmware with CAPS2 VCMP")
+    if a.fpga_u8 and not cfg.VU8:
+        raise SystemExit("--fpga-u8 requires r6 firmware with CAPS2 VU8")
     t0 = time.time()
     dec = {}
 
@@ -148,9 +170,27 @@ def main():
                                      score_threshold=a.confidence, iou_threshold=a.nms_iou)
         if len(nms_prog) * 8 > cfg.IMEM_WORDS:
             raise SystemExit("--fpga-nms combined program does not fit instruction memory")
+    input_prog = None
+    raw_at = None
+    if a.fpga_u8:
+        from opentpu.kernels.u8_input import program_rows
+        b = plan.inputs["x"]
+        raw_count = b.H * b.W * b.C
+        raw_at = -(-image_size // cfg.D) * cfg.D
+        scratch = -(-(raw_at + raw_count) // cfg.D) * cfg.D
+        image_size = -(-(scratch + 4 * raw_count) // cfg.D) * cfg.D
+        if image_size > cfg.DRAM_BYTES:
+            raise SystemExit("--fpga-u8 buffers exceed the configured DRAM size")
+        dst = b.addr + 4 * (b.border * b.rs + b.border * b.C)
+        input_prog = program_rows(cfg, raw_at, dst, scratch, b.H, b.W * b.C, b.rs)
     img = plan.image(image_size, cfg.D)
-    x = load_image(a.image, a.size)
-    plan.put_input(img, "x", x.transpose(1, 2, 0))
+    if a.fpga_u8:
+        raw = load_image_u8(a.image, a.size)
+        img[raw_at:raw_at + raw.size] = raw.reshape(-1)
+        x = raw.transpose(2, 0, 1).astype(np.float32) if (a.per_op or not a.fpga_nms) else None
+    else:
+        x = load_image(a.image, a.size)
+        plan.put_input(img, "x", x.transpose(1, 2, 0))
 
     # the float model's per-node values (fx interpreter), for --per-op
     vals = {}
@@ -167,11 +207,18 @@ def main():
     stats = {"instructions": 0, "cycles": 0}
     t0 = time.time()
     if board is None:
+        if input_prog is not None:
+            import dataclasses
+            from opentpu.isasim import Machine
+            sim = Machine(dataclasses.replace(cfg, DRAM_BYTES=len(img)), [input_prog], [img]).run()
+            img = sim.slices[0].dram
+            stats["instructions"] += sim.slices[0].icount
         def each(i, op, im, icount):
             stats["instructions"] += icount
         out = plan.run_isa(cfg, img, each)
     else:
-        out = run_board(board, plan, cfg, img, stats, a.check_isa, read_final=not a.fpga_nms)
+        out = run_board(board, plan, cfg, img, stats, a.check_isa, read_final=not a.fpga_nms,
+                        input_prog=input_prog)
     if a.fpga_nms:
         if board is None:
             import dataclasses
@@ -190,7 +237,8 @@ def main():
         print(f"FPGA NMS: {len(rows)} valid detections (max {a.max_detections})")
         for x0, y0, x1, y1, score, cls, _ in rows:
             print(f"  class {int(cls):2d} score {score:.3f} box [{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]")
-        print("input preprocessing: host letterbox/resize; graph, class selection and NMS: device")
+        print("input preprocessing: host letterbox/resize; " +
+              ("uint8 conversion, " if a.fpga_u8 else "") + "graph, class selection and NMS: device")
         return 0
     t_run = time.time() - t0
 
@@ -260,7 +308,7 @@ def decode(raw, sizes, img_size):
 PROG_AT_GAP = 1 << 20
 
 
-def run_board(board, plan, cfg, img, stats, check, read_final=True):
+def run_board(board, plan, cfg, img, stats, check, read_final=True, input_prog=None):
     """Write the plan's image once; per op load its program above the image and run it."""
     import dataclasses
     from opentpu.isasim import Machine
@@ -269,6 +317,17 @@ def run_board(board, plan, cfg, img, stats, check, read_final=True):
     at = -(-(len(img) + PROG_AT_GAP) // 4096) * 4096
     ref = img.copy() if check else None
     c = dataclasses.replace(cfg, DRAM_BYTES=len(img))
+    if input_prog is not None:
+        board.load(at, input_prog)
+        st = board.run(timeout=60.0)
+        stats["instructions"] += st["instructions"][0]
+        stats["cycles"] += st["cycles"]
+        if check:
+            ref = Machine(c, [input_prog], [ref]).run().slices[0].dram
+            b = plan.inputs["x"]
+            got = board.read(b.addr, b.nbytes)
+            if not np.array_equal(got, ref[b.addr:b.addr + b.nbytes]):
+                raise SystemExit("FPGA uint8 input conversion differs from ISA")
     for i, op in enumerate(plan.ops):
         board.load(at, op.prog)
         st = board.run(timeout=60.0)

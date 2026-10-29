@@ -6,7 +6,7 @@ import pytest
 
 from opentpu import Config, isa as I, rtlsim
 from opentpu.isasim import Machine, SimError
-from opentpu.kernels.u8_input import program
+from opentpu.kernels.u8_input import program, program_rows
 from opentpu.target import arch_hash
 
 
@@ -66,3 +66,33 @@ def test_u8_capability_and_input_validation():
     board = Board(FakeTransport(devname=None, regmap=5, vu8=True))
     assert device_config(board.info()).VU8
     board.load_program(0x1000, code)
+
+
+@pytest.mark.parametrize('waitc', [False, True])
+def test_strided_u8_input_rtl(have_verilator, waitc):
+    cfg, _, image, _ = case(65, waitc)
+    rows, width, stride = 3, 21, 27
+    x = np.arange(rows * width, dtype=np.uint8).reshape(rows, width)
+    image[:x.size] = x.reshape(-1)
+    image[0x20000:0x20000 + rows * stride * 4] = 0x99
+    prog = program_rows(cfg, 0, 0x20000, 0x40000, rows, width, stride)
+    ref = Machine(cfg, [prog], [image.copy()]).run().slices[0]
+    actual = ref.dram[0x20000:0x20000 + rows * stride * 4].copy().view(np.float32).reshape(rows, stride)
+    np.testing.assert_array_equal(actual[:, :width], x.astype(np.float32))
+    raw = ref.dram[0x20000:0x20000 + rows * stride * 4].reshape(rows, stride * 4)
+    np.testing.assert_array_equal(raw[:, width * 4:], np.full((rows, (stride - width) * 4), 0x99, np.uint8))
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=35, seed=71)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)
+    np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+def test_yolox_byte_loader_matches_existing_letterbox(tmp_path):
+    Image = pytest.importorskip('PIL.Image')
+    from tools.yolox_graph import load_image_u8
+    from tools.yolox_run import load_image
+    src = np.random.default_rng(417).integers(0, 256, size=(13, 21, 3), dtype=np.uint8)
+    path = tmp_path / 'pixels.png'
+    Image.fromarray(src).save(path)
+    expected = load_image(path, 32).transpose(1, 2, 0)
+    actual = load_image_u8(path, 32)
+    np.testing.assert_array_equal(actual.astype(np.float32), expected)

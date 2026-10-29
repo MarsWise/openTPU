@@ -48,3 +48,36 @@ def program(cfg, src: int, dst: int, count: int, tmem_base: int = 0):
     if len(out) * 8 > cfg.IMEM_WORDS:
         raise ValueError("u8 input program exceeds IMEM; split the input into calls")
     return out
+
+
+def program_rows(cfg, src: int, dst: int, scratch: int, rows: int,
+                 row_words: int, dst_stride: int):
+    """Convert dense uint8 rows into strided fp32 rows in DRAM.
+
+    scratch holds the contiguous fp32 conversion and is disjoint from both source
+    and destination. Destination padding is preserved; all strides are in words.
+    """
+    if rows <= 0 or row_words <= 0 or dst_stride < row_words:
+        raise ValueError("invalid row count, width or destination stride")
+    count = rows * row_words
+    if dst % 4 or scratch % 4 or dst < 0 or scratch < 0:
+        raise ValueError("destination and scratch must be word-aligned DRAM addresses")
+    dst_end = dst + 4 * ((rows - 1) * dst_stride + row_words)
+    scratch_end = scratch + 4 * count
+    src_end = src + ((count + 3) & ~3)
+    if dst_end > cfg.DRAM_BYTES or scratch_end > cfg.DRAM_BYTES:
+        raise ValueError("strided destination or scratch outside DRAM")
+    if ((dst < scratch_end and scratch < dst_end) or
+            (dst < src_end and src < dst_end)):
+        raise ValueError("destination overlaps input or scratch")
+    out = program(cfg, src, scratch, count)[:-1]
+    # Copy each dense row into its destination; the gap is never read or written.
+    for r in range(rows):
+        for c in range(0, row_words, cfg.TMEM_WORDS):
+            n = min(cfg.TMEM_WORDS, row_words - c)
+            out.append(I.ld(scratch + 4 * (r * row_words + c), 0, n))
+            out.append(I.st(dst + 4 * (r * dst_stride + c), 0, n))
+    out.append(I.halt())
+    if len(out) * 8 > cfg.IMEM_WORDS:
+        raise ValueError("strided u8 program exceeds IMEM; split the input into calls")
+    return out
