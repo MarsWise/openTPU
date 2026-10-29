@@ -48,11 +48,14 @@ V_MAC = 7                 # A * Cv(c) + B: Cv the column vector at imm (TMEM, w7
 V_COPY, V_EXP2, V_RECIP, V_RSQRT, V_ABS, V_FILL, V_EXP2SUB, V_LOG2 = 8, 9, 10, 11, 12, 13, 14, 15
 V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX = 16, 17, 18, 19, 20
 V_CMP_GT, V_CMP_EQ, V_SEL = 21, 22, 23
+V_U8_0, V_U8_1, V_U8_2, V_U8_3 = 24, 25, 26, 27
+V_U8 = (V_U8_0, V_U8_1, V_U8_2, V_U8_3)
 VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max",
           V_MIN: "min", V_OUTER: "outer", V_MAC: "mac", V_COPY: "copy", V_EXP2: "exp2", V_RECIP: "recip",
           V_RSQRT: "rsqrt", V_ABS: "abs", V_FILL: "fill", V_EXP2SUB: "exp2sub",
           V_LOG2: "log2", V_RSUM: "rsum", V_RMAX: "rmax", V_RSSQ: "rssq", V_RDOT: "rdot",
           V_ARGMAX: "argmax", V_CMP_GT: "cmp_gt", V_CMP_EQ: "cmp_eq", V_SEL: "sel"}
+VFUNCS.update({f: f"u8_{i}" for i, f in enumerate(V_U8)})
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
 V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS = \
     range(0x20, 0x2A)

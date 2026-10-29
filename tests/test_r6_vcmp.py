@@ -86,6 +86,6 @@ def test_board_model_advertises_capabilities(have_verilator):
     from opentpu.host import regs
     from opentpu.host.board import SimTransport
     t = SimTransport(ch_bytes=1 << 20, params={"VCMP": 1, "TBIN": 1, "TGSC": 1,
-                                               "TBGSC": 1, "COLL_GATHER": 0})
+                                               "TBGSC": 1, "VU8": 1, "COLL_GATHER": 0})
     c = regs.caps2(t.reg_read(regs.R_CAPS2))
-    assert c["vcmp"] and c["tbin"] and c["tgsc"] and c["tbgsc"]
+    assert c["vcmp"] and c["tbin"] and c["tgsc"] and c["tbgsc"] and c["vu8"]

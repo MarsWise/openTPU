@@ -289,6 +289,14 @@ RSC; BIN+GSC also requires CAPS2 bit 7 (TBGSC), because earlier BIN/TGSC firmwar
 not implement their combination. BIN with PAIR or QUAD is unsupported. The bitstream must
 be checked for the corresponding capability before loading these commands.
 
+`VOP U8_0..U8_3` (functions 24..27, CAPS2 bit 8 / `Config.VU8`) interpret each A
+word's raw 32 bits as four little-endian unsigned bytes and return the selected byte as an
+exact fp32 value in [0, 255]. The raw bits are not interpreted as fp32 and are not flushed.
+The byte index is fixed by the function code. `opentpu.kernels.u8_input.program` uses
+four extraction passes and strided copies to restore byte order; it requires word-aligned,
+nonoverlapping DRAM buffers, padding in the last input word, and TMEM scratch. This primitive
+does not itself perform resize, channel conversion or normalization.
+
 #### Weight formats
 
 `WF = 0` (int8) streams int8 elements, block `k` of row `n` the `D` bytes at `sa + n*rs + k*D`.

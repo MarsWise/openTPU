@@ -19,6 +19,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Cannot read r6 revision' }
 if (-not $OutDir) { $OutDir = Join-Path $root "build\vivado-r6-m8-133.33-$rev" }
 Write-Warning 'Experimental r6: BIN PAIR/QUAD and full FPGA-only model coverage are not complete.'
 & (Join-Path $PSScriptRoot 'build_r5_timing.ps1') -Mode $Mode -Variant m8 -CoreMhz '133.33' `
-    -TernaryGroupScales -VectorCompare -BinaryWeights -BinaryGroupScales -Jobs $Jobs -Threads $Threads `
+    -TernaryGroupScales -VectorCompare -BinaryWeights -BinaryGroupScales -UnsignedBytes -Jobs $Jobs -Threads $Threads `
     -Vivado $Vivado -OutDir $OutDir
 if ($LASTEXITCODE -ne 0) { throw 'r6 build failed' }

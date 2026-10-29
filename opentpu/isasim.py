@@ -35,6 +35,7 @@ class Config:
     VCMP: bool = False       # VOP CMP_GT, CMP_EQ and SEL (CAPS2 bit5)
     TBIN: bool = False       # TMM packed +/-1 weights (CAPS2 bit6)
     TBGSC: bool = False      # BIN combined with per-block scales (CAPS2 bit7)
+    VU8: bool = False        # convert packed unsigned bytes to fp32 (CAPS2 bit8)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -88,6 +89,7 @@ def board_config(**kw) -> Config:
                 VCMP=bool(int(env.get("OTPU_VCMP", 0))),
                 TBIN=bool(int(env.get("OTPU_TBIN", 0))),
                 TBGSC=bool(int(env.get("OTPU_TBGSC", 0))),
+                VU8=bool(int(env.get("OTPU_VU8", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -761,6 +763,8 @@ class Slice:
             return self._outer(ins, dst, a, b, w7, rows, cols, drs, brs, bmode)
         if func in (I.V_CMP_GT, I.V_CMP_EQ, I.V_SEL) and not self.cfg.VCMP:
             raise SimError("VOP CMP/SEL: needs Config.VCMP")
+        if func in I.V_U8 and not self.cfg.VU8:
+            raise SimError("VOP U8: needs Config.VU8")
         if func in (I.V_MAC, I.V_SEL) and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
             raise SimError("VOP MAC/SEL: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
@@ -811,6 +815,9 @@ class Slice:
                I.V_RECIP: lambda: F.recip(A), I.V_RSQRT: lambda: F.rsqrt(A),
                I.V_ABS: lambda: F.fabs(A), I.V_FILL: lambda: F.ftz(B),
                I.V_EXP2SUB: lambda: F.exp2(F.sub(A, B)), I.V_LOG2: lambda: F.log2(A)}
+        if func in I.V_U8:
+            # Raw TMEM bits, including bit patterns that would be NaNs as fp32.
+            ops[func] = lambda: ((A.view(np.uint32) >> (8 * (func - I.V_U8_0))) & 255).astype(np.float32)
         if func == I.V_MAC:
             # the column vector is read before anything is written (the VPU's buffers)
             Cv = self.tget(np.broadcast_to(w7 + c, (1, cols)))

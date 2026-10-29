@@ -48,7 +48,7 @@ RATES = {"RUNNING": 0.80, "MXU_BUSY": 0.60, "MXU_MAC": 0.50, "VPU_BUSY": 0.12,
 
 def _target_cfg(D: int, MCOLS: int, LANES: int, pair: bool, dstep: bool, stream: bool,
                 act_rows: int = 0, seq_wc: bool = False, tgsc: bool = False,
-                vcmp: bool = False, tbin: bool = False, tbgsc: bool = False) -> dict:
+                vcmp: bool = False, tbin: bool = False, tbgsc: bool = False, vu8: bool = False) -> dict:
     """The CFG_* registers of the current target's build with these VERSION / CAPS values."""
     from ..target import arch_hash, current
     t = current()
@@ -62,7 +62,7 @@ def _target_cfg(D: int, MCOLS: int, LANES: int, pair: bool, dstep: bool, stream:
     full = Config(**{**a, "D": D, "MCOLS": MCOLS, "LANES": LANES,
                      "ACT_ROWS": act_rows if act_rows > MCOLS else 0, "PAIR": pair,
                      "DSTEP": dstep, "STREAM": stream, "SEQ_WC": seq_wc, "TGSC": tgsc,
-                     "VCMP": vcmp, "TBIN": tbin, "TBGSC": tbgsc})
+                     "VCMP": vcmp, "TBIN": tbin, "TBGSC": tbgsc, "VU8": vu8})
     cfg["hash"] = arch_hash(full)
     return cfg
 
@@ -83,7 +83,7 @@ class FakeTransport:
                  cfg: dict | None = None, act_rows: int | None = None, mx: bool = True,
                  gather: bool = True, seq_wc: bool = False, tpair: bool = False,
                  tquad: bool = False, tfn: bool = False, tgsc: bool = False, vcmp: bool = False,
-                 tbin: bool = False, tbgsc: bool = False):
+                 tbin: bool = False, tbgsc: bool = False, vu8: bool = False):
         self.ch = [np.zeros(ch_bytes, np.uint8) for _ in range(2)]
         self.v, self.devname, self.dev = regmap, devname, devname and f"/dev/{devname}"
         self.run_s, self.cycles_per_run = run_s, cycles
@@ -102,7 +102,7 @@ class FakeTransport:
         self.version = D << 16 | MCOLS << 8 | LANES
         self.act_rows = act_rows        # > MCOLS: CAPS bit24 and the ACT_ROWS register
         self.cfg_words = R.cfg_words(cfg or _target_cfg(D, MCOLS, LANES, pair, dstep, stream,
-                                                        act_rows, seq_wc, tgsc, vcmp, tbin, tbgsc))
+                                                        act_rows, seq_wc, tgsc, vcmp, tbin, tbgsc, vu8))
         self.slices = R.cfg(self.cfg_words)["S"] if regmap >= R.CFG_SINCE else 1
         if self.slices > 1:             # two channels per slice (board.channel_map)
             self.ch = [np.zeros(ch_bytes, np.uint8) for _ in range(2 * self.slices)]
@@ -123,6 +123,7 @@ class FakeTransport:
         self.vcmp = vcmp                # CAPS2 bit5: comparisons and selection
         self.tbin = tbin                # CAPS2 bit6: binary weights
         self.tbgsc = tbgsc              # CAPS2 bit7: binary group scales
+        self.vu8 = vu8                  # CAPS2 bit8: unsigned byte conversion
         self.calib = list(calib)        # STATUS CALIB0 / CALIB1
         self.ecc_ded = ecc_ded          # STATUS ECC_DED
         self.regs = {R.R_CTRL: 0, R.R_PROG_ADDR: 0, R.R_PROG_N: 0, R.R_SCRATCH: 0,
@@ -243,7 +244,8 @@ class FakeTransport:
             return (R.CAP2_GATHER if self.gather else 0) | (R.CAP2_TPAIR if self.tpair else 0) \
                 | (R.CAP2_TQUAD if self.tquad else 0) | (R.CAP2_TFN if self.tfn else 0) \
                 | (R.CAP2_TGSC if self.tgsc else 0) | (R.CAP2_VCMP if self.vcmp else 0) \
-                | (R.CAP2_TBIN if self.tbin else 0) | (R.CAP2_TBGSC if self.tbgsc else 0)
+                | (R.CAP2_TBIN if self.tbin else 0) | (R.CAP2_TBGSC if self.tbgsc else 0) \
+                | (R.CAP2_VU8 if self.vu8 else 0)
         if off == R.R_CAPS:
             return (R.CAP_TRACE | R.CAP_TEMP | (R.CAP_I2C if self.i2c else 0)
                     | (R.CAP_DDR if self.ddr_mts else 0) | (R.CAP_W4 if self.w4 else 0)

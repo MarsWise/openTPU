@@ -13,7 +13,8 @@ package otpu_pkg;
                          V_OUTER = 6, V_MAC = 7, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
                          V_ABS = 12, V_FILL = 13, V_EXP2SUB = 14, V_LOG2 = 15, V_RSUM = 16,
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20,
-                         V_CMP_GT = 21, V_CMP_EQ = 22, V_SEL = 23;
+                         V_CMP_GT = 21, V_CMP_EQ = 22, V_SEL = 23,
+                         V_U8_0 = 24, V_U8_1 = 25, V_U8_2 = 26, V_U8_3 = 27;
   // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
   // otpu_se_comp only (the stream engine's composites)
   localparam logic [7:0] V_TFN0 = 8'h20;

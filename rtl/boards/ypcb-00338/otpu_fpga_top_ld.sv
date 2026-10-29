@@ -76,7 +76,8 @@ module otpu_fpga_top_ld #(
   parameter bit TGSC  = 1'b0,               // native ternary group scales (CAPS2 bit4)
   parameter bit VCMP  = 1'b0,               // compare and select (CAPS2 bit5)
   parameter bit TBIN  = 1'b0,               // packed binary weights (CAPS2 bit6)
-  parameter bit TBGSC = 1'b0                // binary group scales (CAPS2 bit7)
+  parameter bit TBGSC = 1'b0,               // binary group scales (CAPS2 bit7)
+  parameter bit VU8   = 1'b0                // packed unsigned byte conversion (CAPS2 bit8)
 ) (
   // board
   input  logic        SYS_CLK,              // 50 MHz, AA28
@@ -301,7 +302,7 @@ module otpu_fpga_top_ld #(
                     .DSTEP(DSTEP), .HOSTCAL(1'b1), .XREG(PCIE_GEN == 2),
                     .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
                     .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
-                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC)) u_sys (
+                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8)) u_sys (
     .clk(core_clk), .clk_f, .rst(core_rst), .ctl_mrst(lrs2), .xclk(xdma_aclk), .xrst,
     .calib, .ded, .temp(device_temp), .led(board_led), .i2c_lo, .i2c_pin({lm73_alert_n, i2c_lvl}),
     .s_ctl_awaddr(ctl_awaddr[11:0]), .s_ctl_awvalid(ctl_awvalid), .s_ctl_awready(ctl_awready),

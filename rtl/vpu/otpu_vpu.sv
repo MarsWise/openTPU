@@ -489,7 +489,24 @@ module otpu_vpu
   // compares of m0.func (133.33 MHz, the 100 MHz fused placement: m0.func (fo 119) -> short lane
   // rc / rb, 13.6 / 13.8 levels, -1.2 ns; the tap-0 hit and the composite test fan out to every
   // lane's result and operand muxes)
-  localparam int NVF = 24;                    // includes CMP and SEL; ARGMAX remains a reduction
+  localparam int NVF = 28;                    // includes CMP, SEL and byte extraction
+  // Every unsigned byte is exactly representable in binary32. The input is raw TMEM bits:
+  // it must not pass through ftz, since arbitrary packed pixels may resemble fp32 NaNs.
+  function automatic f32_t u8_to_f32(input logic [7:0] b);
+    logic [3:0] p;
+    logic [23:0] m;
+    if (b == 0) return 32'd0;
+    if (b[7]) p = 7;
+    else if (b[6]) p = 6;
+    else if (b[5]) p = 5;
+    else if (b[4]) p = 4;
+    else if (b[3]) p = 3;
+    else if (b[2]) p = 2;
+    else if (b[1]) p = 1;
+    else p = 0;
+    m = {16'd0, b} << (23 - p);
+    return {1'b0, 8'(127 + p), m[22:0]};
+  endfunction
   typedef struct packed {
     logic [NVF-1:0] fh;                       // one-hot func (none for codes >= NVF)
     logic           s0;                       // ends at tap 0: no slots, not a reduction
@@ -689,6 +706,10 @@ module otpu_vpu
         m0d.fh[V_CMP_GT]: st[0].v = fp_cmp_gt(x, y) ? F_ONE : F_ZERO;
         m0d.fh[V_CMP_EQ]: st[0].v = fp_cmp_eq(x, y) ? F_ONE : F_ZERO;
         m0d.fh[V_SEL]: st[0].v = (ftz(xc[l]) & 32'h7fff_ffff) != 0 ? ftz(x) : ftz(y);
+        m0d.fh[V_U8_0]: st[0].v = u8_to_f32(x[7:0]);
+        m0d.fh[V_U8_1]: st[0].v = u8_to_f32(x[15:8]);
+        m0d.fh[V_U8_2]: st[0].v = u8_to_f32(x[23:16]);
+        m0d.fh[V_U8_3]: st[0].v = u8_to_f32(x[31:24]);
         m0d.fh[V_RECIP]: begin                               // on the significand a
           st[0].k1 = {9'h17F, xz[22:0]};                     // -a
           st[0].k2 = RECIP_MAGIC - {9'h07F, xz[22:0]};       // seed
@@ -929,6 +950,10 @@ module otpu_vpu
         m0d.fh[V_CMP_GT]: st[0] = fp_cmp_gt(x, y) ? F_ONE : F_ZERO;
         m0d.fh[V_CMP_EQ]: st[0] = fp_cmp_eq(x, y) ? F_ONE : F_ZERO;
         m0d.fh[V_SEL]: st[0] = (ftz(xc[l]) & 32'h7fff_ffff) != 0 ? ftz(x) : ftz(y);
+        m0d.fh[V_U8_0]: st[0] = u8_to_f32(x[7:0]);
+        m0d.fh[V_U8_1]: st[0] = u8_to_f32(x[15:8]);
+        m0d.fh[V_U8_2]: st[0] = u8_to_f32(x[23:16]);
+        m0d.fh[V_U8_3]: st[0] = u8_to_f32(x[31:24]);
         default: ;                                 // MAX, MIN: lmv
       endcase
     end
