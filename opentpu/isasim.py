@@ -32,6 +32,8 @@ class Config:
     TQUAD: bool = False      # TMM QUAD (QACT DUP4): ternary MMs of M <= MCOLS/4 rows four K
     #                          blocks an advance (the K-split by four; CAPS2 bit2)
     TGSC: bool = False       # TMM: fp32 scale per row and D-element block (CAPS2 bit4)
+    VCMP: bool = False       # VOP CMP_GT, CMP_EQ and SEL (CAPS2 bit5)
+    TBIN: bool = False       # TMM packed +/-1 weights (CAPS2 bit6)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -82,6 +84,8 @@ def board_config(**kw) -> Config:
                 TPAIR=bool(int(env.get("OTPU_TPAIR", 0))),
                 TQUAD=bool(int(env.get("OTPU_TQUAD", 0))),
                 TGSC=bool(int(env.get("OTPU_TGSC", 0))),
+                VCMP=bool(int(env.get("OTPU_VCMP", 0))),
+                TBIN=bool(int(env.get("OTPU_TBIN", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -570,7 +574,10 @@ class Slice:
         rsc, pair = bool(ins.flags & I.F_RSC), bool(ins.flags & I.F_PAIR)
         quad = bool(ins.flags & I.F_QUAD)
         gsc = bool(ins.flags & I.F_GSC)
-        quarter = w[3] >> 24
+        binary = bool(w[3] & I.TMM_BIN)
+        quarter = (w[3] >> 24) & 3 if binary else w[3] >> 24
+        if binary and (not cfg.TBIN or pair or quad or gsc or quarter or w[3] & 0xf8000000):
+            raise SimError("TMM BIN: needs Config.TBIN, without GSC/PAIR/QUAD/quarter")
         if quarter and (KB != 1 or quarter > 3 or pair or quad or gsc):
             raise SimError("TMM: a quarter selects one block of one packed chunk")
         if gsc and (not cfg.TGSC or unit or rsc or pair or quad or ins.flags & I.F_ASCALE):
@@ -591,7 +598,7 @@ class Slice:
             raise SimError("TMM: select exactly one of UNIT or RSC")
         if ins.flags & I.F_ASCALE and not (unit and accf):
             raise SimError("TMM: ASCALE needs UNIT and ACC")
-        row_bytes = ((KB + 3) // 4) * D
+        row_bytes = ((KB + (7 if binary else 3)) // (8 if binary else 4)) * D
         if sa % D or rs % D or rs < row_bytes or \
                 sa + (N - 1) * rs + row_bytes > cfg.DRAM_BYTES:
             raise SimError("TMM: packed rows must be D-byte aligned and in range")
@@ -634,12 +641,14 @@ class Slice:
             codes = np.empty((N, D), dtype=np.uint8)
             for lane in range(D):
                 wk = k + quarter
-                byte = self.dram[sa + np.arange(N) * rs + (wk // 4) * D +
-                                 (lane + (wk % 4) * D) // 4]
-                codes[:, lane] = (byte >> (2 * ((lane + (wk % 4) * D) % 4))) & 0b11
-            if np.any(codes == 0b11):
+                per_byte, blocks = (8, 8) if binary else (4, 4)
+                symbol = lane + (wk % blocks) * D
+                byte = self.dram[sa + np.arange(N) * rs + (wk // blocks) * D + symbol // per_byte]
+                codes[:, lane] = (byte >> ((symbol % per_byte) * (1 if binary else 2))) & (1 if binary else 3)
+            if not binary and np.any(codes == 0b11):
                 raise SimError("TMM: reserved ternary code 11")
-            weights = np.where(codes == 1, 1, np.where(codes == 2, -1, 0)).astype(np.int64)
+            weights = (np.where(codes == 1, 1, -1) if binary else
+                       np.where(codes == 1, 1, np.where(codes == 2, -1, 0))).astype(np.int64)
             for g in range(4):
                 lo, hi = g * group, (g + 1) * group
                 # QACT has one offset per D/4 group; hardware's two adjacent D/8
@@ -746,8 +755,10 @@ class Slice:
         c = np.arange(cols)[None, :]
         if func == I.V_OUTER:
             return self._outer(ins, dst, a, b, w7, rows, cols, drs, brs, bmode)
-        if func == I.V_MAC and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
-            raise SimError("VOP MAC: bmode must not be SCALAR, cols <= 256")
+        if func in (I.V_CMP_GT, I.V_CMP_EQ, I.V_SEL) and not self.cfg.VCMP:
+            raise SimError("VOP CMP/SEL: needs Config.VCMP")
+        if func in (I.V_MAC, I.V_SEL) and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
+            raise SimError("VOP MAC/SEL: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
         A = self.tget(aidx) if func != I.V_FILL else None
         bidx = None
@@ -800,6 +811,15 @@ class Slice:
             # the column vector is read before anything is written (the VPU's buffers)
             Cv = self.tget(np.broadcast_to(w7 + c, (1, cols)))
             ops[func] = lambda: F.add(F.mul(A, Cv), B)
+        if func in (I.V_CMP_GT, I.V_CMP_EQ):
+            af, bf = F.ftz(A), F.ftz(B)
+            with np.errstate(invalid="ignore"):
+                result = (af > bf) if func == I.V_CMP_GT else (af == bf)
+            ops[func] = lambda: result.astype(np.float32)
+        if func == I.V_SEL:
+            mask = F.ftz(self.tget(np.broadcast_to(w7 + c, (1, cols))))
+            ops[func] = lambda: np.where((F.bits(mask) & np.uint32(0x7fffffff)) != 0,
+                                          F.ftz(A), F.ftz(B))
         if func in I.TFN_FUNCS:
             if not getattr(self.cfg, "TFN", False):
                 raise SimError(f"VOP: table function {func:#x} needs Config.TFN")

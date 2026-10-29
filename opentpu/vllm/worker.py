@@ -36,7 +36,7 @@ from .platform import BLOCK_SIZE, Unsupported
 logger = init_logger(__name__)
 
 DEFAULTS = dict(dev="/dev/xdma0", slots=4, wformat="auto", head_format=None,
-                resident=True, prompt_runs=True)
+                resident=True, prompt_runs=True, fpga_only=False)
 
 
 def card_dram_bytes() -> int:
@@ -53,6 +53,11 @@ def options(vllm_config) -> dict:
         o["dev"] = os.environ["OTPU_VLLM_DEV"]
     if os.environ.get("OTPU_VLLM_SLOTS"):
         o["slots"] = int(os.environ["OTPU_VLLM_SLOTS"])
+    if "OTPU_VLLM_FPGA_ONLY" in os.environ:
+        flag = os.environ["OTPU_VLLM_FPGA_ONLY"].strip()
+        if flag not in ("0", "1"):
+            raise ValueError("OTPU_VLLM_FPGA_ONLY must be 0 or 1")
+        o["fpga_only"] = flag == "1"
     return o
 
 
@@ -204,6 +209,9 @@ class OpenTPUWorker(WorkerBase):
         if getattr(self.eng, "bat", None) is not None:
             from ..llm import batch as BA
             self.steps = BA.Steps(self.eng)
+        if self.opts["fpga_only"] and self.steps is None:
+            self.shutdown()
+            raise Unsupported("openTPU FPGA-only vLLM needs at least two resident KV slots")
         logger.info("openTPU: %s on %s, %d KV slot(s) of %d positions, image %.0f MiB, %.1f s",
                     Path(mc.model).name, self.opts["backend"], self.B, self.cap,
                     self.eng.image.nbytes / 2**20, time.perf_counter() - t0)
@@ -277,12 +285,17 @@ class OpenTPUWorker(WorkerBase):
     def _take_slot(self, rid: str, tokens, params, seed) -> _Req:
         if not self.free:
             raise RuntimeError(f"openTPU: no free KV slot for {rid} ({self.B} slots)")
-        s = self.free.pop()
-        self.eng.reset(seq=s)
         if rid in self.kept:
             params, rng = self.kept.pop(rid)
         else:
             rng = np.random.default_rng(seed)
+        if self.opts["fpga_only"] and not _greedy(params):
+            raise Unsupported("openTPU FPGA-only vLLM currently supports greedy sampling "
+                              "without logprobs; it refuses CPU sampling")
+        s = self.free.pop()
+        self.eng.reset(seq=s)
+        if self.opts["fpga_only"]:
+            self.steps.set_sampling(s, None)
         r = _Req(rid, s, list(tokens), params, rng)
         self.reqs[rid] = r
         return r
@@ -333,6 +346,17 @@ class OpenTPUWorker(WorkerBase):
             if len(part) != n:
                 raise RuntimeError(f"openTPU: {rid} scheduled {n} tokens, {len(part)} known")
             last = p0 + n == len(r.tokens)
+            if self.opts["fpga_only"]:
+                # Process every prompt chunk without materializing logits on the host; its last
+                # token goes through the same on-device greedy head as subsequent decode steps.
+                feed = part[:-1] if last else part
+                n0 = self.steps.runs
+                if feed:
+                    self.steps.feed(r.slot, feed)
+                self.stats["prefill_runs"] += self.steps.runs - n0
+                if last:
+                    decode.append(r)
+                continue
             if n == 1 and last and self.B > 1:
                 decode.append(r)
                 continue
@@ -385,6 +409,8 @@ class OpenTPUWorker(WorkerBase):
                 r.tokens.append(logits[rid])
                 out.append([logits[rid]])
             elif rid in logits:
+                if self.opts["fpga_only"]:
+                    raise Unsupported("openTPU FPGA-only vLLM refuses host-side token sampling")
                 r = self.reqs[rid]
                 row = np.asarray(logits[rid])
                 t = sample(row, r.params, r.rng)

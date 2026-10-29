@@ -154,6 +154,34 @@ def test_greedy_tokens_are_the_engines_with_requests_batched(llm, ckpt):
     assert runs > 0 and rows > runs                    # decode steps batched over the slots
 
 
+def test_fpga_only_greedy_prefill_and_decode(ckpt, env, monkeypatch):
+    """Strict mode picks even the first token on the device, for every scheduled request."""
+    from opentpu.vllm import worker
+    monkeypatch.setenv("OTPU_VLLM_FPGA_ONLY", "1")
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the strict vLLM path called the host sampler")
+    monkeypatch.setattr(worker, "sample", forbidden)
+    engine = _llm(ckpt)
+    prompts = _prompts(33, [5, 12])
+    got, fin = _gen(engine, prompts, max_tokens=3)
+    assert fin == ["length", "length"]
+    for prompt, actual in zip(prompts, got):
+        assert actual == _ref(ckpt, prompt, 3)
+    assert _stats(engine)["device_picks"] == 6
+
+
+def test_fpga_only_rejects_cpu_sampling_before_allocating_slot():
+    from types import SimpleNamespace
+    from opentpu.vllm.platform import Unsupported
+    from opentpu.vllm.worker import OpenTPUWorker
+    w = object.__new__(OpenTPUWorker)
+    w.free, w.kept, w.opts = [0, 1], {}, {"fpga_only": True}
+    params = SimpleNamespace(temperature=.8, logprobs=None)
+    with pytest.raises(Unsupported, match="refuses CPU sampling"):
+        w._take_slot("request", [1], params, 0)
+    assert w.free == [0, 1]
+
+
 def test_seeded_sampling_alone_and_among_others(llm):
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt

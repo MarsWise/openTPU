@@ -332,6 +332,26 @@ def pack_ternary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
     return rows
 
 
+def pack_binary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
+    """Pack independent +/-1 weights, least-significant bit first, into D-byte chunks.
+
+    The number of weights must be a whole number of D-element blocks. Unused
+    bits of the final chunk are ignored by TMM; they are not zero-valued weights.
+    """
+    w = np.asarray(weights)
+    if w.ndim != 2 or not np.issubdtype(w.dtype, np.integer) or w.dtype == np.bool_:
+        raise TypeError("binary weights must be a 2-D integer array")
+    if D <= 0 or D % 8 or not w.shape[1] or w.shape[1] % D:
+        raise ValueError("binary weights need D divisible by 8 and K divisible by D")
+    if np.any((w != -1) & (w != 1)):
+        raise ValueError("binary weights must contain only -1 and +1")
+    packed = np.packbits(w > 0, axis=1, bitorder="little")
+    stride = -(-packed.shape[1] // D) * D
+    rows = np.zeros((w.shape[0], stride), dtype=np.uint8)
+    rows[:, :packed.shape[1]] = packed
+    return rows
+
+
 def unpack_ternary(packed: np.ndarray, count: int) -> np.ndarray:
     """Unpack low-pair-first ternary bytes to signed int8 values, validating symbols and tail."""
     p = np.asarray(packed)

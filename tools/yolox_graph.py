@@ -15,6 +15,11 @@ into one [anchors, 85] buffer, the levels' flatten and concatenation included), 
 if the plan leaves the host anything but reading that buffer and NMS: graph nodes the plan does
 not run must be pure layout (flatten / permute / the levels' cat / shape queries), which the
 decode buffer's layout replaces. A placement report lists where every operator ran.
+
+--fpga-nms: implies --strict-fpga, then computes class selection, box corners and
+class-aware NMS on a VCMP device and reads only fixed-size final detections. This
+path skips the CPU model/reference calculation. Input letterbox/resize still
+runs on the host; the complete path is not yet validated with a real r6 card.
 """
 import argparse
 import hashlib
@@ -36,8 +41,17 @@ def main():
     ap.add_argument("--stubs", default=None)
     ap.add_argument("--per-op", action="store_true")
     ap.add_argument("--strict-fpga", action="store_true")
+    ap.add_argument("--fpga-nms", action="store_true",
+                    help="run decoded YOLOX class selection and NMS on r6; report only final detections")
+    ap.add_argument("--max-detections", type=int, default=100)
+    ap.add_argument("--confidence", type=float, default=0.3)
+    ap.add_argument("--nms-iou", type=float, default=0.45)
     ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
+    if a.fpga_nms:
+        a.strict_fpga = True
+        if a.per_op or a.check_isa:
+            ap.error("--fpga-nms currently requires --per-op and --check-isa off")
     sys.path.insert(0, a.repo)
     if a.stubs:
         sys.path.insert(0, a.stubs)
@@ -74,7 +88,9 @@ def main():
               f"ACT_ROWS={cfg.act_rows} ACT_BLOCKS={cfg.ACT_BLOCKS} TMEM={cfg.TMEM_WORDS}")
     else:
         cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, TMEM_WORDS=65536, LANES=8,
-                     DRAM_BYTES=1 << 28)
+                     DRAM_BYTES=1 << 28, VCMP=a.fpga_nms)
+    if a.fpga_nms and not cfg.VCMP:
+        raise SystemExit("--fpga-nms requires r6 firmware with CAPS2 VCMP")
     t0 = time.time()
     dec = {}
 
@@ -87,6 +103,7 @@ def main():
         sizes = [(pl.env[n].buf.H, pl.env[n].buf.W, pl.env[n].C) for n in lv]
         total = sum(h * w for h, w, _ in sizes)
         cols = sizes[0][2]
+        dec["n"], dec["cols"] = total, cols
         out = pl.buf("decoded", total, 1, cols)
         r0 = 0
         for n, (h, w, c) in zip(lv, sizes):
@@ -114,7 +131,24 @@ def main():
     print(f"plan: {len(plan.ops)} ops {kinds}, {len(plan.bufs)} buffers, DRAM image "
           f"{plan.size / 2**20:.1f} MiB, instructions {sum(len(op.prog) for op in plan.ops)} "
           f"(compiled in {time.time() - t0:.1f}s)")
-    img = plan.image(plan.size, cfg.D)
+    nms_prog = None
+    image_size = plan.size
+    if a.fpga_nms:
+        from opentpu.kernels import nms_fpga
+        n = dec["n"]
+        planes = -(-plan.size // cfg.D) * cfg.D
+        result = -(-(planes + 24 * n) // cfg.D) * cfg.D
+        image_size = -(-(result + 28 * a.max_detections) // cfg.D) * cfg.D
+        if image_size > cfg.DRAM_BYTES:
+            raise SystemExit("--fpga-nms buffers exceed the configured DRAM size")
+        nms_prog = nms_fpga.yolox_preprocess(n, dec["cols"], dec["val"].buf.addr, planes,
+                                             tmem_words=cfg.TMEM_WORDS)
+        nms_prog += nms_fpga.program(n, a.max_detections, planes, result,
+                                     tmem_words=cfg.TMEM_WORDS, imem_words=cfg.IMEM_WORDS,
+                                     score_threshold=a.confidence, iou_threshold=a.nms_iou)
+        if len(nms_prog) * 8 > cfg.IMEM_WORDS:
+            raise SystemExit("--fpga-nms combined program does not fit instruction memory")
+    img = plan.image(image_size, cfg.D)
     x = load_image(a.image, a.size)
     plan.put_input(img, "x", x.transpose(1, 2, 0))
 
@@ -137,7 +171,27 @@ def main():
             stats["instructions"] += icount
         out = plan.run_isa(cfg, img, each)
     else:
-        out = run_board(board, plan, cfg, img, stats, a.check_isa)
+        out = run_board(board, plan, cfg, img, stats, a.check_isa, read_final=not a.fpga_nms)
+    if a.fpga_nms:
+        if board is None:
+            import dataclasses
+            from opentpu.isasim import Machine
+            sim = Machine(dataclasses.replace(cfg, DRAM_BYTES=len(out)), [nms_prog], [out]).run()
+            values = sim.slices[0].dram[result:result + 28 * a.max_detections].view(np.float32)
+        else:
+            at = -(-(len(img) + PROG_AT_GAP) // 4096) * 4096
+            board.load(at, nms_prog)
+            st = board.run(timeout=60.0)
+            stats["instructions"] += st["instructions"][0]
+            stats["cycles"] += st["cycles"]
+            values = board.read(result, 28 * a.max_detections).view(np.float32)
+        rows = values.reshape(-1, 7)
+        rows = rows[rows[:, 6] != 0]
+        print(f"FPGA NMS: {len(rows)} valid detections (max {a.max_detections})")
+        for x0, y0, x1, y1, score, cls, _ in rows:
+            print(f"  class {int(cls):2d} score {score:.3f} box [{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]")
+        print("input preprocessing: host letterbox/resize; graph, class selection and NMS: device")
+        return 0
     t_run = time.time() - t0
 
     with torch.no_grad():
@@ -206,7 +260,7 @@ def decode(raw, sizes, img_size):
 PROG_AT_GAP = 1 << 20
 
 
-def run_board(board, plan, cfg, img, stats, check):
+def run_board(board, plan, cfg, img, stats, check, read_final=True):
     """Write the plan's image once; per op load its program above the image and run it."""
     import dataclasses
     from opentpu.isasim import Machine
@@ -229,7 +283,7 @@ def run_board(board, plan, cfg, img, stats, check):
                 bad = int((got.view(np.uint32) != want.view(np.uint32)).sum())
                 raise SystemExit(f"op {i} {op.kind} {op.name}: {bad} words differ from the ISA")
     stats["checked ops"] = len(plan.ops) if check else 0
-    return board_image(board, plan, None, len(img))
+    return board_image(board, plan, None, len(img)) if read_final else None
 
 
 def board_image(board, plan, v, size=None):

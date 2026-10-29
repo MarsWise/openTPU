@@ -12,7 +12,8 @@ package otpu_pkg;
   localparam logic [7:0] V_ADD = 0, V_SUB = 1, V_RSUB = 2, V_MUL = 3, V_MAX = 4, V_MIN = 5,
                          V_OUTER = 6, V_MAC = 7, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
                          V_ABS = 12, V_FILL = 13, V_EXP2SUB = 14, V_LOG2 = 15, V_RSUM = 16,
-                         V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20;
+                         V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20,
+                         V_CMP_GT = 21, V_CMP_EQ = 22, V_SEL = 23;
   // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
   // otpu_se_comp only (the stream engine's composites)
   localparam logic [7:0] V_TFN0 = 8'h20;
@@ -166,7 +167,8 @@ package otpu_pkg;
 
   function automatic logic is_binary(input logic [7:0] f);
     return f == V_ADD || f == V_SUB || f == V_RSUB || f == V_MUL || f == V_MAX || f == V_MIN ||
-           f == V_FILL || f == V_EXP2SUB || f == V_MAC;
+           f == V_FILL || f == V_EXP2SUB || f == V_MAC || f == V_CMP_GT ||
+           f == V_CMP_EQ || f == V_SEL;
   endfunction
 
   // the functions that read operand B in its bmode (OUTER's is always B_ROW)
@@ -309,7 +311,8 @@ package otpu_pkg;
         n = 32'(c.w4[15:0]); kb = 32'(c.w4[23:16]); m = 32'(c.w6[23:16]);
         if (n != 0 && kb != 0 && m != 0) begin
           f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
-                       ((c.op == OP_TMM) ? (((kb + 32'd3) >> 2) * D) : kb * D));
+                       ((c.op == OP_TMM) ? (c.w4[26] ? (((kb + 32'd7) >> 3) * D) :
+                                                        (((kb + 32'd3) >> 2) * D)) : kb * D));
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
@@ -354,7 +357,8 @@ package otpu_pkg;
             f.rd[2] = mk(SP_TMEM, c.w7, cols);
           end else if (c.w6[23:16] != V_FILL)
             f.rd[0] = mk(SP_TMEM, c.w2, p.p0 + cols);
-          if (c.w6[23:16] == V_MAC) f.rd[2] = mk(SP_TMEM, c.w7, cols);   // its column vector
+          if (c.w6[23:16] == V_MAC || c.w6[23:16] == V_SEL)
+            f.rd[2] = mk(SP_TMEM, c.w7, cols);   // MAC's C or SEL's buffered mask
           if (reads_b(c.w6[23:16])) begin
             case (c.w6[25:24])
               B_FULL: f.rd[1] = mk(SP_TMEM, c.w3, p.p1 + cols);

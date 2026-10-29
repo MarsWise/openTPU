@@ -1,0 +1,2 @@
+# Shell scripts are also executed in Linux containers and on the FPGA host.
+*.sh text eol=lf

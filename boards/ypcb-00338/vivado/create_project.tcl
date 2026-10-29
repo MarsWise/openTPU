@@ -132,7 +132,9 @@ set TQUAD [expr {[info exists ::env(OTPU_TQUAD_GEN)] ? $::env(OTPU_TQUAD_GEN) eq
 # the table functions in CAPS2 bit3 (run_vivado.sh: TFN=1 or the target's [arch] TFN)
 set TFN [expr {[info exists ::env(OTPU_TFN_GEN)] ? $::env(OTPU_TFN_GEN) eq "1" : 0}]
 set TGSC [expr {[info exists ::env(OTPU_TGSC_GEN)] ? $::env(OTPU_TGSC_GEN) eq "1" : 0}]
-set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN TGSC=1'b$TGSC MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
+set VCMP [expr {[info exists ::env(OTPU_VCMP_GEN)] ? $::env(OTPU_VCMP_GEN) eq "1" : 0}]
+set TBIN [expr {[info exists ::env(OTPU_TBIN_GEN)] ? $::env(OTPU_TBIN_GEN) eq "1" : 0}]
+set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN TGSC=1'b$TGSC VCMP=1'b$VCMP TBIN=1'b$TBIN MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
 
 # ---- constraints: the board (otpu_top_ld.xdc) and the core's pads, VREF and synchronizers
 # (otpu_litedram.xdc); then, after the IP's constraints, as unmanaged Tcl on the implemented

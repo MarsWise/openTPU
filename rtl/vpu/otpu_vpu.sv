@@ -489,7 +489,7 @@ module otpu_vpu
   // compares of m0.func (133.33 MHz, the 100 MHz fused placement: m0.func (fo 119) -> short lane
   // rc / rb, 13.6 / 13.8 levels, -1.2 ns; the tap-0 hit and the composite test fan out to every
   // lane's result and operand muxes)
-  localparam int NVF = 20;                    // function codes V_ADD .. V_RDOT
+  localparam int NVF = 24;                    // includes CMP and SEL; ARGMAX remains a reduction
   typedef struct packed {
     logic [NVF-1:0] fh;                       // one-hot func (none for codes >= NVF)
     logic           s0;                       // ends at tap 0: no slots, not a reduction
@@ -686,6 +686,9 @@ module otpu_vpu
         m0d.fh[V_COPY]:  st[0].v = xz;
         m0d.fh[V_ABS]:   st[0].v = fabs(x);
         m0d.fh[V_FILL]:  st[0].v = ftz(y);
+        m0d.fh[V_CMP_GT]: st[0].v = fp_cmp_gt(x, y) ? F_ONE : F_ZERO;
+        m0d.fh[V_CMP_EQ]: st[0].v = fp_cmp_eq(x, y) ? F_ONE : F_ZERO;
+        m0d.fh[V_SEL]: st[0].v = (ftz(xc[l]) & 32'h7fff_ffff) != 0 ? ftz(x) : ftz(y);
         m0d.fh[V_RECIP]: begin                               // on the significand a
           st[0].k1 = {9'h17F, xz[22:0]};                     // -a
           st[0].k2 = RECIP_MAGIC - {9'h07F, xz[22:0]};       // seed
@@ -923,6 +926,9 @@ module otpu_vpu
         m0d.fh[V_COPY]:  st[0] = ftz(x);
         m0d.fh[V_ABS]:   st[0] = fabs(x);
         m0d.fh[V_FILL]:  st[0] = ftz(y);
+        m0d.fh[V_CMP_GT]: st[0] = fp_cmp_gt(x, y) ? F_ONE : F_ZERO;
+        m0d.fh[V_CMP_EQ]: st[0] = fp_cmp_eq(x, y) ? F_ONE : F_ZERO;
+        m0d.fh[V_SEL]: st[0] = (ftz(xc[l]) & 32'h7fff_ffff) != 0 ? ftz(x) : ftz(y);
         default: ;                                 // MAX, MIN: lmv
       endcase
     end
@@ -1591,11 +1597,11 @@ module otpu_vpu
           a_row <= AW'(hc.w2); b_row <= AW'(hc.w3); d_row <= AW'(hc.w1);
           // OUTER: A is dst (in place), after a fill of its column buffers; MAC: the fill of
           // its column vector C (the C buffer; no D)
-          filling <= (hf == V_OUTER) || (hf == V_MAC);
+          filling <= (hf == V_OUTER) || (hf == V_MAC) || (hf == V_SEL);
           nfill <= (nchunks < 16'd2) ? 16'd2 : nchunks;
           oc_a <= AW'(hc.w7); od_a <= AW'(hc.w2);
           od_sc <= hc.flags[VF_DSCALAR] && hf == V_OUTER;
-          od_one <= hc.flags[VF_DONE] || hf == V_MAC;
+          od_one <= hc.flags[VF_DONE] || hf == V_MAC || hf == V_SEL;
           if (hf == V_OUTER) begin
             a_row <= AW'(hc.w1); ars <= hc.w5[15:0];
           end

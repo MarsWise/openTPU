@@ -247,6 +247,43 @@ def minimum(x, y) -> Tile:
     return current().binop(I.V_MIN, x, y)
 
 
+def greater(x, y) -> Tile:
+    """Ordered x > y as fp32 0/1; requires the r6 VCMP capability."""
+    if not current().cfg.VCMP:
+        raise CompileError("greater needs Config.VCMP")
+    return current().binop(I.V_CMP_GT, x, y)
+
+
+def equal(x, y) -> Tile:
+    """Ordered x == y as fp32 0/1; requires the r6 VCMP capability."""
+    if not current().cfg.VCMP:
+        raise CompileError("equal needs Config.VCMP")
+    return current().binop(I.V_CMP_EQ, x, y)
+
+
+def select_columns(mask, x, y) -> Tile:
+    """Select x or y by a 1-D column mask shared by rows, in chunks of 256."""
+    b = current()
+    if not b.cfg.VCMP:
+        raise CompileError("select_columns needs Config.VCMP")
+    x = b.materialize(x)
+    if not isinstance(mask, Tile) or mask.shape != (x.cols,):
+        raise CompileError("select_columns needs a one-dimensional mask of x's column count")
+    if not isinstance(y, Tile) or (y.rows, y.cols) != (x.rows, x.cols):
+        raise CompileError("select_columns needs y with the same shape as x")
+    out = b.alloc(x.shape)
+    for c0 in builtins.range(0, x.cols, I.OUTER_MAX_COLS):
+        c1 = min(c0 + I.OUTER_MAX_COLS, x.cols)
+        if c0 == 0 and c1 == x.cols:
+            b.vop(I.V_SEL, out, x, y, cv=mask)
+        elif len(x.shape) == 1:
+            b.vop(I.V_SEL, out[c0:c1], x[c0:c1], y[c0:c1], cv=mask[c0:c1])
+        else:
+            b.vop(I.V_SEL, out[:, c0:c1], x[:, c0:c1], y[:, c0:c1], cv=mask[c0:c1])
+    out.fresh = True
+    return out
+
+
 def max(x, axis: int = -1) -> Tile:  # noqa: A001
     return current().reduce(I.V_RMAX, x, axis)
 
