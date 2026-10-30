@@ -113,6 +113,10 @@ module otpu_ctrl #(
   parameter bit TQUAD = 1'b0,            // CAPS2 bit2: the build is TMM QUAD's (the target's TQUAD)
   parameter bit TFN = 1'b0,              // CAPS2 bit3: the table functions (the target's TFN, with DSTEP)
   parameter bit TGSC = 1'b0,             // CAPS2 bit4: native ternary group scales
+  parameter bit VCMP = 1'b0,             // CAPS2 bit5: ordered compare and selection
+  parameter bit TBIN = 1'b0,             // CAPS2 bit6: packed binary weights
+  parameter bit TBGSC = 1'b0,            // CAPS2 bit7: binary weights with group scales
+  parameter bit VU8 = 1'b0,              // CAPS2 bit8: unsigned byte extraction
   parameter bit TPAIR = 1'b0,            // CAPS2 bit1: the build is TMM PAIR's (the target's TPAIR;
                                          //   the MXU takes it in every build since)
   parameter int LDP = 2,                 // cycles after LOAD before the loaders' busy shows (>= 2)
@@ -205,7 +209,7 @@ module otpu_ctrl #(
   // holds it, opentpu/target.py arch_hash)
   // bit2 TQUAD: TMM QUAD, the K-split by four (likewise)
   // bit3 TFN: the table functions (likewise)
-  localparam logic [31:0] CAPS2 = {27'd0, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
+  localparam logic [31:0] CAPS2 = {23'd0, VU8, TBGSC, TBIN, VCMP, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
 
   logic [63:0] cycles;
   logic [31:0] n_brd, n_bwr, n_ard, n_awr, n_bst, scratch;

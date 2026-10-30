@@ -312,6 +312,7 @@ class QTensor:
     k0: int = 0
     rsc: bool = False
     ternary: bool = False
+    binary: bool = False
     gsc: bool = False
     hsigns: Affine | None = None
     hblock: int = 0
@@ -349,6 +350,24 @@ class QTensor:
         return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
                        (n, k), stride, 0 if scale is None else srs, D,
                        wf=I.W8, rsc=scale is not None and not gsc, ternary=True, gsc=gsc)
+
+    @staticmethod
+    def binary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
+                      srs: int = 4, gsc: bool = False) -> "QTensor":
+        """Descriptor for the independent +/-1, eight-weights-per-byte TMM format."""
+        if n <= 0 or k <= 0 or D <= 0 or D % 8 or k % D:
+            raise CompileError("binary weight shape needs K divisible by D and D divisible by 8")
+        row_bytes = k // 8
+        stride = ((row_bytes + D - 1) // D) * D if rs is None else rs
+        if stride % D or stride < row_bytes:
+            raise CompileError("binary weight row stride must be D-byte aligned and cover K/8")
+        if scale is not None and (srs % 4 or srs < 4):
+            raise CompileError("binary scale stride must be a multiple of 4 and >= 4")
+        if gsc and (D != 128 or scale is None or srs < 4 * k // D):
+            raise CompileError("binary GSC needs D=128 and a fp32 scale per K block")
+        return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
+                       (n, k), stride, 0 if scale is None else srs, D,
+                       wf=I.W8, rsc=scale is not None and not gsc, ternary=True, binary=True, gsc=gsc)
 
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
@@ -388,7 +407,7 @@ class QTensor:
         if self.tiles is not None:
             return self.padded_cols(r0, nr, c0, nc, nc)
         if self.ternary:
-            data = self.data + r0 * self.rs + c0.div_exact(4 * self.D) * self.D
+            data = self.data + r0 * self.rs + c0.div_exact((8 if self.binary else 4) * self.D) * self.D
         elif self.wf == I.W8:
             data = self.data + r0 * self.rs + c0
         else:                     # 4-bit rows stream whole D-byte chunks of two D-blocks
@@ -407,7 +426,7 @@ class QTensor:
             elif not self.rsc:
                 k0 += c0.div_exact(self.D).static()
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
-                       rsc=self.rsc, ternary=self.ternary, gsc=self.gsc,
+                       rsc=self.rsc, ternary=self.ternary, binary=self.binary, gsc=self.gsc,
                        hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
                        hblock=self.hblock)
 
@@ -1455,19 +1474,24 @@ class Builder:
             raise CompileError(f"bad operand {b!r}")
         drs = dst.rs if len(dst.shape) == 2 else 0
         ra, d_base = (0, dst.base) if at is None else self.addr(Affine(dst.base) + Affine.of(at))
-        if func == I.V_MAC:
+        if func in (I.V_MAC, I.V_SEL):
             if bmode == I.B_SCALAR:
-                raise CompileError("mac: y must be a tile or a broadcast (not a scalar)")
+                raise CompileError("MAC/SEL: y must be a tile or a broadcast (not a scalar)")
+            if cv is None:
+                raise CompileError("MAC/SEL: column vector is required")
+            self.check_live(cv)
             imm = cv.base
         self.emit(I.vop(func, d_base, a_base, b_base, rows, cols, drs, ars, brs, bmode, imm,
                         ra=ra, comment=I.VFUNCS[func]))
 
     def binop(self, func: int, x, y):
         swap = {I.V_ADD: I.V_ADD, I.V_MUL: I.V_MUL, I.V_MAX: I.V_MAX, I.V_MIN: I.V_MIN,
-                I.V_SUB: I.V_RSUB, I.V_RSUB: I.V_SUB}
+                I.V_SUB: I.V_RSUB, I.V_RSUB: I.V_SUB, I.V_CMP_EQ: I.V_CMP_EQ}
         if not isinstance(x, Tile) or (x.shape == (1,) and isinstance(y, Tile)
                                        and y.shape != (1,)):
             if isinstance(y, Tile):
+                if func not in swap:
+                    raise CompileError("this comparison requires its first operand to be a tile")
                 x, y, func = y, x, swap[func]
             else:
                 raise CompileError("an elementwise op needs at least one full tile operand")
@@ -1518,7 +1542,7 @@ class Builder:
             return False
         ins = self._last_vop_writing(value)
         if ins is None or (ins.w[5] >> 16) & 0xFF in I.REDUCE or \
-                (ins.w[5] >> 16) & 0xFF == I.V_MAC:
+                (ins.w[5] >> 16) & 0xFF in (I.V_MAC, I.V_SEL):
             return False
         rows, cols = dst.rows, dst.cols
         drs = dst.rs if len(dst.shape) == 2 else 0
@@ -2019,6 +2043,10 @@ class Builder:
         unit = w.scale is None
         if w.gsc and not self.cfg.TGSC:
             raise CompileError("dot: ternary group scales require Config.TGSC / new firmware")
+        if w.binary and not self.cfg.TBIN:
+            raise CompileError("dot: binary weights require Config.TBIN / new firmware")
+        if w.binary and w.gsc and not self.cfg.TBGSC:
+            raise CompileError("dot: binary group scales require Config.TBGSC / new firmware")
         if w.ternary and (w.D != self.cfg.D or (not unit and not (w.rsc or w.gsc))):
             raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows
@@ -2038,9 +2066,10 @@ class Builder:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
-            if w.ternary and k0 % 4:
-                raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ternary "
-                                   f"ranges must start on a four-block boundary")
+            chunk_blocks = 8 if w.binary else 4
+            if w.ternary and k0 % chunk_blocks:
+                raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ranges "
+                                   f"must start on a {chunk_blocks}-block boundary")
             if w.ternary and k1 - k0 > 255:
                 raise CompileError(f"dot: TMM supports at most 255 K blocks per instruction, "
                                    f"got {k1 - k0}")
@@ -2050,11 +2079,11 @@ class Builder:
             m0 = 0
             for ab, mc in st.chunks:
                 if w.ternary:
-                    tquad = not w.gsc and st.quad and getattr(self.cfg, "TQUAD", False)
-                    tpair = not w.gsc and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
-                    ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa + (4 * k0 if w.gsc else 0),
+                    tquad = not w.gsc and not w.binary and st.quad and getattr(self.cfg, "TQUAD", False)
+                    tpair = not w.gsc and not w.binary and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
+                    ins = I.tmm(sa + (k0 // chunk_blocks) * self.cfg.D, ssa + (4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
-                                w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc,
+                                w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc, binary=w.binary,
                                 pair=tpair, quad=tquad,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,

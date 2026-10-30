@@ -325,6 +325,19 @@ package otpu_fp;
     return za ? (zb ? (!a[31] && b[31]) : b[31]) : (zb ? !a[31] : gr);
   endfunction
 
+  // Ordered comparisons after the VPU's usual flush-to-zero. Both zero signs
+  // compare equal, and every comparison involving a NaN is false.
+  function automatic logic fp_cmp_eq(input f32_t a, input f32_t b);
+    f32_t af, bf;
+    af = ftz(a); bf = ftz(b);
+    return !is_nan(af) && !is_nan(bf) &&
+           ((af[30:0] == 0 && bf[30:0] == 0) || af == bf);
+  endfunction
+
+  function automatic logic fp_cmp_gt(input f32_t a, input f32_t b);
+    return !is_nan(a) && !is_nan(b) && !fp_cmp_eq(a, b) && fp_gt(a, b);
+  endfunction
+
   function automatic f32_t fp_max(input f32_t a, input f32_t b);
     return fp_gt(a, b) ? ftz(a) : ftz(b);
   endfunction

@@ -6,7 +6,7 @@
 # synth_util_hier.rpt 99,269 LUTs / 114,417 FFs, before the ternary PE fold).
 set root [file normalize [file join [file dirname [info script]] ../..]]
 set unit [lindex $argv 0]
-if {$unit ni {quant se mxu gsc}} { error "expected quant, se, mxu or gsc" }
+if {$unit ni {quant se mxu gsc vpu}} { error "expected quant, se, mxu, gsc or vpu" }
 set out [file normalize [lindex $argv 1]]
 file mkdir $out
 set alt [expr {[llength $argv] > 2 ? [file normalize [lindex $argv 2]] : ""}]
@@ -17,7 +17,12 @@ set sources {
 }
 foreach src $sources { read_verilog -sv $root/$src }
 read_verilog -sv $dsp
-if {$unit in {mxu gsc}} {
+if {$unit eq "vpu"} {
+  foreach src {rtl/vpu/otpu_vtree.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv
+               rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv} { read_verilog -sv $root/$src }
+  set top otpu_vpu
+  set generics {LANES=8 CL=2 WBUF=1'b1 HAS_SE=1'b1}
+} elseif {$unit in {mxu gsc}} {
   read_verilog -sv $root/rtl/mxu/otpu_mxu.sv
   set top [expr {$unit eq "gsc" ? "otpu_tmm_gsc" : "otpu_mxu"}]
   set generics [expr {$unit eq "gsc" ? {D=128} : {D=128 MCOLS=8 ROWS=16 LANES=8 TLANES=8 IMPL=2 CL=16 E=8 TQ=1'b1}}]

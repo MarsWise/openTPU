@@ -18,10 +18,10 @@ UNARY = {
 BINARY = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mul": lambda a, b: a * b}
 
 
-def rows_a_tile(N: int, tiles: int) -> int:
+def rows_a_tile(N: int, tiles: int, reserve_vectors: int = 4) -> int:
     """Rows a tile so that `tiles` [R, N] tiles and a few [N] vectors fit TMEM (ACT_ROWS at
     most: the VPU's row block)."""
-    room = ol.tmem_words() - 4 * N - 2048
+    room = ol.tmem_words() - reserve_vectors * N - 2048
     R = min(ol.current().cfg.act_rows, room // (tiles * N))
     if R < 1:
         raise ol.CompileError(f"eltwise: rows of {N} words do not fit TMEM ({ol.tmem_words()})")
@@ -46,7 +46,9 @@ def unary(x, y, M: int, N: int, fn: str):
 def binary(a, b, y, M: int, N: int, op: str, brow: bool = False):
     """y [M, N] = a op b; b [M, N], or [N] broadcast over the rows (brow)."""
     f = BINARY[op]
-    R = rows_a_tile(N, 2)
+    # Both inputs and the result of f(va, vb) are live before va.set copies it.
+    # Reserving only two tiles exhausts TMEM for wide rows, e.g. SmolVLA base.
+    R = rows_a_tile(N, 3, reserve_vectors=1 if brow else 0)
     ta = ol.empty([R, N])
     if brow:
         bv = ol.load(b)

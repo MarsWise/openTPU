@@ -164,7 +164,9 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
 
     # ---- VPU: every function under its legal broadcast modes
     for f, name in I.VFUNCS.items():
-        if f in (I.V_OUTER, I.V_ARGMAX) or f in I.TFN_FUNCS:
+        if f in (I.V_OUTER, I.V_ARGMAX, I.V_SEL) or f in I.TFN_FUNCS:
+            continue
+        if f in (I.V_CMP_GT, I.V_CMP_EQ) and not getattr(cfg, "VCMP", False):
             continue
         if f in I.READS_B:
             modes = [("FULL", I.B_FULL), ("ROW", I.B_ROW), ("COL", I.B_COL)]
@@ -182,6 +184,9 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
                                   I.st(OUT, RES, 3)))
             else:
                 add(group, nm, _vop(f, bm))
+    if getattr(cfg, "VCMP", False):
+        add("vpu", "VOP SEL column mask",
+            _p(I.sel(RES, A, B, 2048, 3, 200, 256, 256, 256), I.st(OUT, RES, 3 * 256)))
     for dname in ("scalar", "column", "one"):
         add("vpu-new", f"VOP OUTER {dname}",
             _p(I.vop(I.V_COPY, RES, A, 0, 4, 64, 64, 64, 0),

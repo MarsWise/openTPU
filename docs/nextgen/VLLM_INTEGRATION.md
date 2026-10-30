@@ -1,5 +1,17 @@
 # vLLM integration status
 
+## r6 update (2026-10-29)
+
+Set `OTPU_VLLM_FPGA_ONLY=1` to require device-side greedy token selection from
+the first output onward. The worker uses the resident batched feed and decode
+programs and refuses a request needing host sampling or logprobs. It requires
+at least two resident KV slots (`OTPU_VLLM_SLOTS=2` or more). The default,
+without the flag, remains the compatibility path described below and can
+sample on the host. The strict mode has passed an ISA test with vLLM 0.32.0
+and a tiny Qwen3 checkpoint, including an assertion that the host sampler is
+never called; it has **not yet** been validated with an r6 bitstream on FPGA.
+Temperature sampling, device RNG and logprobs still need implementation.
+
 ## Status (2026-10-20): native vLLM 0.32.0 platform + worker — SOFTWARE VERIFIED (ISA simulator); card NOT RUN
 
 `opentpu/vllm/` is an out-of-tree vLLM platform. vLLM's own engine (its scheduler, continuous

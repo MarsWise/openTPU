@@ -188,7 +188,9 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
         if n and kb and m:
             p0, p1 = _p(n - 1, c[4]), _p(n - 1, c[6])
             p2, p3 = _p(m - 1, c[5] & 0xFFFF), _p(m, c[5] & 0xFFFF)
-            row_bytes = ((kb + 3) // 4) * D if op == I.TMM else kb * D
+            binary = op == I.TMM and bool(c[3] & I.TMM_BIN)
+            row_bytes = (((kb + (7 if binary else 3)) // (8 if binary else 4)) * D
+                         if op == I.TMM else kb * D)
             rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
             if op == I.TMM:
                 if fl & (I.F_RSC | I.F_GSC):
@@ -239,7 +241,7 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
                 rd.append(_mk(SP_TMEM, w[6], cols))
             elif f != I.V_FILL:
                 rd.append(_mk(SP_TMEM, w[1], p0 + cols))
-            if f == I.V_MAC:
+            if f in (I.V_MAC, I.V_SEL):
                 rd.append(_mk(SP_TMEM, w[6], cols))
             if f in I.BINARY or f in (I.V_RDOT, I.V_OUTER):
                 if bm == I.B_FULL:

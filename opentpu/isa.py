@@ -34,6 +34,7 @@ F_DUP4 = 0x10                   # QACT, with F_DUP: and to rows 2*rows..4*rows-1
 F_QUAD = 0x10                   # TMM (its weight-format field's bit4; Config.TQUAD): the K-split
 #                                 by four, a ternary chunk's four blocks in one advance
 F_GSC = 0x20                    # TMM: fp32 scale per row and D-element K block (Config.TGSC)
+TMM_BIN = 1 << 26               # TMM word 4: 8 binary weights per byte (Config.TBIN)
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
@@ -46,11 +47,15 @@ V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_OUTER = 0, 1, 2, 3, 4, 5, 6
 V_MAC = 7                 # A * Cv(c) + B: Cv the column vector at imm (TMEM, w7 += R[rd])
 V_COPY, V_EXP2, V_RECIP, V_RSQRT, V_ABS, V_FILL, V_EXP2SUB, V_LOG2 = 8, 9, 10, 11, 12, 13, 14, 15
 V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX = 16, 17, 18, 19, 20
+V_CMP_GT, V_CMP_EQ, V_SEL = 21, 22, 23
+V_U8_0, V_U8_1, V_U8_2, V_U8_3 = 24, 25, 26, 27
+V_U8 = (V_U8_0, V_U8_1, V_U8_2, V_U8_3)
 VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max",
           V_MIN: "min", V_OUTER: "outer", V_MAC: "mac", V_COPY: "copy", V_EXP2: "exp2", V_RECIP: "recip",
           V_RSQRT: "rsqrt", V_ABS: "abs", V_FILL: "fill", V_EXP2SUB: "exp2sub",
           V_LOG2: "log2", V_RSUM: "rsum", V_RMAX: "rmax", V_RSSQ: "rssq", V_RDOT: "rdot",
-          V_ARGMAX: "argmax"}
+          V_ARGMAX: "argmax", V_CMP_GT: "cmp_gt", V_CMP_EQ: "cmp_eq", V_SEL: "sel"}
+VFUNCS.update({f: f"u8_{i}" for i, f in enumerate(V_U8)})
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
 V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS = \
     range(0x20, 0x2A)
@@ -58,7 +63,8 @@ VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "ge
                V_GELU_TANH: "gelu_tanh", V_SOFTPLUS: "softplus", V_MISH: "mish",
                V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos"})
 TFN_FUNCS = set(range(0x20, 0x2A))
-BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC}
+BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC,
+          V_CMP_GT, V_CMP_EQ, V_SEL}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
 READS_B = BINARY | {V_RDOT}          # functions that read operand B in its bmode (OUTER: B_ROW)
 F_DSCALAR, F_DONE = 0x1, 0x2         # VOP OUTER: decay T[d] for every column / decay 1.0
@@ -430,7 +436,7 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
 
 def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
         ascale=None, rsc=False, pair=False, quad=False, ra=0, rb=0, rc=0, comment="",
-        gsc=False):
+        gsc=False, binary=False):
     """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
 
     Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
@@ -462,8 +468,10 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
         (F_ASCALE if ascale is not None else 0) | (F_RSC if rsc else 0) | (F_PAIR if pair else 0) | \
         (F_QUAD if quad else 0) | (F_GSC if gsc else 0)
     _check(not (pair and quad), "TMM: PAIR and QUAD are exclusive")
+    _check(not binary or not (pair or quad),
+           "TMM BIN: PAIR and QUAD are not supported")
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
-                 w=_w(sa, ssa, out, n | (kb << 16), rs,
+                 w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0), rs,
                       ors | (m << 16) | (ab << 24), srs), comment=comment)
 
 
@@ -498,7 +506,7 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func in (V_ARGMAX, V_MAC) else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
@@ -535,6 +543,19 @@ def mac(dst, a, b, c, rows, cols, drs, ars, brs, bmode=B_FULL, ra=0, rb=0, rc=0,
            f"MAC: cols {cols} (at most {OUTER_MAX_COLS}), bmode {bmode} (not SCALAR)")
     return vop(V_MAC, dst, a, b, rows, cols, drs, ars, brs, bmode, c, ra=ra, rb=rb, rc=rc,
                rd=rd, comment=comment)
+
+
+def sel(dst, a, b, mask, rows, cols, drs, ars, brs, bmode=B_FULL,
+        ra=0, rb=0, rc=0, rd=0, comment="sel"):
+    """Select A where the buffered column mask is nonzero, otherwise B.
+
+    The mask is read before any output, and applies to every row. For independent
+    row masks issue one instruction per row. Values are flushed to zero as usual.
+    """
+    _check(0 < cols <= OUTER_MAX_COLS and bmode != B_SCALAR,
+           f"SEL: cols {cols} (at most {OUTER_MAX_COLS}), bmode {bmode} (not SCALAR)")
+    return vop(V_SEL, dst, a, b, rows, cols, drs, ars, brs, bmode, mask,
+               ra=ra, rb=rb, rc=rc, rd=rd, comment=comment)
 
 
 def gather(src, dst, rows, cols, srs, drs, seg, ra=0, rb=0, comment=""):

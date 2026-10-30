@@ -229,15 +229,16 @@ must hold the same `Sa`, as one QACT writes them (the ISA simulator raises other
 ### TMM: packed ternary dot product
 
 `TMM` is a separate, version-safe MXU opcode; it does not repurpose MM's fully allocated `WF`
-field. Its address, shape, accumulation, row-max and `ASCALE` fields match MM, except `w4[31:24]`
-is reserved and zero. The activation operand is the same signed-int8 ACT RAM populated by QACT.
+field. Its address, shape, accumulation, row-max and `ASCALE` fields match MM. In a public
+command `w4[26]` selects BIN; all other bits of `w4[31:24]` are zero. The activation operand
+is the same signed-int8 ACT RAM populated by QACT.
 Weights use four 2-bit symbols per byte, low pair first (`00=0`, `01=+1`, `10=-1`, `11=invalid`).
 Four consecutive D-element K blocks are packed into one D-byte DRAM chunk; the last partial
 chunk is zero padded. Thus each packed row occupies `ceil(KB/4)*D` payload bytes, `sa` and `rs`
 are D-byte aligned, and `rs` covers the payload and is D-byte aligned. `D` must be divisible by
 four. The scale row is exactly one fp32 `Sw[n]` at `ssa+n*srs` (`RSC`); alternatively `UNIT`
-implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `WF` bit 5 is
-reserved and zero, bit 4 is `QUAD` (below). `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
+implies `Sw[n]=1` and does not read `ssa`. Without GSC select exactly one of `UNIT` or `RSC`;
+flags bit 5 selects GSC and bit 4 selects `QUAD` (below). `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
 in CAPS2 bit1, `Config.TPAIR`) needs `2M <= MCOLS` and the operand's rows also in ACT rows
 `M..2M-1` (QACT `DUP`): column `j` takes the even K blocks from row `j`, column `j + M` the odd
 ones from row `j + M`, two blocks an advance (`ceil(KB/2)` cycles a weight row instead of `KB`),
@@ -276,6 +277,25 @@ Code `11` in a consumed weight symbol is an error in the ISA simulator and a sim
 in RTL. Reserved symbols in padding beyond `KB` are not consumed. TMM defines a generic ternary
 ABI only; it does not claim compatibility with a particular BitNet/Tern2 checkpoint, whose
 quantization and scale metadata must be independently established.
+
+`GSC` (flags bit 5, CAPS2 bit 4) instead reads `KB` fp32 scales from each scale row and
+applies each block's scale before accumulating its fp32 result, in K order. Scale rows must
+be word aligned, `srs >= 4*KB`, and UNIT, RSC, ASCALE, PAIR and QUAD are prohibited.
+This implementation serializes blocks, so it does not provide PAIR/QUAD throughput.
+
+`BIN` (`w4[26]`, CAPS2 bit 6) stores eight signs per byte, low bit first: 0 is -1 and 1 is
++1. A row occupies `ceil(KB/8)*D` bytes, padded to a D-byte boundary. BIN may use UNIT or
+RSC; BIN+GSC also requires CAPS2 bit 7 (TBGSC), because earlier BIN/TGSC firmware does
+not implement their combination. BIN with PAIR or QUAD is unsupported. The bitstream must
+be checked for the corresponding capability before loading these commands.
+
+`VOP U8_0..U8_3` (functions 24..27, CAPS2 bit 8 / `Config.VU8`) interpret each A
+word's raw 32 bits as four little-endian unsigned bytes and return the selected byte as an
+exact fp32 value in [0, 255]. The raw bits are not interpreted as fp32 and are not flushed.
+The byte index is fixed by the function code. `opentpu.kernels.u8_input.program` uses
+four extraction passes and strided copies to restore byte order; it requires word-aligned,
+nonoverlapping DRAM buffers, padding in the last input word, and TMEM scratch. This primitive
+does not itself perform resize, channel conversion or normalization.
 
 #### Weight formats
 
