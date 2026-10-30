@@ -35,6 +35,39 @@ def test_patch_validation():
         patchify_programs(cfg, 0, 0x40000, 5, 6, 2)
     with pytest.raises(ValueError):
         patchify_programs(cfg, 0, 0, 4, 4, 2)
+    with pytest.raises(ValueError):
+        patchify_programs(cfg, 0, 0x40000, 6, 6, 2, order='minicpm')
+
+
+def test_minicpm_window_order():
+    cfg = Config(D=128, MCOLS=8, ACT_BLOCKS=16, TMEM_WORDS=1024,
+                 IMEM_WORDS=512, DRAM_BYTES=1 << 20)
+    x = np.arange(8 * 16 * 3, dtype=np.float32).reshape(8, 16, 3)
+    image = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    image[:x.nbytes] = x.reshape(-1).view(np.uint8)
+    programs = patchify_programs(cfg, 0, 0x40000, 8, 16, 2, 3, order='minicpm')
+    for code in programs:
+        image = Machine(cfg, [code], [image]).run().slices[0].dram
+    actual = image[0x40000:0x40000 + x.nbytes].copy().view(np.float32).reshape(-1, 12)
+    raster = x.reshape(4, 2, 8, 2, 3).transpose(0, 2, 4, 1, 3).reshape(32, 12)
+    order = np.arange(32).reshape(1, 2, 2, 2, 2, 2).transpose(0, 3, 1, 4, 2, 5).reshape(-1)
+    np.testing.assert_array_equal(actual, raster[order])
+
+
+def test_padded_patch_rows_preserve_padding():
+    cfg = Config(D=128, MCOLS=8, ACT_BLOCKS=16, TMEM_WORDS=1024,
+                 IMEM_WORDS=512, DRAM_BYTES=1 << 20)
+    x = np.arange(4 * 4 * 3, dtype=np.float32).reshape(4, 4, 3)
+    image = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    image[:x.nbytes] = x.reshape(-1).view(np.uint8)
+    dst, stride = 0x40000, 16
+    image[dst:dst + 4 * 4 * stride] = 0x99
+    for code in patchify_programs(cfg, 0, dst, 4, 4, 2, 3, dst_stride=stride):
+        image = Machine(cfg, [code], [image]).run().slices[0].dram
+    actual = image[dst:dst + 4 * 4 * stride].reshape(4, stride * 4)
+    expected = x.reshape(2, 2, 2, 2, 3).transpose(0, 2, 4, 1, 3).reshape(4, 12)
+    np.testing.assert_array_equal(actual[:, :48].copy().view(np.float32), expected)
+    np.testing.assert_array_equal(actual[:, 48:], np.full((4, 16), 0x99, np.uint8))
 
 
 def test_u8_normalization_then_patchify_matches_minicpm_layout():

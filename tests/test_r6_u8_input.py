@@ -97,12 +97,13 @@ def test_normalize_rtl_with_axi_stalls(have_verilator, waitc):
     np.testing.assert_array_equal(drams[0], ref.dram)
 
 
-def test_patchify_rtl_with_axi_stalls(have_verilator):
+@pytest.mark.parametrize('order', ['raster', 'minicpm'])
+def test_patchify_rtl_with_axi_stalls(have_verilator, order):
     from opentpu.kernels.image_input import patchify_programs
     cfg, _, image, _ = case(257, True)
-    pixels = np.arange(6 * 8 * 3, dtype=np.float32)
+    pixels = np.arange(8 * 8 * 3, dtype=np.float32)
     image[:pixels.nbytes] = pixels.view(np.uint8)
-    programs = patchify_programs(cfg, 0, 0x20000, 6, 8, 2, 3)
+    programs = patchify_programs(cfg, 0, 0x20000, 8, 8, 2, 3, order=order, dst_stride=16)
     assert len(programs) == 1
     ref = Machine(cfg, programs, [image.copy()]).run().slices[0]
     drams, tmems, _ = rtlsim.run(cfg, programs, [image.copy()], axi=True, stall=35, seed=95)
