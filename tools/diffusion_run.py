@@ -97,7 +97,12 @@ def main():
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--strict-fpga-only", action="store_true",
+                    help="reject this hybrid runner until all numerical operations are on the FPGA")
     a = ap.parse_args()
+    if a.strict_fpga_only:
+        ap.error("strict FPGA-only execution is unavailable: this runner computes GroupNorm, "
+                 "Mish, spatial softmax, layout and DDPM scheduling on the host")
     if not (a.tiny or a.policy or a.pusht_shaped):
         ap.error("--tiny, --pusht-shaped or --policy")
     import torch

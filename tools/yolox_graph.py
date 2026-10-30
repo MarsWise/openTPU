@@ -57,6 +57,8 @@ def main():
     ap.add_argument("--stubs", default=None)
     ap.add_argument("--per-op", action="store_true")
     ap.add_argument("--strict-fpga", action="store_true")
+    ap.add_argument("--strict-fpga-only", action="store_true",
+                    help="reject execution until image preprocessing and all inference run on the FPGA")
     ap.add_argument("--fpga-nms", action="store_true",
                     help="run decoded YOLOX class selection and NMS on r6; report only final detections")
     ap.add_argument("--fpga-u8", action="store_true",
@@ -66,6 +68,9 @@ def main():
     ap.add_argument("--nms-iou", type=float, default=0.45)
     ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
+    if a.strict_fpga_only:
+        ap.error("strict FPGA-only execution is unavailable: this runner still resizes and "
+                 "letterboxes images on the host")
     if a.fpga_u8 and not a.image:
         ap.error("--fpga-u8 requires an explicit image")
     if a.fpga_nms:

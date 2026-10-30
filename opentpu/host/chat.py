@@ -1041,7 +1041,10 @@ def main(argv=None):
     ap.add_argument("--strict-fpga", action="store_true",
                     help="refuse a configuration in which the host computes part of the model "
                          "(per-position inputs, sampling the device's loop does not take): "
-                         "print where each stage runs (opentpu/llm/placement.py)")
+                         "print where each stage runs (opentpu/llm/placement.py); does not "
+                         "guarantee FPGA-only prefill token selection or random generation")
+    ap.add_argument("--strict-fpga-only", action="store_true",
+                    help="require the entire numerical generation pipeline on the FPGA")
     ap.add_argument("--wformat", default=FM.AUTO,
                     choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", "ternary_gsc", FM.MIX],
                     help="weight format of the layers (docs/quant.md; fp4 needs a bitstream "
@@ -1097,6 +1100,9 @@ def main(argv=None):
                           "for: spin (the default), sleep S seconds, or predict each gap "
                           "(docs/offload.md 10.10): less host CPU, the same speed on Gen2")
     a = ap.parse_args(argv)
+    if a.strict_fpga_only:
+        ap.error("strict FPGA-only execution is unavailable: chat normally picks the first "
+                 "prefill token on the host and sampled decoding uses host-generated uniforms")
     if a.top_p is not None and not 0 <= a.top_p <= 1:     # (Hugging Face's range)
         ap.error(f"--top-p {a.top_p}: 0 .. 1 (0 keeps the most likely token only)")
     path = model_dir(a.model)
