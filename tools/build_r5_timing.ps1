@@ -107,7 +107,7 @@ if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupSc
     $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8))):08x}')").Trim()
     if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate CFG_HASH' }
 }
-$buildLabel = if ($VectorCompare -or $BinaryWeights) { 'r6 experimental' } else { 'r5 timing' }
+$buildLabel = if ($VectorCompare -or $BinaryWeights) { 'feature-enabled experimental' } else { 'r5 timing' }
 Write-Output ("${buildLabel}: revision=$revision mode=$Mode variant=$Variant MCOLS=$($v.mcols) " +
               "core=$($v.mhz)MHz clk2x=$($v.clk2x)MHz hash=$($v.hash)")
 Write-Output "Output: $OutDir"

@@ -176,7 +176,7 @@ class Plan:
         return b
 
     # ------------------------------------------------------------------ layout
-    def layout(self, D: int) -> int:
+    def layout(self, D: int, reuse_memory: bool = False, capacity_bytes: int | None = None) -> int:
         """Borders and tails from the consumers, then addresses. Returns the image size."""
         need = {}
         for op in self.ops:
@@ -202,9 +202,50 @@ class Plan:
             for _, pad, words in reqs:
                 b.tail = max(b.tail, (b.border - pad) * b.C + words - (b.W + 2 * b.border) * b.C)
         top = 0
-        for b in self.bufs:
-            b.addr = top
-            top = -(-(top + b.nbytes) // ALIGN) * ALIGN
+        if reuse_memory:
+            # Unknown kernel bindings can read arbitrary buffers. A plan containing
+            # one keeps all buffers live; no implicit lifetime inference is safe.
+            from .nextgen import Buffer, plan_buffers
+            count = len(self.ops)
+            limit = count + 2
+            opaque = any(op.kind == "kernel" for op in self.ops)
+            ranges = {id(b): [limit, 0] for b in self.bufs}
+            for b in self.inputs.values():
+                ranges[id(b)][0] = 0
+            for i, op in enumerate(self.ops, 1):
+                for v in (op.inp, op.out, op.res):
+                    if v is not None:
+                        r = ranges[id(v.buf)]
+                        r[0] = min(r[0], i)
+                        r[1] = max(r[1], i + 1)
+            # The graph's output must remain available after the final operation.
+            final = self.env.get(self.out_node) if hasattr(self, "env") else None
+            keep = [final] + list(self.outputs)
+            if not isinstance(final, Val):
+                opaque = True
+            for v in keep:
+                if isinstance(v, Val):
+                    r = ranges[id(v.buf)]
+                    r[1] = limit
+            buffers = []
+            for i, b in enumerate(self.bufs):
+                first, last = ranges[id(b)]
+                # Borders, tails and filled buffers rely on image-time initialization;
+                # reusing them requires reinitialization which is not yet implemented.
+                if opaque or b.border or b.tail or b.fill or b.fixed_fill or first >= last:
+                    first, last = 0, limit
+                buffers.append(Buffer(str(i), b.nbytes, first, last))
+            memory = plan_buffers(buffers, capacity_bytes=(1 << 63) if capacity_bytes is None
+                                  else capacity_bytes,
+                                  alignment=ALIGN)
+            for i, b in enumerate(self.bufs):
+                b.addr = memory.address_of(str(i))
+            top = memory.high_watermark
+            self.memory_plan = memory
+        else:
+            for b in self.bufs:
+                b.addr = top
+                top = -(-(top + b.nbytes) // ALIGN) * ALIGN
         for h in self.consts:
             h[2] = top
             top = -(-(top + h[1].nbytes) // ALIGN) * ALIGN
@@ -495,14 +536,17 @@ def host_nodes(gm, plan) -> list:
     return out
 
 
-def build(gm, input_shape, cfg, extend=None, wsplit: bool = False) -> Plan:
+def build(gm, input_shape, cfg, extend=None, wsplit: bool = False,
+          reuse_memory: bool = False) -> Plan:
     """lower, then extend(plan) (appended device ops, e.g. a detection decode), layout, compile.
     wsplit: convolution weights as int8 hi + lo (two MMs a kernel row, ~16-bit weights)."""
     D_HINT[0] = cfg.D
     pl = lower(gm, input_shape, wsplit)
     if extend is not None:
         extend(pl)
-    size = pl.layout(cfg.D)
+    size = pl.layout(cfg.D, reuse_memory=reuse_memory, capacity_bytes=cfg.DRAM_BYTES)
+    if size > cfg.DRAM_BYTES:
+        raise ValueError(f"CNN image requires {size} bytes, DRAM has {cfg.DRAM_BYTES}")
     pl.size = size
     pl.compile(cfg)
     return pl
