@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from opentpu import Config
-from tools.bench_bonsai_gsc import isa_result, make_case
+from tools.bench_bonsai_gsc import expected_ternary_requests, isa_result, make_case
 
 
 @pytest.mark.parametrize('kb', [1, 3, 4, 5, 8, 9])
@@ -31,3 +31,12 @@ def test_bench_rejects_unsupported_memory_and_firmware():
                  TMEM_WORDS=131072, DRAM_BYTES=1 << 23, TGSC=False)
     with pytest.raises(ValueError, match='TGSC'):
         make_case(cfg, 1, 7, 4, 'gsc')
+
+
+@pytest.mark.parametrize('kb,distinct,repeated', [(1, 7, 0), (3, 7, 14),
+                                                  (4, 7, 21), (5, 14, 21), (9, 21, 42)])
+def test_gsc_static_request_model_counts_tail(kb, distinct, repeated):
+    result = expected_ternary_requests(7, kb, 128)
+    assert result['distinct_weight_chunks'] == distinct
+    assert result['repeat_requests'] == repeated
+    assert result['serial_weight_chunk_requests'] == 7 * kb

@@ -42,6 +42,7 @@ token and the compile's part of it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import sys
@@ -196,24 +197,67 @@ def main(argv=None):
     ap.add_argument("--per-position", action="store_true",
                     help="a decode program per position (default: the resident one when the "
                          "bitstream takes run arguments)")
+    prompt = ap.add_mutually_exclusive_group()
+    prompt.add_argument("--prompt-runs", action="store_true",
+                        help="enable run-time-position prompt programs where supported")
+    prompt.add_argument("--no-prompt-runs", action="store_true",
+                        help="disable run-time-position prompt programs (the default)")
     ap.add_argument("--fake-no-args", action="store_true",
                     help="--backend fake: a bitstream without run arguments (CAPS bit25)")
     ap.add_argument("--json")
-    ap.add_argument("--wformat", default="int8", choices=["int8", "fp4", "int4", "nvfp4", "mix"],
+    ap.add_argument("--wformat", default="int8", choices=["int8", "fp4", "int4", "nvfp4", "mix", "ternary_gsc"],
                     help="weight format of the layers (docs/quant.md)")
-    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4"],
+    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4", "ternary_gsc"],
                     help="weight format of the LM head (default: --wformat)")
     ap.add_argument("--card-loop", action="store_true",
                     help="the decode loop on the card (Engine.generate_card)")
+    ap.add_argument("--device-counters", action="store_true",
+                    help="capture card counter deltas during decode; requires exclusive card use")
+    ap.add_argument("--expected-build", type=lambda x: int(x, 0))
+    ap.add_argument("--expected-hash", type=lambda x: int(x, 0))
     a = ap.parse_args(argv)
+    if a.device_counters and (a.backend != 'board' or a.expected_build is None or
+                              a.expected_hash is None or not a.json):
+        ap.error('--device-counters requires board, --expected-build, --expected-hash and --json')
     from transformers import AutoTokenizer
     path = model_dir(a.model)
+    checkpoint = None
+    if a.device_counters:
+        from opentpu.llm.bonsai_profile import checkpoint_hashes
+        checkpoint = checkpoint_hashes(path)
     tok = AutoTokenizer.from_pretrained(path)
     spec = load_spec(path)
     P = Profiler()
     wkw = dict(wformat=a.wformat, head_format=a.head_format)
+    profile_info = ecc_preflight = None
     if a.backend == "board":
-        backend, cfg = C.make_backend("board", spec, a.cap, a.dev, path.name)
+        if a.device_counters:
+            import fcntl
+            from opentpu.host import memcal
+            # This is also used by the existing Bonsai launchers. Keep the lock
+            # alive until process exit and refuse concurrent use.
+            card_lock = open('/tmp/claude_run.lock', 'a')
+            try:
+                fcntl.flock(card_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise SystemExit('FPGA is busy; no profile started')
+            tr = B.XdmaTransport(a.dev)
+            probe = B.Board(tr, check=True, lock=False, calibrate=False)
+            profile_info = probe.info()
+            ecc = memcal.ecc(tr)
+            if (profile_info['build_id'] != a.expected_build or
+                    not profile_info['cfg'] or profile_info['cfg']['hash'] != a.expected_hash or
+                    not profile_info['core_khz'] or profile_info['running'] or
+                    not profile_info['calibrated'] or not profile_info['caps2'].get('tgsc') or
+                    ecc is None or any(sec or ded for sec, ded in ecc) or
+                    tr.reg_read(R.R_STATUS) & R.ST_ECC_DED or
+                    tr.reg_read(R.R_SCRATCH) != R.DRAM_INIT):
+                raise SystemExit('firmware, TGSC, calibration or clean initialized ECC mismatch')
+            ecc_preflight = ecc
+            cfg = B.device_config(profile_info)
+            backend = lambda c, imgs: B.BoardBackend(c, imgs, transport=tr, model=path.name)
+        else:
+            backend, cfg = C.make_backend("board", spec, a.cap, a.dev, path.name)
     else:
         from opentpu.host.fake import FakeTransport
         from opentpu.isasim import board_config
@@ -252,7 +296,7 @@ def main(argv=None):
     B.Board.write = board_write
 
     eng = Q.Engine(spec, Q.load_weights(path), cap=a.cap, cfg=cfg, backend=backend, **wkw,
-                   resident=not a.per_position)
+                   resident=not a.per_position, prompt_runs=a.prompt_runs)
     eng.stream_logits = not a.no_stream
     if a.backend == "fake":         # logits the sampler works on as on real ones (no ties)
         import numpy as np
@@ -271,6 +315,12 @@ def main(argv=None):
 
     def first():                                        # the first pick: the prefill is done
         if "t" not in step0:
+            if a.device_counters:
+                from opentpu.llm.bonsai_profile import checked_snapshot
+                step0['ecc'] = memcal.ecc(eng.backend.board.t)
+                if step0['ecc'] is None or any(sec or ded for sec, ded in step0['ecc']):
+                    raise RuntimeError('ECC is not clean before decode')
+                step0['counters'] = checked_snapshot(eng.backend.board)
             step0["t"] = time.perf_counter()
             step0["n"] = len(eng.stats)
             P.t_halt = P.t_halt or time.perf_counter()
@@ -341,11 +391,46 @@ def main(argv=None):
         t0 = time.perf_counter()
         sink.write(delta)
         P.add("ui", time.perf_counter() - t0)
+    before_prompt = None
+    if a.device_counters:
+        from opentpu.llm.bonsai_profile import checked_snapshot
+        before_prompt = checked_snapshot(eng.backend.board)
+    ask_start = time.perf_counter()
     _, turn = chat.ask(a.prompt, upd)
+    ask_elapsed = time.perf_counter() - ask_start
     P.on.clear()
     wall = time.perf_counter() - step0["t"]
     n = len(eng.stats) - step0["n"]
     cyc = sum(s["cycles"] for s in eng.stats[step0["n"]:])
+    measured = None
+    if a.device_counters:
+        from opentpu.llm.bonsai_profile import checked_snapshot, metrics
+        snap = checked_snapshot(eng.backend.board)
+        ecc = memcal.ecc(eng.backend.board.t)
+        status = eng.backend.board.t.reg_read(R.R_STATUS)
+        if ecc is None or any(sec or ded for sec, ded in ecc) or status & R.ST_ECC_DED:
+            raise RuntimeError('ECC is not clean after the measured interval')
+        tokens = turn.decode_steps if a.card_loop else n
+        measured = metrics(step0['counters'], snap, tokens, khz)
+        prompt_metrics = (metrics(before_prompt, step0['counters'], turn.prefill_tokens, khz)
+                          if turn.prefill_tokens else None)
+        run_stats = eng.stats[step0['n']:]
+        reads = [s.get('b_reads') if isinstance(s, dict) else None for s in run_stats]
+        port_b = sum(reads) if reads and all(x is not None for x in reads) else None
+        measured.update(build_id=profile_info['build_id'], cfg_hash=profile_info['cfg']['hash'],
+                        prompt_sha256=hashlib.sha256(a.prompt.encode('utf-8')).hexdigest(),
+                        seed=a.seed, cap=a.cap, greedy=a.greedy, ecc_preflight=ecc_preflight,
+                        ecc_before=step0['ecc'], ecc_after=ecc, checkpoint_name=path.name,
+                        checkpoint_sha256=checkpoint, wall_decode_s=wall,
+                        wall_full_turn_s=ask_elapsed,
+                        wall_before_first_pick_s=step0['t'] - ask_start,
+                        prefill=prompt_metrics,
+                        device_run_s=cyc / (khz * 1000),
+                        host_and_other_wall_s=wall - cyc / (khz * 1000),
+                        port_b_requests=port_b,
+                        port_b_requests_per_token=port_b / tokens if port_b is not None else None,
+                        port_b_chunk_bytes=cfg.D,
+                        port_b_scope='all port-B requests in captured runs, not only GSC')
     if a.card_loop:
         steps = turn.decode_steps
         print(f"{path.name} on {a.backend}: the decode loop on the card, {steps} tokens in {n} "
@@ -362,13 +447,17 @@ def main(argv=None):
                   f"the first: {start_ms:.1f} ms ({1e3 * comp[0]:.1f} ms compiling)")
         if a.json:
             Path(a.json).write_text(json.dumps({
-                "model": path.name, "wformat": a.wformat, "head_format": a.head_format,
-                "card_loop": True, "steps": steps, "runs": n, "wall_tok_s": steps / wall,
+                "model": path.name, "backend": a.backend, "wformat": a.wformat, "head_format": a.head_format,
+                "card_loop": True, "prompt_runs": eng.prompt_runs,
+                "steps": steps, "runs": n, "wall_tok_s": steps / wall,
                 "dev_tok_s": steps * khz * 1e3 / cyc, "steady_tok_s": steady,
                 "start_ms": start_ms, "compile_ms": 1e3 * comp[0],
-                "reply_ids": [int(x) for x in chat._reply]}, indent=1))
+                "reply_ids": [int(x) for x in chat._reply],
+                "device_counters": measured}, indent=1))
         eng._drain()
         eng.backend.close()
+        if a.device_counters:
+            card_lock.close()
         return
     dev_ms = 1e3 * cyc / n / (khz * 1e3)
     per = {k: (1e3 * v[0] / n, 1e3 * v[1] / n) for k, v in P.t.items()}
@@ -416,7 +505,9 @@ def main(argv=None):
           f"(the first window, {first_ms:.2f} ms, left out)")
     if a.json:
         Path(a.json).write_text(json.dumps({
-            "model": path.name, "wformat": a.wformat, "head_format": a.head_format,
+            "model": path.name, "backend": a.backend, "card_loop": False,
+            "prompt_runs": eng.prompt_runs,
+            "wformat": a.wformat, "head_format": a.head_format,
             "streamed": streamed, "steps": n, "build_id": bid,
             "ms": {k: {"critical": c, "overlapped": o} for k, (c, o) in per.items()},
             "critical_ms": crit, "device_ms": dev_ms, "overshoot_ms": over,
@@ -425,11 +516,14 @@ def main(argv=None):
             "wall_tok_s": n / wall, "dev_tok_s": n * khz * 1e3 / cyc,
             "steady_tok_s": steady, "first_window_ms": first_ms,
             "reply_ids": [int(x) for x in chat._reply],
+            "device_counters": measured,
             # per token (window HALTED seen -> next RUN): the critical ms of each item
             "tokens": [{k: round(1e3 * v, 4) for k, v in t.items()} for t in P.tokens]},
             indent=1))
     eng._drain()
     eng.backend.close()
+    if a.device_counters:
+        card_lock.close()
 
 
 if __name__ == "__main__":

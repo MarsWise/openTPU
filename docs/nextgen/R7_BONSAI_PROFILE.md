@@ -30,6 +30,42 @@ convert samples to the required distribution and validate the resulting
 sampling before replacing host RNG. Gaussian noise for DDPM is also not
 implemented by this block.
 
+## Full-generation profile
+
+`tools/decode_profile.py` now accepts `ternary_gsc` for both weights and head.
+With `--device-counters` it checks the requested build and configuration, TGSC,
+calibration, initialized DDR and ECC before running; it takes exclusive card
+locks and records consistent counter snapshots for the decode interval. It
+hashes the actual safetensor shards and model/tokenizer metadata, and records
+the prompt hash, clock, seed, capacity, generated tokens, device cycles, MXU
+busy/MAC cycles, host wall time, prefill and decode separately, and controller
+read/write beats. `host_and_other_wall_s` is wall time minus device cycles; it
+also includes host waits/overlap and is not a pure CPU execution-time counter. Counter
+samples cover the whole interval: program loads and other masters are included.
+They are 64-byte controller events, not external DDR pin bytes or a count of
+GSC rereads. A separate per-run port-B count also includes other consumers.
+
+The following is a prepared example for the previously validated r5 identity;
+it writes device DRAM and runs the model, so execute it only after the required
+hardware permission. It does not program a bitstream:
+
+```
+python tools/decode_profile.py --model /path/to/Ternary-Bonsai-2-4B-mlx-2bit \
+  --backend board --wformat ternary_gsc --head-format ternary_gsc --card-loop \
+  --greedy --no-prompt-runs --cap 512 --tokens 32 --seed 0 --prompt 'Write a short story.' \
+  --device-counters --expected-build 0x45b1c1d3 --expected-hash 0xa5bcbaef \
+  --json bonsai-before.json
+```
+
+For the optimized firmware use its verified build ID and CFG_HASH and the same
+checkpoint, prompt, token count, clock, quantization and flags. Compare with
+`python tools/compare_bonsai_profiles.py bonsai-before.json bonsai-after.json`.
+The comparison refuses different checkpoint hashes, prompt, clock, settings or
+output tokens. Matching tokens alone does not prove logits or numerical accuracy;
+compare logits with the independent reference and inspect ECC and timing too.
+
+## Isolated GSC experiment
+
 `tools/bench_bonsai_gsc.py` builds the same synthetic ternary matrix with
 constant per-row scales represented either as RSC or repeated GSC scales,
 compares against float and ISA and can prepare board counters. Default is ISA:
@@ -47,3 +83,12 @@ subtracting a baseline does not perfectly isolate weight traffic. Uniform
 synthetic scales do not represent actual Bonsai group-scale variation. Compare
 multiple representative shapes and real workloads before deciding on an RTL
 change; report FPGA/ISA equality, CPU model output, cycles, traffic and ECC.
+
+Its static serial GSC request model reports `N * KB` chunk requests versus
+`N * ceil(KB / 4)` distinct chunks, including a partial final chunk. This is an
+inference from the adapter's issue pattern, not an observed counter and not a
+prediction of physical DDR traffic. The current adapter iterates all output
+rows for a K group before issuing the next group. A cache for the entire row
+set can be large; changing the order to keep a chunk requires revalidating
+output accumulation, RMAX, command sequencing, stalls and cost per row.
+PAIR/QUAD cannot directly add group sums before their different FP32 scales.

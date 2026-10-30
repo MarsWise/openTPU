@@ -22,6 +22,20 @@ from opentpu.quant import pack_ternary_mxu
 WEIGHTS, SCALES, OUTPUT, PROGRAM = 0x100000, 0x300000, 0x340000, 0x3C0000
 
 
+def expected_ternary_requests(n: int, kb: int, D: int) -> dict:
+    """Static serial-adapter request count for one GSC TMM, not a DDR measurement."""
+    if min(n, kb, D) <= 0:
+        raise ValueError('positive dimensions required')
+    actual = n * kb
+    unique = n * ((kb + 3) // 4)
+    return {'serial_weight_chunk_requests': actual,
+            'distinct_weight_chunks': unique,
+            'repeat_requests': actual - unique,
+            'requested_bytes': actual * D,
+            'distinct_bytes': unique * D,
+            'scope': 'static per-instruction request model; not observed DDR traffic or runtime'}
+
+
 def make_case(cfg, m: int, n: int, kb: int, mode: str, seed: int = 81):
     if mode not in ('gsc', 'rsc') or cfg.D != 128 or not cfg.TGSC:
         raise ValueError('requires TGSC, D=128 and mode gsc or rsc')
@@ -134,6 +148,7 @@ def main():
             results[mode] = result
         print(json.dumps({'backend': a.backend, 'build_id': info['build_id'] if info else None,
                           'm': a.m, 'n': a.n, 'kb': a.kb, 'seed': a.seed,
+                          'gsc_static_model': expected_ternary_requests(a.n, a.kb, cfg.D),
                           'port_b_chunk_bytes': cfg.D,
                           'counter_limit': 'Port B includes weight, scale, loader and DMA reads; '
                                            'baseline subtraction is an approximation.',
