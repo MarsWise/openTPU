@@ -28,6 +28,7 @@ Details and limitations of physical r5 cases are in
 | FP32 arithmetic, reductions, LayerNorm/RMSNorm, TFN, device loops | ISA/compiler and various existing RTL tests; model-specific wiring remains to be audited. |
 | CMP/SEL, binary and binary group-scaled TMM, uint8 input | r6 ISA/RTL or block synthesis evidence; no routed r7 or physical validation. |
 | DDPM epsilon step with supplied noise and coefficients | `kernels/ddpm.py`: standalone compiler kernel, CPU/diffusers comparison and one RTL/ISA comparison. Not integrated into a real model, no RNG and no resident scheduler loop. |
+| Random generation | `rtl/exp/philox` contains a standalone RTL-tested Philox4x32-10 block; not connected to the ISA, model execution or current bitstream. No Gaussian generator or per-request runtime state yet. |
 | Memory reuse | `cnngraph.build(..., reuse_memory=True)` integrates the lifetime planner for CNN activations. Conservative pinning and separate weights; small ISA graphs tested, real model and hardware validation pending. |
 | Strict execution | `--strict-fpga-only` fails closed in the hybrid SmolVLA, Diffusion, YOLOX and chat runners. YOLOX's older `--strict-fpga` covers the graph/decode only and does not establish strict preprocessing or NMS. The older chat flag misses first-token selection and host RNG. There is no demonstrated universal runtime audit capable of detecting every CPU numerical fallback. |
 
