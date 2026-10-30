@@ -111,6 +111,20 @@ def test_patchify_rtl_with_axi_stalls(have_verilator, order):
     np.testing.assert_array_equal(drams[0], ref.dram)
 
 
+def test_normalize_then_patchify_rtl(have_verilator):
+    from opentpu.kernels.image_input import patchify_programs
+    cfg, _, image, _ = case(257, True)
+    programs = [program_normalize(cfg, 0, 0x20000, 64, (1 / 127.5,) * 3, (-1,) * 3)]
+    programs += patchify_programs(cfg, 0x20000, 0x40000, 8, 8, 2, 3,
+                                  order='minicpm', dst_stride=16)
+    for code in programs:
+        ref = Machine(cfg, [code], [image.copy()]).run().slices[0]
+        drams, tmems, _ = rtlsim.run(cfg, [code], [image.copy()], axi=True, stall=35, seed=96)
+        np.testing.assert_array_equal(tmems[0], ref.tmem)
+        np.testing.assert_array_equal(drams[0], ref.dram)
+        image = drams[0]
+
+
 def test_yolox_byte_loader_matches_existing_letterbox(tmp_path):
     Image = pytest.importorskip('PIL.Image')
     from tools.yolox_graph import load_image_u8
