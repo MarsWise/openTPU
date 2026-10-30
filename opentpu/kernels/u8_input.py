@@ -6,6 +6,7 @@ copies restore the original byte order. Results are exact fp32 integers 0..255.
 Image resize, channel layout and normalization are separate operations.
 """
 from .. import isa as I
+import math
 
 
 def program(cfg, src: int, dst: int, count: int, tmem_base: int = 0):
@@ -80,4 +81,40 @@ def program_rows(cfg, src: int, dst: int, scratch: int, rows: int,
     out.append(I.halt())
     if len(out) * 8 > cfg.IMEM_WORDS:
         raise ValueError("strided u8 program exceeds IMEM; split the input into calls")
+    return out
+
+
+def program_normalize(cfg, src: int, dst: int, pixels: int, scale, bias):
+    """Convert packed HWC uint8 and apply per-channel scale and bias on device.
+
+    ``scale`` and ``bias`` contain one fp32 constant per channel, in the same
+    order as the input bytes. Output is contiguous HWC fp32. Both ranges must
+    be disjoint and the packed source needs up to three bytes of padding.
+    Computation is two fp32 operations, multiply followed by add per channel.
+    """
+    if not isinstance(pixels, int) or pixels <= 0:
+        raise ValueError("pixels must be a positive integer")
+    scale, bias = tuple(scale), tuple(bias)
+    channels = len(scale)
+    if channels not in (1, 3, 4) or len(bias) != channels:
+        raise ValueError("scale and bias must have 1, 3 or 4 channels")
+    if not all(math.isfinite(float(x)) for x in (*scale, *bias)):
+        raise ValueError("scale and bias must be finite")
+    out = program(cfg, src, dst, pixels * channels)[:-1]
+    chunk = min(cfg.TMEM_WORDS // channels, 65535)
+    if chunk < 1:
+        raise ValueError("not enough TMEM scratch for a pixel")
+    for first in range(0, pixels, chunk):
+        n = min(chunk, pixels - first)
+        addr = dst + 4 * first * channels
+        out.append(I.ld(addr, 0, n * channels))
+        for c, (mul, add) in enumerate(zip(scale, bias)):
+            out.append(I.vop(I.V_MUL, c, c, 0, n, 1, channels, channels, 0,
+                             I.B_SCALAR, float(mul)))
+            out.append(I.vop(I.V_ADD, c, c, 0, n, 1, channels, channels, 0,
+                             I.B_SCALAR, float(add)))
+        out.append(I.st(addr, 0, n * channels))
+    out.append(I.halt())
+    if len(out) * 8 > cfg.IMEM_WORDS:
+        raise ValueError("normalized u8 program exceeds IMEM; split the input into calls")
     return out

@@ -6,7 +6,7 @@ import pytest
 
 from opentpu import Config, isa as I, rtlsim
 from opentpu.isasim import Machine, SimError
-from opentpu.kernels.u8_input import program, program_rows
+from opentpu.kernels.u8_input import program, program_normalize, program_rows
 from opentpu.target import arch_hash
 
 
@@ -82,6 +82,30 @@ def test_strided_u8_input_rtl(have_verilator, waitc):
     raw = ref.dram[0x20000:0x20000 + rows * stride * 4].reshape(rows, stride * 4)
     np.testing.assert_array_equal(raw[:, width * 4:], np.full((rows, (stride - width) * 4), 0x99, np.uint8))
     drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=35, seed=71)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)
+    np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+@pytest.mark.parametrize('waitc', [False, True])
+def test_normalize_rtl_with_axi_stalls(have_verilator, waitc):
+    cfg, _, image, _ = case(257, waitc)
+    code = program_normalize(cfg, 0, 0x20000, 85, (0.125, -0.25, 1 / 255),
+                             (-1, 2, -0.5))
+    ref = Machine(cfg, [code], [image.copy()]).run().slices[0]
+    drams, tmems, _ = rtlsim.run(cfg, [code], [image.copy()], axi=True, stall=35, seed=94)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)
+    np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+def test_patchify_rtl_with_axi_stalls(have_verilator):
+    from opentpu.kernels.image_input import patchify_programs
+    cfg, _, image, _ = case(257, True)
+    pixels = np.arange(6 * 8 * 3, dtype=np.float32)
+    image[:pixels.nbytes] = pixels.view(np.uint8)
+    programs = patchify_programs(cfg, 0, 0x20000, 6, 8, 2, 3)
+    assert len(programs) == 1
+    ref = Machine(cfg, programs, [image.copy()]).run().slices[0]
+    drams, tmems, _ = rtlsim.run(cfg, programs, [image.copy()], axi=True, stall=35, seed=95)
     np.testing.assert_array_equal(tmems[0], ref.tmem)
     np.testing.assert_array_equal(drams[0], ref.dram)
 
