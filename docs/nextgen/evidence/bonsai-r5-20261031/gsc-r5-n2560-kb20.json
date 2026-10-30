@@ -1,0 +1,62 @@
+{
+  "backend": "board",
+  "build_id": 1169277395,
+  "m": 1,
+  "n": 2560,
+  "kb": 20,
+  "seed": 81,
+  "gsc_static_model": {
+    "serial_weight_chunk_requests": 51200,
+    "distinct_weight_chunks": 12800,
+    "repeat_requests": 38400,
+    "requested_bytes": 6553600,
+    "distinct_bytes": 1638400,
+    "scope": "static per-instruction request model; not observed DDR traffic or runtime"
+  },
+  "port_b_chunk_bytes": 128,
+  "counter_limit": "Port B includes weight, scale, loader and DMA reads; baseline subtraction is an approximation.",
+  "results": {
+    "rsc": {
+      "isa_vs_float_rel_l2": 0.003967581316828728,
+      "base_cycles": 1057,
+      "total_cycles": 52304,
+      "isolated_cycles": 51247,
+      "base_b_reads": 80,
+      "total_b_reads": 12880,
+      "isolated_b_reads": 12800,
+      "checked_cycles": 52662,
+      "ecc": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "fpga_matches_isa": true
+    },
+    "gsc": {
+      "isa_vs_float_rel_l2": 0.0039675855077803135,
+      "base_cycles": 1057,
+      "total_cycles": 350242,
+      "isolated_cycles": 349185,
+      "base_b_reads": 80,
+      "total_b_reads": 51280,
+      "isolated_b_reads": 51200,
+      "checked_cycles": 350484,
+      "ecc": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "fpga_matches_isa": true
+    }
+  }
+}

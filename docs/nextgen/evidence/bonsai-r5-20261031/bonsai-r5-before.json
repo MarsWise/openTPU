@@ -1,0 +1,156 @@
+{
+ "model": "Ternary-Bonsai-2-4B-mlx-2bit",
+ "backend": "board",
+ "wformat": "ternary_gsc",
+ "head_format": "ternary_gsc",
+ "card_loop": true,
+ "prompt_runs": false,
+ "steps": 31,
+ "runs": 1,
+ "wall_tok_s": 0.6805129688596466,
+ "dev_tok_s": 0.7060886703155272,
+ "steady_tok_s": 0.7060860161921209,
+ "start_ms": 3065.9364400198683,
+ "compile_ms": 1648.1732930988073,
+ "reply_ids": [
+  760,
+  10849,
+  303,
+  15875,
+  3105,
+  914,
+  4255,
+  26,
+  424,
+  87338,
+  11,
+  264,
+  24207,
+  19177,
+  8337,
+  421,
+  9047,
+  310,
+  500,
+  724,
+  1472,
+  279,
+  43369,
+  303,
+  279,
+  62170,
+  321,
+  279,
+  8720,
+  314,
+  279,
+  3136
+ ],
+ "device_counters": {
+  "tokens": 31,
+  "clock_khz": 133333,
+  "counter_delta": {
+   "UPTIME": 6073800346,
+   "RUNNING": 5853829942,
+   "MXU_BUSY": 5839813418,
+   "MXU_MAC": 1019363328,
+   "DRAM_RD": 8668398614,
+   "DRAM_WR": 25788064,
+   "MXU_STARVE": 1025539830,
+   "VPU_BUSY": 110336110,
+   "QNT_BUSY": 10558612,
+   "DMA_BUSY": 87455215,
+   "DRAM_WAIT": 26302713
+  },
+  "read_bytes": 554777511296,
+  "write_bytes": 1650436096,
+  "read_bytes_per_token": 17896048751.48387,
+  "write_bytes_per_token": 53239874.06451613,
+  "running_cycles_per_token": 188833223.93548387,
+  "mxu_busy_fraction_of_running": 0.9976055805961437,
+  "mxu_mac_fraction_of_running": 0.17413613618774304,
+  "interval_seconds_from_uptime": 45.553616479041196,
+  "scope": "entire snapshot interval; includes all device masters and host transfers; DRAM_RD/WR are 64-byte controller events, not physical DDR pins or GSC rereads",
+  "build_id": 1169277395,
+  "cfg_hash": 2780609263,
+  "prompt_sha256": "b4fb81ab7a766f2cd64d98fa099180ed224bf2759b0b34cb953bc6dbe462327b",
+  "seed": 0,
+  "cap": 512,
+  "greedy": true,
+  "ecc_preflight": [
+   [
+    0,
+    0
+   ],
+   [
+    0,
+    0
+   ]
+  ],
+  "ecc_before": [
+   [
+    0,
+    0
+   ],
+   [
+    0,
+    0
+   ]
+  ],
+  "ecc_after": [
+   [
+    0,
+    0
+   ],
+   [
+    0,
+    0
+   ]
+  ],
+  "checkpoint_name": "Ternary-Bonsai-2-4B-mlx-2bit",
+  "checkpoint_sha256": {
+   "config.json": "119ae9e731281a52b8a590edc6971a6f95c8b283cd6bb215f12b1f172e587b23",
+   "files.json": "4d6e58f2d8754ef079d55407a7d4ae119e1eb973a5f9451ea727e260bced0614",
+   "generation_config.json": "a3345cadb9d63a91a11c2c12135da7eadc3d0c820e3287b04682b51cad1b12d2",
+   "hadamard.json": "e6393f16372cd0d45833d97d2390afd10919a813b4ac7f26b990d5315ae8fbeb",
+   "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+   "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+   "model.safetensors": "432f48d0edcb8da2e6a4e0c96078588362397e2603e7fdea99957babfe968259"
+  },
+  "wall_decode_s": 45.553871004027314,
+  "wall_full_turn_s": 72.76312796701677,
+  "wall_before_first_pick_s": 27.20925927697681,
+  "prefill": {
+   "tokens": 17,
+   "clock_khz": 133333,
+   "counter_delta": {
+    "UPTIME": 3627868104,
+    "RUNNING": 3214462417,
+    "MXU_BUSY": 3203602402,
+    "MXU_MAC": 558932352,
+    "DRAM_RD": 4752708358,
+    "DRAM_WR": 14669504,
+    "MXU_STARVE": 566387689,
+    "VPU_BUSY": 59389627,
+    "QNT_BUSY": 5776704,
+    "DMA_BUSY": 48729868,
+    "DRAM_WAIT": 14129580
+   },
+   "read_bytes": 304173334912,
+   "write_bytes": 938848256,
+   "read_bytes_per_token": 17892549112.47059,
+   "write_bytes_per_token": 55226368.0,
+   "running_cycles_per_token": 189086024.52941176,
+   "mxu_busy_fraction_of_running": 0.9966215143961349,
+   "mxu_mac_fraction_of_running": 0.17388050612881065,
+   "interval_seconds_from_uptime": 27.209078802697007,
+   "scope": "entire snapshot interval; includes all device masters and host transfers; DRAM_RD/WR are 64-byte controller events, not physical DDR pins or GSC rereads"
+  },
+  "device_run_s": 43.90383432458581,
+  "host_and_other_wall_s": 1.6500366794415058,
+  "port_b_requests": 1033854527,
+  "port_b_requests_per_token": 33350146.032258064,
+  "port_b_chunk_bytes": 128,
+  "port_b_scope": "all port-B requests in captured runs, not only GSC"
+ }
+}
