@@ -332,6 +332,33 @@ def pack_ternary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
     return rows
 
 
+def pack_ternary_grq(weights: np.ndarray, D: int = 128) -> np.ndarray:
+    """Pack [N, K] ternary rows in TMM GRQ's block-major layout: [K/D, N/4 * D] bytes.
+
+    Plane k holds block k of every row; its chunk i holds rows 4i..4i+3 (row 4i + q in quarter
+    q, docs/isa.md TMM GRQ), so a TMM GSC GRQ streams each chunk once. N % 4 == 0."""
+    w = np.asarray(weights)
+    if w.ndim != 2 or w.shape[0] % 4:
+        raise ValueError("TMM GRQ weights must have shape [N, K] with N % 4 == 0")
+    if D <= 0 or D % 4 or w.shape[1] == 0 or w.shape[1] % D:
+        raise ValueError(f"TMM GRQ needs K divisible by D={D} and D divisible by 4")
+    N, KB = w.shape[0], w.shape[1] // D
+    planes = w.reshape(N, KB, D).transpose(1, 0, 2).reshape(KB * N // 4, 4 * D)
+    return pack_ternary_mxu(planes, D).reshape(KB, N // 4 * D)
+
+
+def grq_scales(scales: np.ndarray) -> tuple[np.ndarray, int]:
+    """[N, KB] fp32 group scales -> (TMM GRQ's [KB, srs / 4] planes, srs): plane k is block k's
+    N scales, srs (bytes between planes) a multiple of 16."""
+    s = np.asarray(scales, dtype=np.float32)
+    if s.ndim != 2 or s.shape[0] % 4:
+        raise ValueError("TMM GRQ scales must have shape [N, KB] with N % 4 == 0")
+    words = -(-s.shape[0] // 4) * 4
+    out = np.zeros((s.shape[1], words), dtype=np.float32)
+    out[:, :s.shape[0]] = s.T
+    return out, 4 * words
+
+
 def pack_binary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
     """Pack independent +/-1 weights, least-significant bit first, into D-byte chunks.
 
@@ -666,6 +693,23 @@ def pack_ternary_gsc(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarra
         raise ValueError("TMM GSC repacking refuses non-ternary groups")
     return (pack_ternary_mxu(np.sign(W).astype(np.int8), D),
             np.ascontiguousarray(scale, dtype='<f4').view(np.uint8).reshape(W.shape[0], -1))
+
+
+def pack_ternary_gsc_grq(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """pack_ternary_gsc in TMM GRQ's block-major layout: ([KB, N/4 * D] weight planes, [KB, 4N]
+    scale planes as bytes). With N % 4 == 0 and KB % 4 == 0 both are pack_ternary_gsc's sizes,
+    so a GRQ matrix takes the row-major one's place (and its Hadamard signs follow its scales)."""
+    W = np.asarray(W, np.float32)
+    _, sc = pack_ternary_gsc(W, D)                     # (validates the groups)
+    scale = sc.view('<f4').reshape(W.shape[0], -1)
+    planes = pack_ternary_grq(np.sign(W).astype(np.int8), D)
+    sp, _ = grq_scales(scale)
+    return planes, np.ascontiguousarray(sp, dtype='<f4').view(np.uint8)
+
+
+def gsc_grq_ok(n: int, k: int, D: int = 128) -> bool:
+    """A [n, k] TERNARY_GSC matrix can take the GRQ layout in place of the row-major one."""
+    return D == 128 and n % 4 == 0 and k % D == 0 and (k // D) % 4 == 0
 
 
 def quantize_ternary(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:

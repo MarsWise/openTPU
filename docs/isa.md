@@ -283,6 +283,19 @@ applies each block's scale before accumulating its fp32 result, in K order. Scal
 be word aligned, `srs >= 4*KB`, and UNIT, RSC, ASCALE, PAIR and QUAD are prohibited.
 This implementation serializes blocks, so it does not provide PAIR/QUAD throughput.
 
+`GRQ` (`w4[28]` with GSC, ternary only, CAPS2 bit 9, `Config.TGRQ`) selects the block-major
+("row quarter") layout. Block `k`'s weights are a plane at `sa + k*rs` of `N/4` D-byte chunks;
+chunk `i` holds block `k` of rows `4i..4i+3`, row `4i+q` in quarter `q` (`quant.pack_ternary_grq`).
+Block `k`'s scales are a plane at `ssa + k*srs` of `N` fp32 words, row `n` at `+4n`
+(`quant.grq_scales`). `N % 4 == 0`, `M <= MCOLS`, `ssa` and `srs` multiples of 16, `srs >= 4N`,
+`rs` a multiple of D and `>= N/4*D`. The result is GSC's bit for bit (the same per-block fp32
+products added in K order). The adapter issues one subcommand per block over its plane; the MXU
+streams each chunk once and consumes its four quarters as four replay groups (group `q`: quarter
+`q`, Sw word `q`, ACT rows `j < M`, output `4i+q`), so a block costs N/4 chunk reads and N/4
+scale-line reads instead of the row-major layout's N of each. With `N % 4 == 0` and
+`KB % 4 == 0` the planes take exactly the row-major matrix's bytes
+(`quant.pack_ternary_gsc_grq`), so the native Bonsai image keeps its addresses.
+
 `BIN` (`w4[26]`, CAPS2 bit 6) stores eight signs per byte, low bit first: 0 is -1 and 1 is
 +1. A row occupies `ceil(KB/8)*D` bytes, padded to a D-byte boundary. BIN may use UNIT or
 RSC; BIN+GSC also requires CAPS2 bit 7 (TBGSC), because earlier BIN/TGSC firmware does

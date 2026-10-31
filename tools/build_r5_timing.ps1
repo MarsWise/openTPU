@@ -57,6 +57,8 @@ $buildEnv = @{
     OTPU_TBIN_GEN = $(if ($BinaryWeights) { '1' } else { '0' })
     OTPU_TBGSC_GEN = $(if ($BinaryGroupScales) { '1' } else { '0' })
     OTPU_VU8_GEN = $(if ($UnsignedBytes) { '1' } else { '0' })
+    # TMM GSC block-major layout (GRQ): part of the GSC adapter, reported with TGSC
+    OTPU_TGRQ_GEN = $(if ($TernaryGroupScales) { '1' } else { '0' })
     TRACE_DEPTH = '16384'; COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'; OTPU_SYS_MARGIN = ''
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
@@ -104,7 +106,7 @@ if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupSc
     $tbin = [int][bool]$BinaryWeights
     $tbgsc = [int][bool]$BinaryGroupScales
     $vu8 = [int][bool]$UnsignedBytes
-    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8))):08x}')").Trim()
+    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8), TGRQ=bool($gsc))):08x}')").Trim()
     if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate CFG_HASH' }
 }
 $buildLabel = if ($VectorCompare -or $BinaryWeights) { 'feature-enabled experimental' } else { 'r5 timing' }

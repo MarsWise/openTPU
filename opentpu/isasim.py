@@ -36,6 +36,7 @@ class Config:
     TBIN: bool = False       # TMM packed +/-1 weights (CAPS2 bit6)
     TBGSC: bool = False      # BIN combined with per-block scales (CAPS2 bit7)
     VU8: bool = False        # convert packed unsigned bytes to fp32 (CAPS2 bit8)
+    TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -90,6 +91,7 @@ def board_config(**kw) -> Config:
                 TBIN=bool(int(env.get("OTPU_TBIN", 0))),
                 TBGSC=bool(int(env.get("OTPU_TBGSC", 0))),
                 VU8=bool(int(env.get("OTPU_VU8", 0))),
+                TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -579,7 +581,12 @@ class Slice:
         quad = bool(ins.flags & I.F_QUAD)
         gsc = bool(ins.flags & I.F_GSC)
         binary = bool(w[3] & I.TMM_BIN)
-        quarter = (w[3] >> 24) & 3 if binary else w[3] >> 24
+        grq = bool(w[3] & I.TMM_GRQ)
+        quarter = (w[3] >> 24) & 3 if binary else (w[3] >> 24) & ~(I.TMM_GRQ >> 24)
+        if grq and (not cfg.TGRQ or not gsc or binary or quarter or N % 4 or M > cfg.MCOLS or
+                    w[3] & 0xe0000000 or ssa % 16 or srs % 16 or srs < 4 * N):
+            raise SimError("TMM GRQ: needs Config.TGRQ, ternary GSC, N % 4 == 0, M <= MCOLS "
+                           "and 16-byte scale planes of N words")
         if binary and (not cfg.TBIN or pair or quad or quarter or w[3] & 0xf8000000):
             raise SimError("TMM BIN: needs Config.TBIN, without PAIR/QUAD/quarter")
         if binary and gsc and not cfg.TBGSC:
@@ -605,12 +612,18 @@ class Slice:
         if ins.flags & I.F_ASCALE and not (unit and accf):
             raise SimError("TMM: ASCALE needs UNIT and ACC")
         row_bytes = ((KB + (7 if binary else 3)) // (8 if binary else 4)) * D
-        if sa % D or rs % D or rs < row_bytes or \
+        if grq:                                    # KB planes of N/4 chunks, of N scale words
+            if sa % D or rs % D or rs < N // 4 * D or \
+                    sa + (KB - 1) * rs + N // 4 * D > cfg.DRAM_BYTES:
+                raise SimError("TMM GRQ: weight planes must be D-byte aligned and in range")
+            if ssa + (KB - 1) * srs + 4 * N > cfg.DRAM_BYTES:
+                raise SimError("TMM GRQ: scale planes out of range")
+        elif sa % D or rs % D or rs < row_bytes or \
                 sa + (N - 1) * rs + row_bytes > cfg.DRAM_BYTES:
             raise SimError("TMM: packed rows must be D-byte aligned and in range")
         scale_bytes = 4 * KB if gsc else 4
-        if not unit and (ssa % 4 or srs % 4 or srs < scale_bytes or
-                         ssa + (N - 1) * srs + scale_bytes > cfg.DRAM_BYTES):
+        if not unit and not grq and (ssa % 4 or srs % 4 or srs < scale_bytes or
+                                     ssa + (N - 1) * srs + scale_bytes > cfg.DRAM_BYTES):
             raise SimError("TMM: row scales must be word-aligned and in range")
         if ors < N:
             raise SimError("TMM: output row stride is smaller than N")
@@ -620,7 +633,11 @@ class Slice:
             self._tidx(out + np.arange(M))
 
         sw = np.ones(N, dtype=np.float32)
-        if not unit:
+        if grq:                                    # [N, KB]: block k's plane, word n
+            sa_idx = ssa + np.arange(KB)[None, :, None] * srs + 4 * np.arange(N)[:, None, None] + \
+                np.arange(4)[None, None, :]
+            sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32).reshape(N, KB)
+        elif not unit:
             sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(scale_bytes)[None, :]
             sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32).reshape(N, -1)
             if not gsc:
@@ -649,6 +666,11 @@ class Slice:
                 wk = k + quarter
                 per_byte, blocks = (8, 8) if binary else (4, 4)
                 symbol = lane + (wk % blocks) * D
+                if grq:                            # plane k, chunk n // 4, quarter n % 4
+                    nn = np.arange(N)
+                    byte = self.dram[sa + k * rs + (nn // 4) * D + ((nn % 4) * D + lane) // 4]
+                    codes[:, lane] = (byte >> ((lane % 4) * 2)) & 3
+                    continue
                 byte = self.dram[sa + np.arange(N) * rs + (wk // blocks) * D + symbol // per_byte]
                 codes[:, lane] = (byte >> ((symbol % per_byte) * (1 if binary else 2))) & (1 if binary else 3)
             if not binary and np.any(codes == 0b11):

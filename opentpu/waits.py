@@ -186,15 +186,18 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
     elif op in (I.MM, I.TMM):
         n, kb, k0, m = c[3] & 0xFFFF, (c[3] >> 16) & 0xFF, c[3] >> 24, (c[5] >> 16) & 0xFF
         if n and kb and m:
-            p0, p1 = _p(n - 1, c[4]), _p(n - 1, c[6])
+            grq = op == I.TMM and bool(c[3] & I.TMM_GRQ)  # KB planes rs / srs apart
+            p0, p1 = _p((kb if grq else n) - 1, c[4]), _p((kb if grq else n) - 1, c[6])
             p2, p3 = _p(m - 1, c[5] & 0xFFFF), _p(m, c[5] & 0xFFFF)
             binary = op == I.TMM and bool(c[3] & I.TMM_BIN)
-            row_bytes = (((kb + (7 if binary else 3)) // (8 if binary else 4)) * D
+            row_bytes = ((n >> 2) * D if grq else
+                         ((kb + (7 if binary else 3)) // (8 if binary else 4)) * D
                          if op == I.TMM else kb * D)
             rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
             if op == I.TMM:
                 if fl & (I.F_RSC | I.F_GSC):
-                    rd.append(_mk(SP_DRAM, w[1], p1 + (4 * kb if fl & I.F_GSC else 4)))
+                    rd.append(_mk(SP_DRAM, w[1], p1 + (4 * n if grq else
+                                                       4 * kb if fl & I.F_GSC else 4)))
             elif not fl & I.F_UNIT:
                 # a scale row's bytes up to block k0 + KB's (MX, docs/isa.md "Weight formats"):
                 # RSC Sw; int8x Sw and a byte a block; NVFP4 Sw, three reserved words and 8

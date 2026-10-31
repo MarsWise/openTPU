@@ -210,6 +210,8 @@ package otpu_pkg;
     case (c.op)
       OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); m = 32'(c.w6[23:16]);
+        // TMM GRQ (word 4 bit 28): KB planes, rs and srs apart, not N rows
+        if (c.op == OP_TMM && c.w4[28]) n = 32'(c.w4[23:16]);
         o.a[0] = 24'(n - 1); o.w[0] = c.w5;
         o.a[1] = 24'(n - 1); o.w[1] = c.w7;
         o.a[2] = 24'(m - 1); o.w[2] = 32'(c.w6[15:0]);
@@ -312,14 +314,16 @@ package otpu_pkg;
         n = 32'(c.w4[15:0]); kb = 32'(c.w4[23:16]); m = 32'(c.w6[23:16]);
         if (n != 0 && kb != 0 && m != 0) begin
           f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
-                       ((c.op == OP_TMM) ? (c.w4[26] ? (((kb + 32'd7) >> 3) * D) :
+                       ((c.op == OP_TMM) ? (c.w4[28] ? ((n >> 2) * D) :     // GRQ: a plane
+                                            c.w4[26] ? (((kb + 32'd7) >> 3) * D) :
                                                         (((kb + 32'd3) >> 2) * D)) : kb * D));
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
           if (c.op == OP_TMM) begin
             if (c.flags[7] || c.flags[5])
-              f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[5] ? (kb << 2) : 32'd4));
+              f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.w4[28] ? (n << 2) :      // GRQ: N words
+                                                   c.flags[5] ? (kb << 2) : 32'd4));
           end else if (!c.flags[0])
             f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[7] ? 32'd4 :
                          (c.flags[5:4] == 2'd0) ? 32'd4 + 32'(c.w4[31:24]) + kb :

@@ -82,8 +82,9 @@ def test_vpu_hadamard_kernel(inverse):
     np.testing.assert_allclose(result, hadamard(x, 512, signs, inverse), atol=8e-7, rtol=1e-5)
 
 
+@pytest.mark.parametrize("grq", [False, True])
 @pytest.mark.parametrize("dstep", [False, True])
-def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep):
+def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq):
     """Both layer kinds and the tied head; the reference unfolds weights, the device rotates x."""
     from dataclasses import replace
     from opentpu.isasim import Config
@@ -143,7 +144,8 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
             aux(a+'q_norm.weight', np.zeros(256))
             aux(a+'k_norm.weight', np.zeros(256))
     cfg = Config(D=128, MCOLS=4, ACT_ROWS=8, TGSC=True, DRAM_BYTES=32 << 20,
-                 DSTEP=dstep, STREAM=dstep, TFN=dstep, PAIR=True, TQUAD=True, TPAIR=True)
+                 DSTEP=dstep, STREAM=dstep, TFN=dstep, PAIR=True, TQUAD=True, TPAIR=True,
+                 TGRQ=grq)
     eng = Engine(spec, w, cap=128, cfg=cfg, resident=True, pipeline=False,
                  rows=1, wformat='ternary_gsc')
     tokens = [4, 9, 12, 7, 31]
@@ -153,6 +155,13 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
     assert cosine.min() > .99
     assert all(i.op != 0x20 or i.flags >> 4 & 3 == 0 for p in eng.image.compile_step(0, tok=4)
                for i in p)   # no FP4 projection fallback
+    from opentpu import isa as I
+    tmms = [i for p in eng.image.compile_step(0, tok=4) for i in p if i.op == I.TMM]
+    assert any(i.w[3] & I.TMM_GRQ for i in tmms) == grq
+    if grq:     # the block-major layout is the serial GSC path's math, bit for bit
+        row = Engine(spec, w, cap=128, cfg=replace(cfg, TGRQ=False), resident=True,
+                     pipeline=False, rows=1, wformat='ternary_gsc')
+        np.testing.assert_array_equal(actual, np.stack([row.step(t) for t in tokens]))
 
 
 def test_native_hadamard_gsc_linear_rtl(have_verilator):

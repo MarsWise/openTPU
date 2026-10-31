@@ -75,6 +75,15 @@ from ..kernels.lib import rmsnorm, silu
 from ..kernels.mlp import _chunk, down_chunk
 from .lfm2 import _place, plan, run_layers, subs
 from . import formats as FM
+
+
+def gsc_grq(spec, cfg, fmt: str, n: int, k: int) -> bool:
+    """A native Bonsai TERNARY_GSC matrix in TMM GRQ's block-major layout (Config.TGRQ, every
+    packed chunk streamed once; quant.pack_ternary_gsc_grq, the same bytes in the same places).
+    OTPU_GRQ=0 keeps the row-major layout of the serial GSC path."""
+    import os
+    return (fmt == Q.TERNARY_GSC and spec.native_bonsai and bool(getattr(cfg, "TGRQ", False))
+            and os.environ.get("OTPU_GRQ", "1") != "0" and Q.gsc_grq_ok(n, k, cfg.D))
 from . import generate as G
 from . import moe as MO
 from . import rope_parameters
@@ -959,7 +968,8 @@ class Image(EmbedHost):
 
         def put_q1(s, addr_pair, a, fmt, signs=None):
             if fmt == Q.TERNARY_GSC:
-                q, sc = Q.pack_ternary_gsc(a, D)
+                q, sc = (Q.pack_ternary_gsc_grq if gsc_grq(spec, cfg, fmt, *a.shape)
+                         else Q.pack_ternary_gsc)(a, D)
                 put(s, addr_pair[0], q)
                 put(s, addr_pair[1], sc)
                 put(s, addr_pair[1] + sc.nbytes, W.signs_for(a.shape[1]) if signs is None else signs)
@@ -1034,7 +1044,8 @@ class Image(EmbedHost):
                 # column blocks their column parts (quant.column_parts)
                 fo = mf["wout"]
                 if fo == Q.TERNARY_GSC:
-                    gouts = [Q.pack_ternary_gsc(wout[:, g:g + og*dv], D)
+                    gouts = [(Q.pack_ternary_gsc_grq if gsc_grq(spec, cfg, fo, wout.shape[0], og*dv)
+                              else Q.pack_ternary_gsc)(wout[:, g:g + og*dv], D)
                              for g in range(0, wout.shape[1], og*dv)]
                 else:
                     gouts = Q.column_parts(*QC.quantize_mxu(wout, fo, D), fo, wout.shape[1],
@@ -1401,10 +1412,12 @@ class Image(EmbedHost):
             for name, (r, k) in self.mats[kind].items():
                 da, sa = lofs[name]
                 fm = mf[name]
-                setattr(ns, name, QTensor.weight(off + da, off + sa, r, k, fm, D))
+                setattr(ns, name, QTensor.weight(off + da, off + sa, r, k, fm, D,
+                                                 grq=gsc_grq(spec, cfg, fm, r, k)))
             Cd = lay.dchunk
             fm = mf["wd"]
-            parts = tuple(QTensor.weight(off + da, off + sa, n, Cd, fm, D)
+            parts = tuple(QTensor.weight(off + da, off + sa, n, Cd, fm, D,
+                                         grq=gsc_grq(spec, cfg, fm, n, Cd))
                           for da, sa in lofs["wd"])
             ns.wd = QTensor(parts[0].data, parts[0].scale, (n, spec.ffn), parts[0].rs,
                             parts[0].srs, D, parts=parts, pw=Cd, wf=parts[0].wf)
@@ -1418,10 +1431,12 @@ class Image(EmbedHost):
                     g0 = off + lofs["groups"]
                     (whd, whs), (wod, wos) = lay.pofs["wh"], lay.gofs["wout"]
                     ns.dn = DeltaNetParts(
-                        nl, og, QTensor.weight(g0 + whd, g0 + whs, R2, H, fm, D),
+                        nl, og, QTensor.weight(g0 + whd, g0 + whs, R2, H, fm, D,
+                                               grq=gsc_grq(spec, cfg, fm, R2, H)),
                         Tensor(g0 + lay.pofs["cv"], (self.CV0,), (1,)),
                         Tensor(g0 + lay.pofs["state"], (2, dv, dk), (dv * dk, dk, 1)),
-                        QTensor.weight(g0 + wod, g0 + wos, H, og * dv, fm, D), H, lay.GS, lay.PS,
+                        QTensor.weight(g0 + wod, g0 + wos, H, og * dv, fm, D,
+                                       grq=gsc_grq(spec, cfg, fm, H, og * dv)), H, lay.GS, lay.PS,
                         Tensor(g0 + lay.gofs["eb"], (og // 2, 4), (4, 1)), self.shared, **sl)
                 else:
                     # (a pair's taps and window 0: the decode loads them at once; window 1
@@ -1475,7 +1490,9 @@ class Image(EmbedHost):
             gr=_tdesc(self.io["gr"], (self.dnrows, 2 * nl)),
             on=_tdesc(self.io["on"], (self.dnrows, self.og * dv)),
             xbuf=_tdesc(self.io["xbuf"], (self.prefill_rows, H)) if self.prefill_rows else None,
-            head=_qdesc(*self.head, self.v_loc, H, D, self.head_format), v_loc=self.v_loc,
+            head=QTensor.weight(*self.head, self.v_loc, H, self.head_format, D,
+                                grq=gsc_grq(spec, cfg, self.head_format, self.v_loc, H)),
+            v_loc=self.v_loc,
             **_lookup_desc(self.lookup, spec, self.cap))
 
 

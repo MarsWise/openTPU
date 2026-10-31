@@ -35,6 +35,7 @@ F_QUAD = 0x10                   # TMM (its weight-format field's bit4; Config.TQ
 #                                 by four, a ternary chunk's four blocks in one advance
 F_GSC = 0x20                    # TMM: fp32 scale per row and D-element K block (Config.TGSC)
 TMM_BIN = 1 << 26               # TMM word 4: 8 binary weights per byte (Config.TBIN)
+TMM_GRQ = 1 << 28               # TMM word 4, GSC: block-major packed layout (Config.TGRQ)
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
@@ -436,7 +437,7 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
 
 def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
         ascale=None, rsc=False, pair=False, quad=False, ra=0, rb=0, rc=0, comment="",
-        gsc=False, binary=False):
+        gsc=False, binary=False, grq=False):
     """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
 
     Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
@@ -450,6 +451,11 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     the K-split by four; a bitstream with Config.TQUAD): 4M <= MCOLS, the operand's rows also in
     ACT rows M..4M-1 (QACT DUP4); column j + q*M takes block 4c + q, a whole chunk an advance
     (ceil(KB/4) cycles a weight row), the same exact integer sums. Not with `pair`.
+    `grq` (with `gsc`, ternary, a bitstream with Config.TGRQ): the block-major ("row quarter")
+    layout. Block k's weights are a plane at sa + k*rs of N/4 D-byte chunks, chunk i holding rows
+    4i..4i+3's block k (row 4i+q in quarter q); block k's scales a plane at ssa + k*srs of N fp32
+    words (row n at + 4n). N % 4 == 0, M <= MCOLS, ssa and srs multiples of 16, srs >= 4N,
+    rs >= N/4 * D. The same per-block fp32 math in K order as GSC, every chunk read once.
     """
     _check(0 < n < 65536 and 0 < kb < 256 and 0 < m < 256 and 0 <= ab < 256
            and 0 <= ors < 65536,
@@ -460,7 +466,12 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     if gsc:
         _check(not (unit or rsc or pair or quad or ascale is not None),
                "TMM GSC: UNIT, RSC, PAIR, QUAD and ASCALE are not supported")
-        _check(srs >= 4 * kb and srs % 4 == 0, "TMM GSC: scale row must hold KB fp32 words")
+        if grq:
+            _check(not binary and n % 4 == 0 and srs % 16 == 0 and srs >= 4 * n and ssa % 16 == 0,
+                   "TMM GRQ: ternary, N % 4 == 0, 16-byte scale planes of N words")
+        else:
+            _check(srs >= 4 * kb and srs % 4 == 0, "TMM GSC: scale row must hold KB fp32 words")
+    _check(not grq or gsc, "TMM GRQ needs GSC")
     if ascale is not None:
         _check(unit and acc, "TMM: ASCALE needs UNIT and ACC")
         ssa = ascale
@@ -471,7 +482,7 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     _check(not binary or not (pair or quad),
            "TMM BIN: PAIR and QUAD are not supported")
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
-                 w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0), rs,
+                 w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0) | (TMM_GRQ if grq else 0), rs,
                       ors | (m << 16) | (ab << 24), srs), comment=comment)
 
 

@@ -316,13 +316,21 @@ class QTensor:
     gsc: bool = False
     hsigns: Affine | None = None
     hblock: int = 0
+    grq: bool = False  # TMM GRQ block-major layout: rs / srs are the K planes' strides
 
     @staticmethod
-    def weight(data, scale, n: int, k: int, fmt: str, D: int, **kw) -> "QTensor":
+    def weight(data, scale, n: int, k: int, fmt: str, D: int, grq: bool = False,
+               **kw) -> "QTensor":
         """The descriptor of an [n, k] matrix in MXU format `fmt` ("int8", "int4", "fp4",
         "nvfp4", opentpu/quant.py quantize_mxu's rows): element rows row_bytes apart, scale rows
         scale_bytes apart."""
         from . import quant as Q
+        if fmt == Q.TERNARY_GSC and grq:        # quant.pack_ternary_gsc_grq's planes
+            if n % 4 or (k // D) % 4:
+                raise CompileError(f"TMM GRQ weight ({n}, {k}): N and K/D multiples of 4")
+            w = QTensor.ternary_weight(data, scale, n, k, D, rs=n // 4 * D, srs=4 * n,
+                                       gsc=True, grq=True, **kw)
+            return replace(w, hsigns=Affine.of(scale) + (k // D) * w.srs, hblock=512)
         if fmt == Q.TERNARY_GSC:
             w = QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
             return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
@@ -333,11 +341,19 @@ class QTensor:
 
     @staticmethod
     def ternary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
-                       srs: int = 4, gsc: bool = False) -> "QTensor":
-        """Descriptor for TMM's low-pair-first packed ternary rows and optional row scales."""
+                       srs: int = 4, gsc: bool = False, grq: bool = False) -> "QTensor":
+        """Descriptor for TMM's low-pair-first packed ternary rows and optional row scales.
+        grq (with gsc): the block-major planes of TMM GRQ, rs and srs the planes' strides."""
         if n <= 0 or k <= 0 or k % D or D % 4:
             raise CompileError(f"ternary weight shape ({n}, {k}) needs positive K divisible by "
                                f"D={D} and D divisible by 4")
+        if grq:
+            if not gsc or scale is None or D != 128 or n % 4 or rs is None or rs % D or \
+                    rs < n // 4 * D or srs % 16 or srs < 4 * n:
+                raise CompileError(f"TMM GRQ weight ({n}, {k}): group scales, N % 4 == 0, "
+                                   f"D-aligned weight planes and 16-byte scale planes")
+            return QTensor(Affine.of(data), Affine.of(scale), (n, k), rs, srs, D, wf=I.W8,
+                           ternary=True, gsc=True, grq=True)
         row_bytes = -(-k // 4)
         stride = ((row_bytes + D - 1) // D) * D if rs is None else rs
         if stride % D or stride < row_bytes:
@@ -406,6 +422,15 @@ class QTensor:
             raise CompileError("QTensor column slices must be multiples of D")
         if self.tiles is not None:
             return self.padded_cols(r0, nr, c0, nc, nc)
+        if self.grq:                       # plane c0 / D, chunk r0 / 4; scale plane, word r0
+            if nr % 4:
+                raise CompileError(f"a TMM GRQ row slice of {nr} rows: a multiple of 4")
+            kp = c0.div_exact(self.D)
+            return QTensor(self.data + r0.div_exact(4) * self.D + kp * self.rs,
+                           self.scale + r0 * 4 + kp * self.srs, (nr, nc), self.rs, self.srs,
+                           self.D, wf=self.wf, ternary=True, gsc=True, grq=True,
+                           hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
+                           hblock=self.hblock)
         if self.ternary:
             data = self.data + r0 * self.rs + c0.div_exact((8 if self.binary else 4) * self.D) * self.D
         elif self.wf == I.W8:
@@ -1656,7 +1681,8 @@ class Builder:
                     self.stores.append((t.host, off, n))
 
     def quantize(self, x: Tile, temp: bool = False, free: bool = False,
-                 rscale: Tile | None = None, cscale: Tile | None = None) -> Stationary:
+                 rscale: Tile | None = None, cscale: Tile | None = None,
+                 max_rows: int = 0) -> Stationary:
         """QACT x's rows into ACT RAM blocks. free: the stationary does not keep x (its TMEM is
         free once the QACTs have read it), only its shape: operands kept in ACT RAM while TMEM
         is reused (a tiled prefill's MLP activations). rscale [rows] / cscale [cols]: quantize
@@ -1694,8 +1720,9 @@ class Builder:
         # DUP4, no extra cycles), so a ternary MM takes a chunk's four K blocks an advance
         quad = pair and getattr(self.cfg, "TQUAD", False) and 4 * x.rows <= self.cfg.MCOLS
         st = Stationary(x, chunks, KB, owners, pair, quad=quad)
-        for m0 in builtins.range(0, x.rows, self.cfg.act_rows):
-            mc = min(self.cfg.act_rows, x.rows - m0)
+        cr = min(self.cfg.act_rows, max_rows) if max_rows else self.cfg.act_rows
+        for m0 in builtins.range(0, x.rows, cr):
+            mc = min(cr, x.rows - m0)
             ab, owner = self.act_alloc(KB)
             for k in builtins.range(ab, ab + KB):   # live now: the next chunk must not take it
                 self.act_live[k] = weakref.ref(st)
@@ -2005,7 +2032,11 @@ class Builder:
             if acc is None or w.scale is not None:
                 raise CompileError("dot(acc_scale=...) needs acc= and an unscaled stream (V^T)")
             self.check_live(acc_scale)
-        st = a if isinstance(a, Stationary) else self.quantize(a, temp)
+        # TMM GRQ uses the replay groups for its quarters: M <= MCOLS a command
+        st = a if isinstance(a, Stationary) else \
+            self.quantize(a, temp, max_rows=self.cfg.MCOLS if w.grq else 0)
+        if w.grq and any(mc > self.cfg.MCOLS for _, mc in st.chunks):
+            raise CompileError("dot: a TMM GRQ operand needs ACT chunks of at most MCOLS rows")
         if not self.stationary_valid(st):
             raise CompileError("stationary operand was overwritten in ACT RAM")
         # an operand from outside the innermost loop must survive every iteration: keep it (and
@@ -2043,6 +2074,8 @@ class Builder:
         unit = w.scale is None
         if w.gsc and not self.cfg.TGSC:
             raise CompileError("dot: ternary group scales require Config.TGSC / new firmware")
+        if w.grq and not getattr(self.cfg, "TGRQ", False):
+            raise CompileError("dot: the TMM GRQ layout requires Config.TGRQ / new firmware")
         if w.binary and not self.cfg.TBIN:
             raise CompileError("dot: binary weights require Config.TBIN / new firmware")
         if w.binary and w.gsc and not self.cfg.TBGSC:
@@ -2066,7 +2099,7 @@ class Builder:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
-            chunk_blocks = 8 if w.binary else 4
+            chunk_blocks = 8 if w.binary else 1 if w.grq else 4
             if w.ternary and k0 % chunk_blocks:
                 raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ranges "
                                    f"must start on a {chunk_blocks}-block boundary")
@@ -2081,16 +2114,18 @@ class Builder:
                 if w.ternary:
                     tquad = not w.gsc and not w.binary and st.quad and getattr(self.cfg, "TQUAD", False)
                     tpair = not w.gsc and not w.binary and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
-                    ins = I.tmm(sa + (k0 // chunk_blocks) * self.cfg.D, ssa + (4 * k0 if w.gsc else 0),
+                    ins = I.tmm(sa + (k0 * w.rs if w.grq else (k0 // chunk_blocks) * self.cfg.D),
+                                ssa + (k0 * w.srs if w.grq else 4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
                                 w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc, binary=w.binary,
+                                grq=w.grq,
                                 pair=tpair, quad=tquad,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
                                 comment=f"tmm {M}x{K} . {N}x{K}^T"
-                                + (" pair" if tpair else "") + (" quad" if tquad else "")
+                                + (" grq" if w.grq else "") + (" pair" if tpair else "") + (" quad" if tquad else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")
                                 + (" acc*=scale" if acc_scale is not None and first else ""))
