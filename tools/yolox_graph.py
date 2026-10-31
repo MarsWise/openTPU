@@ -23,7 +23,13 @@ runs on the host; the complete path is not yet validated with a real r6 card.
 
 --fpga-u8: after host image decoding and letterbox resize, transfer packed uint8
 pixels and convert and place them in the model input buffer on the VU8 device.
-This does not move resize or image decoding to the device.
+
+--fpga-resize: implies --fpga-u8 and moves the letterbox too: the host only decodes the image
+file and writes its raw RGB bytes at their original size; the device converts them to fp32,
+resizes them (kernels/letterbox.py: Pillow's bilinear filters, vertical pass on the VPU,
+horizontal one and the BGR order on the MXU), pads with 114 and writes the model's input.
+The float reference keeps Pillow's letterbox, so the comparison includes the resize's
+difference (about a level, tests/test_letterbox.py).
 """
 import argparse
 import hashlib
@@ -63,14 +69,18 @@ def main():
                     help="run decoded YOLOX class selection and NMS on r6; report only final detections")
     ap.add_argument("--fpga-u8", action="store_true",
                     help="transfer uint8 pixels and convert them to fp32 on VU8 firmware")
+    ap.add_argument("--fpga-resize", action="store_true",
+                    help="letterbox resize on the device too (implies --fpga-u8)")
     ap.add_argument("--max-detections", type=int, default=100)
     ap.add_argument("--confidence", type=float, default=0.3)
     ap.add_argument("--nms-iou", type=float, default=0.45)
     ap.add_argument("--wsplit", action="store_true", help="int8 hi + lo convolution weights")
     a = ap.parse_args()
-    if a.strict_fpga_only:
-        ap.error("strict FPGA-only execution is unavailable: this runner still resizes and "
-                 "letterboxes images on the host")
+    if a.fpga_resize:
+        a.fpga_u8 = True
+    if a.strict_fpga_only and not (a.fpga_resize and a.fpga_nms):
+        ap.error("strict FPGA-only execution needs --fpga-resize --fpga-nms (the host then only "
+                 "decodes the image file and reads the final detections)")
     if a.fpga_u8 and not a.image:
         ap.error("--fpga-u8 requires an explicit image")
     if a.fpga_nms:
@@ -187,9 +197,33 @@ def main():
         if image_size > cfg.DRAM_BYTES:
             raise SystemExit("--fpga-u8 buffers exceed the configured DRAM size")
         dst = b.addr + 4 * (b.border * b.rs + b.border * b.C)
-        input_prog = program_rows(cfg, raw_at, dst, scratch, b.H, b.W * b.C, b.rs)
+        if a.fpga_resize:
+            from PIL import Image
+            from opentpu.kernels import letterbox as LB
+            from opentpu.kernels.u8_input import program as u8_program
+            raw0 = np.asarray(Image.open(a.image).convert("RGB"), np.uint8)
+            H0, W0 = raw0.shape[:2]
+            lb = LB.Plan(H0, W0, a.size)
+            lq, lsc = lb.weights(cfg.D)
+            raw_at = -(-image_size // cfg.D) * cfg.D
+            scratch = -(-(raw_at + raw0.size + 4) // cfg.D) * cfg.D
+            lw = -(-(scratch + 4 * raw0.size) // 4096) * 4096
+            ls = -(-(lw + lq.nbytes) // 4096) * 4096
+            lbias = -(-(ls + lsc.nbytes) // 4096) * 4096
+            image_size = -(-(lbias + lb.bias.nbytes) // cfg.D) * cfg.D
+            if image_size > cfg.DRAM_BYTES:
+                raise SystemExit("--fpga-resize buffers exceed the configured DRAM size")
+            input_prog = [u8_program(cfg, raw_at, scratch, raw0.size)] + \
+                LB.programs(cfg, lb, scratch, lw, ls, lbias, dst, b.rs)
+        else:
+            input_prog = [program_rows(cfg, raw_at, dst, scratch, b.H, b.W * b.C, b.rs)]
     img = plan.image(image_size, cfg.D)
-    if a.fpga_u8:
+    if a.fpga_resize:
+        for at, arr in ((raw_at, raw0), (lw, lq), (ls, lsc), (lbias, lb.bias)):
+            v = np.ascontiguousarray(arr).view(np.uint8).reshape(-1)
+            img[at:at + v.size] = v
+        x = load_image(a.image, a.size) if (a.per_op or not a.fpga_nms) else None
+    elif a.fpga_u8:
         raw = load_image_u8(a.image, a.size)
         img[raw_at:raw_at + raw.size] = raw.reshape(-1)
         x = raw.transpose(2, 0, 1).astype(np.float32) if (a.per_op or not a.fpga_nms) else None
@@ -215,9 +249,10 @@ def main():
         if input_prog is not None:
             import dataclasses
             from opentpu.isasim import Machine
-            sim = Machine(dataclasses.replace(cfg, DRAM_BYTES=len(img)), [input_prog], [img]).run()
-            img = sim.slices[0].dram
-            stats["instructions"] += sim.slices[0].icount
+            for p in input_prog:
+                sim = Machine(dataclasses.replace(cfg, DRAM_BYTES=len(img)), [p], [img]).run()
+                img = sim.slices[0].dram
+                stats["instructions"] += sim.slices[0].icount
         def each(i, op, im, icount):
             stats["instructions"] += icount
         out = plan.run_isa(cfg, img, each)
@@ -242,8 +277,11 @@ def main():
         print(f"FPGA NMS: {len(rows)} valid detections (max {a.max_detections})")
         for x0, y0, x1, y1, score, cls, _ in rows:
             print(f"  class {int(cls):2d} score {score:.3f} box [{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]")
-        print("input preprocessing: host letterbox/resize; " +
-              ("uint8 conversion, " if a.fpga_u8 else "") + "graph, class selection and NMS: device")
+        print("input preprocessing: " + ("host image decode only; uint8 conversion, letterbox "
+                                         "resize, " if a.fpga_resize else
+                                         "host letterbox/resize; " +
+                                         ("uint8 conversion, " if a.fpga_u8 else "")) +
+              "graph, class selection and NMS: device")
         return 0
     t_run = time.time() - t0
 
@@ -322,17 +360,18 @@ def run_board(board, plan, cfg, img, stats, check, read_final=True, input_prog=N
     at = -(-(len(img) + PROG_AT_GAP) // 4096) * 4096
     ref = img.copy() if check else None
     c = dataclasses.replace(cfg, DRAM_BYTES=len(img))
-    if input_prog is not None:
-        board.load(at, input_prog)
+    for p in input_prog or ():
+        board.load(at, p)
         st = board.run(timeout=60.0)
         stats["instructions"] += st["instructions"][0]
         stats["cycles"] += st["cycles"]
         if check:
-            ref = Machine(c, [input_prog], [ref]).run().slices[0].dram
-            b = plan.inputs["x"]
-            got = board.read(b.addr, b.nbytes)
-            if not np.array_equal(got, ref[b.addr:b.addr + b.nbytes]):
-                raise SystemExit("FPGA uint8 input conversion differs from ISA")
+            ref = Machine(c, [p], [ref]).run().slices[0].dram
+    if input_prog is not None and check:
+        b = plan.inputs["x"]
+        got = board.read(b.addr, b.nbytes)
+        if not np.array_equal(got, ref[b.addr:b.addr + b.nbytes]):
+            raise SystemExit("FPGA input preprocessing (uint8 / letterbox) differs from ISA")
     for i, op in enumerate(plan.ops):
         board.load(at, op.prog)
         st = board.run(timeout=60.0)
