@@ -27,19 +27,30 @@ class Loop:
         self.g, self.sample, self.gfeat, self.times = g, sample, gfeat, times
         self.noises, self.step_progs, self.common = noises, step_progs, common
         self.coeffs, self.A, self.T, self.E = coeffs, A, T, E
+        self.enc_progs, self.enc_in = [], []         # (with the observation encoders)
 
     def programs(self) -> list:
         """Every program of the loop in order: per step its timestep embedding, the shared
         U-Net, its DDPM update."""
-        out = []
+        out = list(self.enc_progs)
         for pre, post in self.step_progs:
             out += pre + self.common + post
         return out
 
-    def image(self, global_cond, noise0, step_noise) -> np.ndarray:
+    def image(self, global_cond, noise0, step_noise, images=None, states=None) -> np.ndarray:
+        """global_cond (no encoders), or the observation's images ([S][C, H, W], normalized)
+        and states ([S][sd]): the encoders compute the rest of the global condition."""
         g = self.g
         img = g.image()
-        g.put(img, self.gfeat.cols(self.E, self.gfeat.C), np.asarray(global_cond).reshape(1, -1))
+        if self.enc_in:
+            f = img.view(np.float32)
+            for (it, st), x, sv in zip(self.enc_in, images, states):
+                x = np.asarray(x, np.float32).transpose(1, 2, 0).reshape(-1)  # (NHWC input)
+                f[it.addr // 4:it.addr // 4 + x.size] = x
+                g.put(img, st, np.asarray(sv, np.float32).reshape(1, -1))
+        else:
+            g.put(img, self.gfeat.cols(self.E, self.gfeat.C),
+                  np.asarray(global_cond).reshape(1, -1))
         g.put(img, self.sample, np.asarray(noise0).reshape(self.T, self.A))
         g.put(img, self.times, np.asarray([c["t"] for c in self.coeffs], np.float32)[:, None])
         for nt, z in zip(self.noises, step_noise):
@@ -50,8 +61,9 @@ class Loop:
         return self.g.read(img, self.sample)
 
 
-def build(policy, cfg, steps: int | None = None) -> Loop:
-    """The resident loop of `policy` (a LeRobot DiffusionPolicy, B = 1)."""
+def build(policy, cfg, steps: int | None = None, encode: bool = False) -> Loop:
+    """The resident loop of `policy` (a LeRobot DiffusionPolicy, B = 1); with `encode` also its
+    observation encoders (images -> features, beside the states, into the global condition)."""
     from .kernels import eltwise as E
     from .kernels.ddpm import ddpm_epsilon_rows
     dm = policy.diffusion
@@ -74,6 +86,24 @@ def build(policy, cfg, steps: int | None = None) -> Loop:
     gfeat = g.tensor(1, Edim + gcd)
     times = g.tensor(steps, 1)
     noises = [g.tensor(T, A) for _ in range(steps)]
+
+    enc_ops, enc_in = [], []
+    if encode:
+        dc = dm.config
+        if dc.env_state_feature or len(dc.image_features) != 1:
+            raise NotImplementedError("the resident encoder takes one camera, no env state")
+        enc = dm.rgb_encoder
+        enc = enc[0] if isinstance(enc, torch_modulelist()) else enc
+        _, Hi, Wi = list(dc.image_features.values())[0].shape
+        sd = dc.robot_state_feature.shape[0]
+        F = enc.out.out_features
+        for o in range(dc.n_obs_steps):
+            c0 = Edim + o * (sd + F)
+            st = gfeat.cols(c0, c0 + sd)
+            it = encoder(g, enc, Hi, Wi, Tensor(gfeat.addr + 4 * (c0 + sd), (F,), (1,)),
+                         name=f"obs{o}")
+            enc_in.append((it, st))
+        enc_ops, g.ops = g.ops, []
 
     # per step: the timestep's sinusoidal embedding (TFN sin / cos of the input timestep)
     half = Edim // 2
@@ -159,7 +189,14 @@ def build(policy, cfg, steps: int | None = None) -> Loop:
                                y=sample.rows(), M=T, N=A, **k_))])
     common_progs = g.compile(common_ops)
     step_progs = [(g.compile(p), g.compile(q)) for p, q in zip(pre_ops, post_ops)]
-    return Loop(g, sample, gfeat, times, noises, step_progs, common_progs, coeffs, A, T, Edim)
+    loop = Loop(g, sample, gfeat, times, noises, step_progs, common_progs, coeffs, A, T, Edim)
+    loop.enc_progs, loop.enc_in = g.compile(enc_ops), enc_in
+    return loop
+
+
+def torch_modulelist():
+    import torch
+    return torch.nn.ModuleList
 
 
 def reference_noise(policy, global_cond, noise0, steps: int, seed: int):
@@ -192,3 +229,71 @@ def reference_noise(policy, global_cond, noise0, steps: int, seed: int):
             zs[i] = drawn[j][0].numpy()
             j += 1
     return out[0].numpy(), zs
+
+
+def encoder(g, enc, H: int, W: int, out_vec: Tensor, name: str = "rgb"):
+    """LeRobot's DiffusionRgbEncoder (ResNet with GroupNorm, SpatialSoftmax, linear + ReLU) as
+    resident ops: returns the [H, W, 3] input image the host writes (NHWC, normalized as the
+    policy's inputs are); the feature goes to out_vec ([F] words of a device tensor). A center
+    crop is a device copy of the crop's rows."""
+    from .compiler import Tensor as Tn
+    D = g.D
+    img = g.tensor2(H, W, 3)
+    if getattr(enc, "do_crop", False):
+        ch, cw = enc.center_crop.size if hasattr(enc.center_crop, "size") else enc.center_crop
+        oy, ox = (H - ch) // 2, (W - cw) // 2
+        x = g.tensor2(ch, cw, 3, 3, D)
+        g.op(name + ".crop", RG.copy_k,
+             x=Tn(img.addr + 4 * (oy * W * 3 + ox * 3), (ch, cw * 3), (W * 3, 1)),
+             y=Tn(x.interior().base, (ch, cw * 3), (x.rs, 1)))
+    else:
+        x = g.tensor2(H, W, 3, 3, D)
+        g.op(name + ".place", RG.copy_k, x=Tn(img.addr, (H, W * 3), (W * 3, 1)),
+             y=Tn(x.interior().base, (H, W * 3), (x.rs, 1)))
+    bb = list(enc.backbone)
+    conv1, gn1, _relu, mp = bb[:4]
+    y = g.conv2d(x, _np(conv1.weight), None if conv1.bias is None else _np(conv1.bias),
+                 conv1.stride[0], conv1.padding[0], name=name + ".conv1")
+    y = g.group_norm2d(y, gn1.num_groups, _np(gn1.weight), _np(gn1.bias), gn1.eps, "relu",
+                       border=mp.padding, name=name + ".gn1")
+    k = mp.kernel_size if isinstance(mp.kernel_size, int) else mp.kernel_size[0]
+    s = mp.stride if isinstance(mp.stride, int) else mp.stride[0]
+    x = g.maxpool2d(y, k, s, mp.padding, name=name + ".maxpool")
+    for li, layer in enumerate(bb[4:]):
+        for bi, blk in enumerate(layer):
+            n = f"{name}.l{li + 1}.{bi}"
+            h = g.conv2d(x, _np(blk.conv1.weight), None, blk.conv1.stride[0],
+                         blk.conv1.padding[0], name=n + ".conv1")
+            h = g.group_norm2d(h, blk.bn1.num_groups, _np(blk.bn1.weight), _np(blk.bn1.bias),
+                               blk.bn1.eps, "relu", name=n + ".gn1")
+            h = g.conv2d(h, _np(blk.conv2.weight), None, 1, blk.conv2.padding[0],
+                         name=n + ".conv2")
+            if blk.downsample is not None:
+                dc, dn = blk.downsample[0], blk.downsample[1]
+                r = g.conv2d(x, _np(dc.weight), None, dc.stride[0], 0, name=n + ".down")
+                r = g.group_norm2d(r, dn.num_groups, _np(dn.weight), _np(dn.bias), dn.eps,
+                                   name=n + ".down_gn")
+            else:
+                r = x
+            x = g.group_norm2d(h, blk.bn2.num_groups, _np(blk.bn2.weight), _np(blk.bn2.bias),
+                               blk.bn2.eps, "relu", res=r, name=n + ".gn2")
+    pool = enc.pool
+    K = pool._out_c
+    if pool.nets is not None:
+        sc = g.conv2d(x, _np(pool.nets.weight), _np(pool.nets.bias), 1, 0, name=name + ".kp")
+    else:
+        raise NotImplementedError("SpatialSoftmax without its keypoint conv")
+    grid = _np(pool.pos_grid)
+    kp = g.tensor(1, 2 * K)
+    g.op(name + ".softmax", RG.spatial_softmax_k, x=sc.flat(),
+         px=tuple(float(v) for v in grid[:, 0]), py=tuple(float(v) for v in grid[:, 1]),
+         y=kp.rows())
+    # (x0, y0, x1, y1, ...) is LeRobot's flatten; the kernel gives (x..., y...): permute the
+    # out linear's columns instead
+    wo = _np(enc.out.weight)
+    perm = np.concatenate([np.arange(0, 2 * K, 2), np.arange(1, 2 * K, 2)])
+    F = wo.shape[0]
+    g.op(name + ".out", RG.dense_k, x=kp.rows(), w=g.weight(wo[:, perm]),
+         b=g.vec(_np(enc.out.bias)), y=Tn(out_vec.base, (1, F), (F, 1)), M=1, K=2 * K,
+         act="relu")
+    return img

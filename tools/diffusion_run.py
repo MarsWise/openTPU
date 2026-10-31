@@ -100,6 +100,10 @@ def main():
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--resident", action="store_true",
+                    help="the whole policy as a resident graph (opentpu/diffusion_resident.py): "
+                         "encoders, U-Net, DDPM updates on the device, the tensors in its DRAM; "
+                         "the host writes the inputs and reads the actions")
     ap.add_argument("--device-ops", action="store_true",
                     help="GroupNorm, Mish, ReLU, spatial softmax and large adds / products on "
                          "the device too")
@@ -127,6 +131,8 @@ def main():
           f"{cfg.noise_scheduler_type} steps, U-Net {tuple(cfg.down_dims)}, "
           f"{cfg.vision_backbone}")
     b, noise = inputs(cfg, a.seed)
+    if a.resident:
+        return run_resident(a, pol, cfg, b, noise)
     with torch.no_grad():
         torch.manual_seed(a.seed + 1)           # the scheduler's per-step noise
         t0 = time.time()
@@ -169,6 +175,63 @@ def main():
         print(f"CARD != ISA in {runner.mismatch} runs")
     if a.save:
         np.savez(a.save, ref=r, dev=g)
+    return 0
+
+
+def run_resident(a, pol, cfg, b, noise):
+    """The policy on the device with nothing computed on the host: the observation (normalized
+    images and states), the initial noise and the scheduler's per-step noise written once, every
+    step's programs launched, the actions read back. Compared with the policy's float32 loop."""
+    import torch
+    from opentpu import diffusion_resident as DR, resident as RG
+    from opentpu.isasim import board_config
+    dm = pol.diffusion
+    steps = dm.num_inference_steps
+    with torch.no_grad():
+        gc = dm._prepare_global_conditioning(b)[0].numpy()     # (the float reference's)
+    t0 = time.time()
+    ref, zs = DR.reference_noise(pol, gc, noise[0].numpy(), steps, seed=a.seed + 1)
+    t_ref = time.time() - t0
+    board = None
+    if a.backend == "board":
+        from opentpu.host.board import Board, XdmaTransport, device_config
+        board = Board(XdmaTransport(a.dev), check=False)
+        c = device_config(board.info())
+    else:
+        c = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
+                         TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    t0 = time.time()
+    loop = DR.build(pol, c, steps, encode=True)
+    progs = loop.programs()
+    t_c = time.time() - t0
+    img = loop.image(None, noise[0].numpy(), zs, images=b["observation.images"][0, :, 0].numpy(),
+                     states=b["observation.state"][0].numpy())
+    print(f"resident policy: {len(progs)} programs ({len(loop.enc_progs)} encoder, "
+          f"{len(loop.common) + 2} a step x {steps}), DRAM image {len(img) / 2**20:.1f} MiB, "
+          f"compiled in {t_c:.1f}s")
+    t0 = time.time()
+    if board is None:
+        img, n = RG.run_isa(c, progs, img)
+        got = loop.actions(img)
+        st = {"instructions": n}
+    else:
+        board.write(0, img)
+        at = -(-(len(img) + (1 << 20)) // 4096) * 4096
+        st = RG.run_board(board, progs, at)
+        got = board.read(loop.sample.addr, loop.sample.nbytes).view(np.float32)
+        got = got.reshape(-1, loop.A)[loop.sample.pad:loop.sample.pad + loop.T]
+        if a.check_isa:
+            iso, _ = RG.run_isa(c, progs, img)
+            print("card == ISA:", np.array_equal(got, loop.actions(iso)))
+    t_dev = time.time() - t0
+    S = dm.config.n_obs_steps
+    r = ref[S - 1:S - 1 + dm.config.n_action_steps]
+    g = got[S - 1:S - 1 + dm.config.n_action_steps]
+    rel = float(np.linalg.norm(g - r) / np.linalg.norm(r))
+    print(f"device run {t_dev:.1f}s ({st}), float run {t_ref:.2f}s")
+    print(f"actions [{r.shape[0]} x {r.shape[1]}] vs float32: rel L2 {rel:.4f}, max |d| "
+          f"{float(np.abs(g - r).max()):.4f}; host: inputs written, actions read, nothing "
+          f"computed")
     return 0
 
 

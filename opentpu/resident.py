@@ -300,3 +300,161 @@ def run_board(board, progs, at: int) -> dict:
         st["instructions"] += r["instructions"][0]
         st["runs"] += 1
     return st
+
+
+# ---------------------------------------------------------------- 2-D (NHWC) tensors
+class T2:
+    """A device image [H, W, C] (one sample), `border` zero pixels around it and `tail` words
+    after each row (a convolution's last window reads past its row)."""
+
+    def __init__(self, addr: int, H: int, W: int, C: int, border: int = 0, tail: int = 0):
+        self.addr, self.H, self.W, self.C, self.border, self.tail = addr, H, W, C, border, tail
+
+    @property
+    def rs(self) -> int:
+        return (self.W + 2 * self.border) * self.C + self.tail
+
+    @property
+    def nbytes(self) -> int:
+        return 4 * self.rs * (self.H + 2 * self.border)
+
+    def interior(self) -> Tensor:
+        b = self.border
+        return Tensor(self.addr + 4 * (b * self.rs + b * self.C), (self.H, self.W, self.C),
+                      (self.rs, self.C, 1))
+
+    def rows(self, pad: int, words: int) -> Tensor:
+        o = self.border - pad
+        if pad > self.border or o * self.C + words > self.rs:
+            raise ValueError(f"a {words}-word row at pad {pad} exceeds the buffer")
+        return Tensor(self.addr + 4 * (o * self.rs + o * self.C), (self.H + 2 * pad, words),
+                      (self.rs, 1))
+
+    def flat(self) -> Tensor:
+        """[H * W, C] (a dense buffer: no border, no tail)."""
+        if self.border or self.tail:
+            raise ValueError("flat() of a padded image")
+        return Tensor(self.addr, (self.H * self.W, self.C), (self.C, 1))
+
+
+@ol.jit
+def group_norm2d_k(x, w, b, y, H: int, W: int, G: int, eps: float, act: str = "none",
+                   res=None):
+    """y = act(GroupNorm(x) * w + b (+ res)): x [H*W, C] dense, y (and res) [H, W, C] views.
+    Three hardware loops over the image rows: the groups' sums, their squared deviations from
+    the means, then the normalization, its affine, the residual and the activation."""
+    from .kernels import eltwise as E
+    C = x.shape[1]
+    cg = C // G
+    t = ol.empty([W, C])
+    wv, bv = ol.load(w), ol.load(b)
+    inv = 1.0 / (H * W * cg)
+    sums = [ol.zeros([1]) for _ in range(G)]
+    for h in ol.range(H):
+        ol.load(x[h * W:(h + 1) * W, :], out=t)
+        for g in range(G):
+            sums[g].set(sums[g] + ol.sum(ol.sum(t[:, g * cg:(g + 1) * cg], axis=1)))
+    means = [ol.zeros([1]) for _ in range(G)]
+    for g in range(G):
+        means[g].set(sums[g] * inv)
+    sq = [ol.zeros([1]) for _ in range(G)]
+    d = ol.empty([W, cg])
+    for h in ol.range(H):
+        ol.load(x[h * W:(h + 1) * W, :], out=t)
+        for g in range(G):
+            d.set(t[:, g * cg:(g + 1) * cg] - means[g])
+            sq[g].set(sq[g] + ol.sum(ol.sumsq(d)))
+    rs = [ol.zeros([1]) for _ in range(G)]
+    for g in range(G):
+        rs[g].set(ol.rsqrt(sq[g] * inv + eps))
+    rt = ol.empty([W, C]) if res is not None else None
+    for h in ol.range(H):
+        ol.load(x[h * W:(h + 1) * W, :], out=t)
+        for g in range(G):
+            sl = t[:, g * cg:(g + 1) * cg]
+            sl.set((sl - means[g]) * rs[g])
+        t.set(t * wv[None, :] + bv[None, :])
+        if res is not None:
+            ol.load(res[h, 0:W, :], out=rt)
+            t.set(t + rt)
+        if act != "none":
+            t.set(E.UNARY[act](t))
+        ol.store(y[h, 0:W, :], t)
+
+
+@ol.jit
+def spatial_softmax_k(x, px: tuple, py: tuple, y):
+    """LeRobot's SpatialSoftmax on [HW, K] scores (pixels x keypoints): per keypoint (column)
+    the softmax over the pixels (rows), then y [1, 2K] = (expected x of each keypoint, then
+    expected y of each) -- the caller's next linear takes its columns in that order."""
+    HW, K = x.shape
+    t = ol.load(x)
+    m = t[0:1, :]
+    mx = ol.empty([1, K])
+    mx.set(m)
+    for r in range(1, HW):
+        mx.set(ol.maximum(mx, t[r:r + 1, :]))
+    for r in range(HW):
+        t[r:r + 1, :].set(ol.exp2((t[r:r + 1, :] - mx) * ol.LOG2E))
+    s = ol.empty([1, K])
+    sx = ol.empty([1, K])
+    sy = ol.empty([1, K])
+    s.set(t[0:1, :])
+    sx.set(t[0:1, :] * float(px[0]))
+    sy.set(t[0:1, :] * float(py[0]))
+    for r in range(1, HW):
+        s.set(s + t[r:r + 1, :])
+        sx.set(sx + t[r:r + 1, :] * float(px[r]))
+        sy.set(sy + t[r:r + 1, :] * float(py[r]))
+    inv = ol.recip(s)
+    o = ol.empty([1, 2 * K])
+    o[:, 0:K].set(sx * inv)
+    o[:, K:2 * K].set(sy * inv)
+    ol.store(y, o)
+
+
+def _graph_2d_ops():
+    def tensor2(self, H, W, C, border=0, tail=0) -> T2:
+        t = T2(0, H, W, C, border, tail)
+        t.addr = self.alloc(t.nbytes + 4 * C)
+        return t
+
+    def conv2d(self, x: T2, w: np.ndarray, b, stride: int, pad: int, name="conv2d") -> T2:
+        """A dense [OH*OW, Cout] output (its GroupNorm writes the padded consumer's buffer)."""
+        from .kernels import conv as C
+        Cout, Cin, KH, KW = w.shape
+        OH, OW, Hp, Wp, Kp, rw = C.geometry(x.H, x.W, Cin, KH, KW, stride, pad, self.D)
+        y = self.tensor2(OH, OW, Cout)
+        p = C.pack_conv_weight(np.asarray(w, np.float32), self.D)
+        q, sc = Q.quantize_mxu(p, "int8", self.D)
+        wq = QTensor.weight(self.const(q), self.const(sc), p.shape[0], p.shape[1], "int8",
+                            self.D)
+        b = np.zeros(Cout, np.float32) if b is None else b
+        self.op(name, C.conv2d, x=x.rows(pad, rw), w=wq, b=self.vec(b), y=y.interior(),
+                H=x.H, W=x.W, Cin=Cin, Cout=Cout, KH=KH, KW=KW, stride=stride, pad=pad,
+                act="none")
+        return y
+
+    def group_norm2d(self, x: T2, G, w, b, eps, act="none", res: T2 | None = None,
+                     border=1, tail=None, name="gn2d") -> T2:
+        y = self.tensor2(x.H, x.W, x.C, border, self.D if tail is None else tail)
+        self.op(name, group_norm2d_k, x=x.flat(), w=self.vec(w), b=self.vec(b),
+                y=y.interior(), H=x.H, W=x.W, G=G, eps=eps, act=act,
+                res=None if res is None else res.interior())
+        return y
+
+    def maxpool2d(self, x: T2, K: int, stride: int, pad: int, name="maxpool") -> T2:
+        """(x >= 0: a ReLU's output, so the zero border is max pooling's -inf)."""
+        from .kernels import conv as C
+        OH = (x.H + 2 * pad - K) // stride + 1
+        OW = (x.W + 2 * pad - K) // stride + 1
+        y = self.tensor2(OH, OW, x.C, 1, self.D)
+        self.op(name, C.maxpool2d, x=x.rows(pad, (x.W + 2 * pad) * x.C), y=y.interior(),
+                H=x.H, W=x.W, C=x.C, K=K, stride=stride, pad=pad)
+        return y
+
+    Graph.tensor2, Graph.conv2d, Graph.group_norm2d, Graph.maxpool2d = \
+        tensor2, conv2d, group_norm2d, maxpool2d
+
+
+_graph_2d_ops()
