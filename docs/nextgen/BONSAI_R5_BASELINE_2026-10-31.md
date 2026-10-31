@@ -65,6 +65,15 @@ enabled for different GSC scales. Preserve the r5 bitstream and compare any
 candidate on the same model, tokens, clock and configuration after ISA/RTL tests,
 synthesis, routing and separate permission to program the FPGA.
 
+An experimental instruction tiler (`opentpu/nextgen/gsc_tiling.py`) splits an
+unpaired ternary GSC operation into output-column tiles, preserving the full K
+order for every output and the original ACC behavior. Seventeen ISA tests cover
+varying scales, tails, M and ACC; two RTL tests compare the tiled sequence
+against the original ISA with AXI stalls and WAITC off/on. It refuses RMAX and
+incompatible flags. It is not connected to the compiler and does not yet retain
+or reuse any weight: tiling alone does not lower the request count or establish
+a speedup. A cache/replay must also preserve command and memory ordering.
+
 The r7 source `09e9d34f` synthesis passed, including structural T4/latch gates,
 but its implementation crashed inside Vivado phys_opt and produced no bitstream.
 A separate diagnostic placement replay is in progress; it is not an optimized
