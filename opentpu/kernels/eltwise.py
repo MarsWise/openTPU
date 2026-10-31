@@ -13,7 +13,7 @@ from .vit import layernorm_
 
 UNARY = {
     "silu": lib.silu, "sigmoid": lib.sigmoid, "tanh": lib.tanh, "gelu": lib.gelu,
-    "gelu_tanh": lib.gelu_tanh, "relu": lambda x: ol.maximum(x, 0.0),
+    "gelu_tanh": lib.gelu_tanh, "relu": lambda x: ol.maximum(x, 0.0), "mish": lib.mish,
 }
 BINARY = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mul": lambda a, b: a * b}
 
@@ -43,8 +43,9 @@ def unary(x, y, M: int, N: int, fn: str):
 
 
 @ol.jit
-def binary(a, b, y, M: int, N: int, op: str, brow: bool = False):
-    """y [M, N] = a op b; b [M, N], or [N] broadcast over the rows (brow)."""
+def binary(a, b, y, M: int, N: int, op: str, brow: bool = False, bcol: bool = False):
+    """y [M, N] = a op b; b [M, N], or [N] broadcast over the rows (brow), or [M, 1] one value
+    a row broadcast over its columns (bcol: FiLM's per-channel scale and shift)."""
     f = BINARY[op]
     # Both inputs and the result of f(va, vb) are live before va.set copies it.
     # Reserving only two tiles exhausts TMEM for wide rows, e.g. SmolVLA base.
@@ -60,6 +61,10 @@ def binary(a, b, y, M: int, N: int, op: str, brow: bool = False):
         ol.load(a[m0:m0 + n, :], out=va)
         if brow:
             va.set(f(va, bv[None, :]))
+        elif bcol:
+            vb = tb[0:n, 0:1]
+            ol.load(b[m0:m0 + n, :], out=vb)
+            va.set(f(va, ol.sum(vb, axis=1)[:, None]))
         else:
             vb = tb[0:n, :]
             ol.load(b[m0:m0 + n, :], out=vb)
@@ -94,3 +99,44 @@ def rms_norm(x, w, y, M: int, N: int, eps: float):
         ol.load(x[m0:m0 + n, :], out=v)
         v.set(lib.rmsnorm(v, wv, eps))
         ol.store(y[m0:m0 + n, :], v)
+
+
+@ol.jit
+def group_norm(x, w, b, y, M: int, N: int, G: int, eps: float):
+    """nn.GroupNorm's normalization: x [M, N] rows are the (sample, group) pairs in group-major
+    order (rows g*B .. g*B + B - 1 are group g's, B = M / G), N = (C / G) * spatial elements;
+    w, b [G, N] the per-element gain and bias of each group's channels (the channel's value
+    repeated over its spatial positions). Mean, then the centered variance (torch's), as
+    LayerNorm over each row."""
+    B = M // G
+    R = rows_a_tile(N, 2, reserve_vectors=2)
+    t = ol.empty([R, N])
+    for g in range(G):
+        wv, bv = ol.load(w[g:g + 1, :]), ol.load(b[g:g + 1, :])
+        for m0 in range(0, B, R):
+            n = min(R, B - m0)
+            v = t[0:n, :]
+            ol.load(x[g * B + m0:g * B + m0 + n, :], out=v)
+            layernorm_(v, wv[0, :], bv[0, :], eps)
+            ol.store(y[g * B + m0:g * B + m0 + n, :], v)
+
+
+@ol.jit
+def softmax_xy(x, px, py, y, M: int, N: int):
+    """Spatial soft-argmax (LeRobot SpatialSoftmax): per row the softmax over its N positions,
+    then the expected coordinates y [M, 2] = (sum p * px, sum p * py) with px, py [N]."""
+    R = rows_a_tile(N, 3, reserve_vectors=2)
+    xv, yv = ol.load(px), ol.load(py)
+    t = ol.empty([R, N])
+    o = ol.empty([R, 2])
+    for m0 in range(0, M, R):
+        n = min(R, M - m0)
+        v = t[0:n, :]
+        ol.load(x[m0:m0 + n, :], out=v)
+        mx = ol.max(v, axis=1)
+        v.set(ol.exp2((v - mx[:, None]) * ol.LOG2E))
+        r = ol.recip(ol.sum(v, axis=1))
+        ov = o[0:n, :]
+        ov[:, 0:1].set((ol.sum(v * xv[None, :], axis=1) * r)[:, None])
+        ov[:, 1:2].set((ol.sum(v * yv[None, :], axis=1) * r)[:, None])
+        ol.store(y[m0:m0 + n, :], ov)

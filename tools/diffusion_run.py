@@ -4,8 +4,11 @@ spatial softmax, then the DDPM denoising loop over the conditional 1-D U-Net) wi
 nn.Conv2d (the ResNet), nn.Conv1d / nn.ConvTranspose1d (the U-Net: im2col / col2im on the host,
 the GEMM on the device) and nn.Linear (FiLM, timestep MLP, encoder head) on the device
 (opentpu/torchdev.py: int8 MX weights, QACT activations) on the ISA simulator or the card.
-GroupNorm, Mish, spatial softmax and the scheduler's update run in PyTorch on the host and are
-counted (Coverage). Actions are compared with the same policy in float32 from the same
+With --device-ops also GroupNorm, Mish, ReLU, the spatial soft-argmax, the DDPM update (its
+scalar coefficients and the noise draw on the host) and the sums and products of fp32 tensors
+run on the device (torchdev DeviceGroupNorm / DeviceRows / DeviceSpatialSoftmax / device_ddpm /
+device_ops); without it they run in PyTorch on the host. The max-pool, im2col / col2im and layout
+always do. Everything on the host is counted (Coverage). Actions are compared with the same policy in float32 from the same
 observation, initial noise and scheduler noise (torch seeded identically for both runs).
 
 Usage:
@@ -97,12 +100,16 @@ def main():
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--device-ops", action="store_true",
+                    help="GroupNorm, Mish, ReLU, spatial softmax and large adds / products on "
+                         "the device too")
     ap.add_argument("--strict-fpga-only", action="store_true",
                     help="reject this hybrid runner until all numerical operations are on the FPGA")
     a = ap.parse_args()
     if a.strict_fpga_only:
-        ap.error("strict FPGA-only execution is unavailable: this runner computes GroupNorm, "
-                 "Mish, spatial softmax, layout and DDPM scheduling on the host")
+        ap.error("strict FPGA-only execution is unavailable: this runner computes max-pool, "
+                 "im2col / col2im, layout and the scheduler's coefficients and noise on the host "
+                 "(and GroupNorm, Mish, spatial softmax, the DDPM update without --device-ops)")
     if not (a.tiny or a.policy or a.pusht_shaped):
         ap.error("--tiny, --pusht-shaped or --policy")
     import torch
@@ -133,11 +140,14 @@ def main():
                             TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
     runner = TD.Runner(a.backend, cfg=rcfg, dev=a.dev, check_isa=a.check_isa)
     cov = TD.Coverage()
-    n = TD.to_device(dev, runner, cov, wsplit=a.wsplit)
+    n = TD.to_device(dev, runner, cov, wsplit=a.wsplit, rows=a.device_ops)
+    if a.device_ops and not TD.device_ddpm(dev.diffusion.noise_scheduler, runner, cov):
+        print("the scheduler's update stays on the host (not DDPM epsilon / fixed_small)")
     print(f"{n} modules (nn.Linear / nn.Conv2d / nn.Conv1d / nn.ConvTranspose1d) on the device "
           f"({a.backend}, D={runner.cfg.D}, MCOLS={runner.cfg.MCOLS}"
           f"{', wsplit' if a.wsplit else ''})")
-    with torch.no_grad(), TD.host_counter(cov), contextlib.nullcontext():
+    ops = TD.device_ops(runner, cov) if a.device_ops else contextlib.nullcontext()
+    with torch.no_grad(), TD.host_counter(cov), ops:
         torch.manual_seed(a.seed + 1)
         t0 = time.time()
         got = dev.diffusion.generate_actions(b, noise=noise.clone())

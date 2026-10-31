@@ -182,13 +182,15 @@ class Runner:
         self.stats["cached"] += 1
         return Compiled(self.cfg, comp0.programs, stores, layout), dram.images
 
-    def rows(self, kernel, xs: dict, N: int, vecs: dict | None = None, **kw) -> np.ndarray:
+    def rows(self, kernel, xs: dict, N: int, vecs: dict | None = None, out_cols: int = 0,
+             **kw) -> np.ndarray:
         """A row-wise kernel (kernels/eltwise.py) over [M, N] arrays xs (by argument name, the
         same M), vecs [N] arrays, kw its other arguments: y [M, N], the rows in chunks whose
         programs fit IMEM."""
         from .runtime import Input, Output
         M = next(iter(xs.values())).shape[0]
-        out = np.empty((M, N), np.float32)
+        NO = out_cols or N                       # the result's columns (y [M, NO])
+        out = np.empty((M, NO), np.float32)
         steps = self.__dict__.setdefault("_row_steps", {})
         m0, step = 0, steps.get((kernel.__name__, N), M)
         while m0 < M:
@@ -196,7 +198,7 @@ class Runner:
             args = {k: Input(np.ascontiguousarray(v[m0:m0 + n])) for k, v in xs.items()}
             args.update({k: Input(v) for k, v in (vecs or {}).items()})
             try:
-                out[m0:m0 + n] = self.run(kernel, y=Output((n, N)), M=n, N=N, **args, **kw)
+                out[m0:m0 + n] = self.run(kernel, y=Output((n, NO)), M=n, N=N, **args, **kw)
             except ProgramTooLong as e:
                 if n <= 1:
                     raise
@@ -680,11 +682,113 @@ class DeviceRows:
         return torch.from_numpy(y).reshape(x.shape).to(dt)
 
 
+class DeviceGroupNorm:
+    """nn.GroupNorm on the device (kernels/eltwise.py group_norm): x [B, C, *spatial] as the
+    (group, sample) rows of (C / G) * spatial elements; the gain and bias per element."""
+
+    def __init__(self, m, runner: Runner, cov: Coverage, name: str):
+        self.runner, self.cov, self.name = runner, cov, name
+        self.G, self.C, self.eps = m.num_groups, m.num_channels, float(m.eps)
+        self.w = (m.weight.detach().float().cpu().numpy().copy() if m.weight is not None
+                  else np.ones(self.C, np.float32))
+        self.b = (m.bias.detach().float().cpu().numpy().copy() if m.bias is not None
+                  else np.zeros(self.C, np.float32))
+
+    def __call__(self, x):
+        import torch
+        from .kernels import eltwise as E
+        B, C, G, dt = x.shape[0], x.shape[1], self.G, x.dtype
+        L = int(np.prod(x.shape[2:])) if x.dim() > 2 else 1
+        a = x.detach().float().reshape(B, G, -1).transpose(0, 1).contiguous().numpy()
+        N = a.shape[2]
+        wg = np.ascontiguousarray(np.repeat(self.w, L).reshape(G, N))
+        bg = np.ascontiguousarray(np.repeat(self.b, L).reshape(G, N))
+        y = self.runner.rows(E.group_norm, {"x": a.reshape(G * B, N)}, N, {"w": wg, "b": bg},
+                             G=G, eps=self.eps)
+        self.cov.delems["group_norm"] += y.size
+        return torch.from_numpy(y.reshape(G, B, N)).transpose(0, 1).reshape(x.shape).to(dt)
+
+
+class DeviceSpatialSoftmax:
+    """LeRobot's SpatialSoftmax (keypoints = softmax over H*W of each channel, times the
+    coordinate grid) with the softmax and both expectations on the device
+    (kernels/eltwise.py softmax_xy); its 1x1 conv (nets) runs as the device conv it is."""
+
+    def __init__(self, m, runner: Runner, cov: Coverage, name: str):
+        self.m, self.runner, self.cov, self.name = m, runner, cov, name
+        g = m.pos_grid.detach().float().cpu().numpy()
+        self.px, self.py = np.ascontiguousarray(g[:, 0]), np.ascontiguousarray(g[:, 1])
+
+    def __call__(self, features):
+        import torch
+        from .kernels import eltwise as E
+        m = self.m
+        if m.nets is not None:
+            features = m.nets(features)
+        HW = m._in_h * m._in_w
+        a = features.detach().float().reshape(-1, HW).contiguous().numpy()
+        y = self.runner.rows(E.softmax_xy, {"x": a}, HW, {"px": self.px, "py": self.py},
+                             out_cols=2)
+        self.cov.delems["spatial_softmax"] += a.size
+        return torch.from_numpy(y).view(-1, m._out_c, 2).to(features.dtype)
+
+
+def device_ddpm(scheduler, runner: Runner, cov: Coverage) -> bool:
+    """A diffusers DDPMScheduler's step (epsilon prediction, fixed_small variance, x0 clipping)
+    on the device (kernels/ddpm.py): the scalar coefficients of the timestep on the host, the
+    update of the sample on the device; the variance noise drawn as diffusers draws it (torch's
+    generator, only for t > 0), so a seeded run matches. Other configurations keep the
+    scheduler's own step. Returns whether the step was replaced."""
+    import torch
+    c = scheduler.config
+    if type(scheduler).__name__ != "DDPMScheduler" or c.prediction_type != "epsilon" or \
+            c.variance_type != "fixed_small" or getattr(c, "thresholding", False):
+        return False
+    orig = scheduler.step
+
+    def step(model_output, timestep, sample, generator=None, return_dict=True, **kw):
+        from types import SimpleNamespace
+        from .kernels.ddpm import ddpm_epsilon_rows
+        if kw or model_output.dtype != torch.float32:
+            return orig(model_output, timestep, sample, generator=generator,
+                        return_dict=return_dict, **kw)
+        t = int(timestep)
+        prev_t = scheduler.previous_timestep(t)
+        a = scheduler.alphas_cumprod[t]
+        ap = scheduler.alphas_cumprod[prev_t] if prev_t >= 0 else scheduler.one
+        beta = 1 - a
+        cur = a / ap
+        noise = torch.zeros_like(model_output)
+        scale = 0.0
+        if t > 0:
+            noise = torch.randn(model_output.shape, generator=generator, dtype=model_output.dtype)
+            scale = float(scheduler._get_variance(t).sqrt())
+        N = sample.shape[-1]
+        y = runner.rows(ddpm_epsilon_rows,
+                        {"sample": sample.reshape(-1, N).contiguous().numpy(),
+                         "epsilon": model_output.reshape(-1, N).contiguous().numpy(),
+                         "noise": noise.reshape(-1, N).contiguous().numpy()}, N,
+                        inv_sqrt_alpha_bar=float(1 / a.sqrt()),
+                        sqrt_one_minus_alpha_bar=float(beta.sqrt()),
+                        mean_x0=float(ap.sqrt() * (1 - cur) / beta),
+                        mean_xt=float(cur.sqrt() * (1 - ap) / beta), noise_scale=scale,
+                        clip_range=float(c.clip_sample_range) if c.clip_sample else 3.0e38)
+        cov.delems["ddpm_step"] += y.size
+        out = torch.from_numpy(y).reshape(sample.shape)
+        return SimpleNamespace(prev_sample=out) if return_dict else (out,)
+    scheduler.step = step
+    return True
+
+
 def row_module(m, runner: Runner, cov: Coverage, name: str):
     """The DeviceRows for module m, or None when its kind is not taken (an activation the
     target cannot run exactly: GELU's erf form needs the table functions)."""
     import torch.nn as nn
     cls = type(m).__name__
+    if isinstance(m, nn.GroupNorm):
+        return DeviceGroupNorm(m, runner, cov, name)
+    if cls == "SpatialSoftmax" and hasattr(m, "pos_grid") and hasattr(m, "_out_c"):
+        return DeviceSpatialSoftmax(m, runner, cov, name)
     if isinstance(m, nn.LayerNorm) and len(m.normalized_shape) == 1 and \
             m.weight is not None and m.bias is not None:
         return DeviceRows(runner, cov, name, "layer_norm", w=m.weight, b=m.bias, eps=m.eps)
@@ -707,7 +811,7 @@ RMS_NORMS = {"LlamaRMSNorm", "Qwen2RMSNorm", "Qwen3RMSNorm", "MistralRMSNorm", "
              "SmolLM3RMSNorm"}
 ACT_MODULES = {"SiLU": "silu", "SiLUActivation": "silu", "Sigmoid": "sigmoid", "Tanh": "tanh",
                "ReLU": "relu", "GELUTanh": "gelu_tanh", "PytorchGELUTanh": "gelu_tanh",
-               "GELU": "gelu", "GELUActivation": "gelu"}
+               "GELU": "gelu", "GELUActivation": "gelu", "Mish": "mish"}
 
 
 def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
@@ -718,7 +822,9 @@ def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
     from torch.overrides import TorchFunctionMode
     from .kernels import eltwise as E
     ops = {"add": "add", "__add__": "add", "__radd__": "add", "mul": "mul", "__mul__": "mul",
-           "__rmul__": "mul", "sub": "sub", "__sub__": "sub"}
+           "__rmul__": "mul", "sub": "sub", "__sub__": "sub",
+           "add_": "add", "__iadd__": "add", "mul_": "mul", "__imul__": "mul"}
+    inplace = {"add_", "__iadd__", "mul_", "__imul__"}
 
     class Ops(TorchFunctionMode):
         def __torch_function__(self, func, types, args=(), kwargs=None):
@@ -726,11 +832,21 @@ def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
             op = ops.get(getattr(func, "__name__", ""))
             if op is not None and len(args) == 2 and not kwargs:
                 a, b = args
+                name = getattr(func, "__name__", "")
+                if op in ("add", "mul") and name not in inplace and \
+                        isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and \
+                        a.dim() == b.dim() >= 2 and a.shape[-1] == 1 and b.shape[-1] > 1:
+                    a, b = b, a                          # commutative: the full tensor first
                 if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and \
                         a.dtype == b.dtype == torch.float32 and a.dim() >= 1 and \
                         a.numel() >= min_elems and not (a.requires_grad or b.requires_grad):
                     N = a.shape[-1]
-                    if b.shape == a.shape:
+                    if b.dim() == a.dim() >= 2 and b.shape[-1] == 1 and N > 1 and \
+                            b.shape[:-1] == a.shape[:-1]:
+                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy(),
+                                                   "b": b.reshape(-1, 1).contiguous().numpy()},
+                                        N, op=op, bcol=True)
+                    elif b.shape == a.shape:
                         y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy(),
                                                    "b": b.reshape(-1, N).numpy()}, N, op=op)
                     elif b.numel() == N and b.shape[-1] == N and b.dim() <= a.dim():
@@ -739,7 +855,10 @@ def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
                     else:
                         return func(*args, **kwargs)
                     cov.delems[op] += y.size
-                    return torch.from_numpy(y).reshape(a.shape)
+                    y = torch.from_numpy(y).reshape(a.shape)
+                    if name in inplace:
+                        return a.copy_(y)
+                    return y
             return func(*args, **kwargs)
     return Ops()
 

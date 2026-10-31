@@ -1,5 +1,20 @@
 # Nextgen implementation progress
 
+## r7 update (2026-10-31): Bonsai GRQ and Diffusion device ops
+
+- **TMM GSC GRQ** (CAPS2 bit 9, `Config.TGRQ`): block-major packed ternary layout; the GSC
+  adapter issues one subcommand per block over its plane and the MXU consumes each chunk once as
+  four replay groups (one per output row). Bit-for-bit GSC; RTL SIMULATED (44 tests incl. MCOLS 8),
+  native Bonsai image/descriptor/compiler wired (`qwen35.gsc_grq`, `OTPU_GRQ=0` to disable). Not
+  synthesized, not on the card; expected several-fold Bonsai decode gain is an ESTIMATE
+  (BONSAI_GRQ.md). Build: `start_r7_133.cmd` (TGRQ follows `-TernaryGroupScales`).
+- **Diffusion Policy device ops** (`tools/diffusion_run.py --device-ops`): GroupNorm, Mish, ReLU,
+  spatial soft-argmax, the DDPM update and in-place / per-channel (FiLM) adds and products on the
+  device (`kernels/eltwise.py` group_norm / softmax_xy / mish, `kernels/ddpm.py`,
+  `torchdev.DeviceGroupNorm` / `DeviceSpatialSoftmax` / `device_ddpm`). ISA-verified against
+  float64 / diffusers; tiny policy actions unchanged (rel L2 0.0178). Host: max-pool, col2im,
+  layout, scheduler scalars and noise draw. Not run on the card yet.
+
 ## Local update (2026-10-26, evening): handoff to Codex / Copilot
 
 HANDOFF_2026-10-26.md is the state: r5-m8 PHYSICAL results (BitNet 17.5 / 20.9 tok/s, Qwen3.5-2B

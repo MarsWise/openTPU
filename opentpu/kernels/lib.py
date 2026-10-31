@@ -70,6 +70,14 @@ def softplus(x):
     return ol.maximum(x, 0.0) + ol.log2(ol.exp2(ol.abs(x) * -ol.LOG2E) + 1.0) * ol.LN2
 
 
+def mish(x):
+    """x tanh(softplus(x)) (nn.Mish): one TFN VOP on a target with the table functions, else
+    softplus then tanh composed (tanh(sp) = 1 - 2 / (e^(2 sp) + 1))."""
+    if ol.has_tfn():
+        return ol.tfn("mish", x)
+    return x * tanh(softplus(x))
+
+
 def rope(x, cos, sin, out=None):
     """Rotate-half RoPE on the rows of x [M, d]; cos, sin: [d/2] tiles for one position.
     Writes into `out` (e.g. a view of a zero-padded tile) when given."""
