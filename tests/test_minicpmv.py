@@ -1154,3 +1154,61 @@ def test_serve_takes_image_url_parts():
         w.got.clear()
         text.chat({"messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": a}}]}]})
+
+
+@pytest.mark.parametrize("vu8", [False, True])
+def test_the_processor_on_the_card(tiny_tower, vu8):
+    """VisionImage.encode_pixels: the image's pixels in, its crops' rows out -- the resizes,
+    the patch rows and the position rows on the device (kernels/resize.py, copies of the
+    resident position table) -- give the host processor's rows through the same tower: every
+    row's cosine >= 0.999 (torchvision rounds its resizes to uint8, the device does not); the
+    position rows are the host's table rows bit for bit."""
+    import dataclasses
+    torch = pytest.importorskip("torch")
+    from opentpu.isasim import board_config
+    from opentpu.kernels.lib import gelu_tanh
+    from opentpu.llm import minicpmv as MV
+    from opentpu.llm.qwen3 import IsaBackend, _Bump
+    vs0, W, _, _ = tiny_tower
+    vs = dataclasses.replace(vs0, scale=56, max_slices=4)
+    cfg = board_config(DRAM_BYTES=1 << 26, VU8=vu8)
+    vi = MV.VisionImage(vs, cfg, _Bump(), nmax=256, out_rows=64, device_prep=1 << 21)
+    image = np.zeros(cfg.DRAM_BYTES, np.uint8)
+
+    def put(addr, a):
+        v = np.ascontiguousarray(a).view(np.uint8).reshape(-1)
+        image[addr:addr + v.size] = v
+    vi.build(W, put)
+    be = IsaBackend(cfg, [image])
+    H, Wd = 50, 90
+    y, x = np.mgrid[0:H, 0:Wd]
+    img = np.stack([127 + 120 * np.sin(x / 7 + c) * np.cos(y / 9 + 2 * c) for c in range(3)], -1)
+    img = np.clip(img + np.random.default_rng(1).normal(0, 4, img.shape), 0, 255).astype(np.uint8)
+    cache = {}
+    got, sizes, grid = vi.encode_pixels(be, img, proj_gelu=gelu_tanh, cache=cache)
+    crops, grid_h = MV.crops(torch.from_numpy(img).permute(2, 0, 1).contiguous(), vs)
+    assert grid == grid_h and len(got) == len(crops) == 3
+    host_be = IsaBackend(cfg, [image])
+    for g, c, size in zip(got, crops, sizes):
+        ref = vi.encode(host_be, MV.patches(c.numpy()), size, proj_gelu=gelu_tanh)
+        cos = (g * ref).sum(-1) / np.linalg.norm(g, axis=-1) / np.linalg.norm(ref, axis=-1)
+        assert cos.min() >= 0.999, cos.min()
+    h, w = sizes[-1]
+    _, e = vi.host_rows(MV.patches(crops[-1].numpy()), (h, w))
+    E = be.read(0, vi.work["E"], 4 * h * w * vs.hidden).view(np.float32).reshape(h * w, -1)
+    assert np.array_equal(E, e)
+
+
+def test_prepare_for_the_device_has_the_hosts_text():
+    """prepare(device=True) (the pixels, no host resizes): the host prepare's sizes, grid and
+    placeholder text."""
+    PIL = pytest.importorskip("PIL.Image")
+    pytest.importorskip("torch")
+    from opentpu.llm import minicpmv as MV
+    vs = MV.VisionSpec()
+    rng = np.random.default_rng(3)
+    for H, W in [(300, 500), (1000, 700), (90, 2000), (448, 448)]:
+        im = PIL.fromarray(rng.integers(0, 256, (H, W, 3), dtype=np.uint8))
+        a, b = MV.prepare(im, vs), MV.prepare(im, vs, device=True)
+        assert (a.sizes, a.grid, a.text) == (b.sizes, b.grid, b.text)
+        assert b.pixels.shape == (H, W, 3) and not b.patches

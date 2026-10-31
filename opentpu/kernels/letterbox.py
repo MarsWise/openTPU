@@ -103,11 +103,12 @@ class Plan:
 
 @ol.jit
 def letterbox_rows(src, w, bias, dst, i0: int, i1: int, taps: tuple, pad_rows: bool,
-                   bands: tuple = ()):
+                   bands: tuple = (), vclip: tuple = (), clip: tuple = ()):
     """dst rows i0 .. i1 - 1 of the letterbox. src [H, 3W] fp32, w the horizontal matrix
     (QTensor [3S, Kp], Kp 3W padded to whole blocks), bias [3S], dst [S, 3S] (strided). taps:
     per output row of this range (first input row, weights); pad_rows: the rows are past NH
-    (all 114)."""
+    (all 114). vclip / clip: (lo, hi) the vertical pass's / the output's values are clamped
+    to (a bicubic filter's overshoot: the 8-bit resizes clamp after each pass)."""
     K = src.shape[1]
     Kp = w.shape[1]
     N = dst.shape[1]
@@ -127,6 +128,8 @@ def letterbox_rows(src, w, bias, dst, i0: int, i1: int, taps: tuple, pad_rows: b
         acc = win[f - lo:f - lo + 1, :] * float(ws[0])
         for t, c in enumerate(ws[1:], 1):
             acc = acc + win[f - lo + t:f - lo + t + 1, :] * float(c)
+        if vclip:
+            acc = ol.minimum(ol.maximum(acc, float(vclip[0])), float(vclip[1]))
         v[i:i + 1, 0:K].set(acc)
     del win
     b = ol.load(bias)
@@ -138,6 +141,8 @@ def letterbox_rows(src, w, bias, dst, i0: int, i1: int, taps: tuple, pad_rows: b
             ol.dot(q, w[c0:c1, k0:k1], acc=y[:, c0:c1])
             del q
     del v
+    if clip:
+        y.set(ol.minimum(ol.maximum(y, float(clip[0])), float(clip[1])))
     ol.store(dst[i0:i1, :], y)
 
 

@@ -223,6 +223,8 @@ class ImageInput:
     grid: tuple | None
     text: str
     key: str = ""
+    pixels: object = None          # prepare(device=True): the decoded RGB [H, W, 3] uint8, the
+    max_slices: int | None = None  # device's processor's input (VisionImage.encode_pixels)
 
     @property
     def tokens(self) -> int:
@@ -230,13 +232,32 @@ class ImageInput:
         return sum(h * w for h, w in self.sizes) // 16
 
 
+def crop_sizes(H: int, W: int, vs: VisionSpec, max_slices: int | None = None) -> tuple:
+    """crops' sizes alone: ([each crop's (h, w) in patches], the grid)."""
+    max_slices = vs.max_slices if max_slices is None else max_slices
+    grid = slice_grid(H, W, max_slices, vs.scale) if max_slices >= 1 else None
+    th, tw = best_resize(H, W, vs.scale, vs.patch, upscale=grid is None)
+    sizes = [(th // vs.patch, tw // vs.patch)]
+    if grid is not None:
+        rh, rw = refine_size(H, W, grid, vs.scale, vs.patch)
+        sizes += [(rh // grid[0] // vs.patch, rw // grid[1] // vs.patch)] * (grid[0] * grid[1])
+    return sizes, grid
+
+
 def prepare(src, vs: VisionSpec, max_slices: int | None = None, image_id: int | None = 0,
-            pad: str = "<|image_pad|>") -> ImageInput:
+            pad: str = "<|image_pad|>", device: bool = False) -> ImageInput:
     """An image (path, data URL, base64 or PIL) -> ImageInput: replace_image_token's text with
-    use_image_id's <image_id>N</image_id> prefix (image_id None: none)."""
-    cs, grid = crops(decode(src), vs, max_slices)
-    ps = [patches(c, vs.patch) for c in cs]
-    sizes = [(c.shape[-2] // vs.patch, c.shape[-1] // vs.patch) for c in cs]
+    use_image_id's <image_id>N</image_id> prefix (image_id None: none). device: the host only
+    decodes the file; the resizes, slices and patch rows are the device's (pixels; patches
+    empty; the key hashes the pixels)."""
+    if device:
+        px = np.ascontiguousarray(np.asarray(decode(src)).transpose(1, 2, 0), np.uint8)
+        sizes, grid = crop_sizes(px.shape[0], px.shape[1], vs, max_slices)
+        ps = []
+    else:
+        cs, grid = crops(decode(src), vs, max_slices)
+        ps = [patches(c, vs.patch) for c in cs]
+        sizes = [(c.shape[-2] // vs.patch, c.shape[-1] // vs.patch) for c in cs]
     n = [h * w // vs.merged for h, w in sizes]
     text = "<image>" + pad * n[0] + "</image>"
     if grid is not None:
@@ -247,6 +268,9 @@ def prepare(src, vs: VisionSpec, max_slices: int | None = None, image_id: int | 
     h = hashlib.sha256(repr(sizes).encode())
     for p in ps:
         h.update(np.ascontiguousarray(p).tobytes())
+    if device:
+        h.update(b"pixels" + px.tobytes())
+        return ImageInput(ps, sizes, grid, text, h.hexdigest(), px, max_slices)
     return ImageInput(ps, sizes, grid, text, h.hexdigest())
 
 
@@ -589,7 +613,7 @@ class VisionImage:
 
     def __init__(self, vs: VisionSpec, cfg, b, nmax: int = 2048, out_rows: int = 2048,
                  fmt: str = "int8", max_piece: int | None = None, resident: bool = True,
-                 table: bool = True):
+                 table: bool = True, device_prep: int = 0):
         from ..kernels import pieces as PC
         D = cfg.D
         self.vs, self.cfg = vs, cfg
@@ -678,6 +702,14 @@ class VisionImage:
                          vis=b.alloc(4 * out_rows * vs.out))
         self.kvh = {h: {"k": b.alloc(n * self.dp), "ks": b.alloc(4 * n),
                         "vt": b.alloc(self.dp * n), "vs": b.alloc(4 * n)} for h in range(H)}
+        # device_prep: the processor on the device (encode_pixels): the position table resident
+        # and `device_prep` bytes of scratch (the image's pixels, its resizes, a crop's raster)
+        self.device_prep = device_prep
+        if device_prep:
+            b.next = _up(b.next, 4096)
+            self.pos = b.alloc(4 * vs.side * vs.side * C)
+            b.next = _up(b.next, 4096)
+            self.prep = b.alloc(device_prep)
         self.end = b.next
 
     KINDS = ("attn", "mlp", "wm", "proj", "embed")
@@ -916,6 +948,8 @@ class VisionImage:
             put(self.table, self.resident_addresses())
         self.tables["pos"] = np.asarray(W[TOWER + "embeddings.position_embedding.weight"],
                                         np.float32)
+        if self.device_prep:
+            put(self.pos, self.tables["pos"])
 
     # ---- the runs
     def programs(self, N: int, block: int = 256, R: int | None = None,
@@ -1006,9 +1040,10 @@ class VisionImage:
             if cache is not None:
                 cache[key] = progs
         P_, runs = progs
-        p, e = self.host_rows(P, size)
-        backend.write(s, self.work["P"], p)
-        backend.write(s, self.work["E"], e)
+        if P is not None:               # (None: the rows are on the device, encode_pixels)
+            p, e = self.host_rows(P, size)
+            backend.write(s, self.work["P"], p)
+            backend.write(s, self.work["E"], e)
         start = getattr(backend, "start", None)
         for name, vals in runs:
             prog, ra = P_[name]
@@ -1022,6 +1057,91 @@ class VisionImage:
         n = h * w // 16
         return backend.read(s, self.work["vis"] + 4 * vis_row * self.vs.out,
                             4 * n * self.vs.out).view(np.float32).reshape(n, self.vs.out)
+
+    @staticmethod
+    def _run_plain(backend, progs) -> None:
+        """Programs without run arguments, in order (ISA instruction lists)."""
+        from ..compiler import Words, arg_words
+        from .. import isa as I
+        words = getattr(backend, "runs_words", False)
+        args = arg_words([], {})
+        start = getattr(backend, "start", None)
+        for p in progs:
+            prog = Words.of(I.assemble(p)) if words else [p]
+            if start is None:
+                backend.run(prog, args=args)
+            else:
+                start(prog, args=args)
+                backend.wait()
+
+    def prep_programs(self, H: int, W: int, max_slices=None, cache: dict | None = None):
+        """(kernels/resize.MiniCPMVPrep of an H x W image in the scratch, its programs, each
+        crop's programs: its patch rows into work P and its position rows into work E, both
+        copies on the device) -- cached by size."""
+        from ..kernels.resize import MiniCPMVPrep
+        from ..resident import copies_k
+        from ..runtime import compile_kernel
+        from ..compiler import Tensor
+        key = ("prep", H, W, max_slices)
+        got = None if cache is None else cache.get(key)
+        if got is not None:
+            return got
+        if not self.device_prep:
+            raise ValueError("VisionImage(device_prep=bytes) holds the processor's scratch")
+        pr = MiniCPMVPrep(self.cfg, H, W, self.vs, self.prep, self.prep + 4 * H * W * 3,
+                          max_slices)
+        if pr.top > self.prep + self.device_prep:
+            raise ValueError(f"a {H} x {W} image's preprocessing needs "
+                             f"{pr.top - self.prep} bytes of scratch (device_prep "
+                             f"{self.device_prep})")
+        C, side = self.C, self.vs.side
+        pos = Tensor(self.pos, (side * side, C), (C, 1))
+        E = Tensor(self.work["E"], (self.nmax, C), (C, 1))
+        crops = []
+        for k, (h, w) in enumerate(pr.sizes):
+            if h * w > self.nmax:
+                raise ValueError(f"a crop of {h * w} patches: the work area holds {self.nmax}")
+            ids = position_ids(h, w, side)[card_order(h, w)]
+            mv = tuple((int(i), j, 0) for j, i in enumerate(ids))
+            cp = []
+            for i in range(0, len(mv), 1500):
+                comp, _ = compile_kernel(copies_k, self.cfg, src=pos, dst=E,
+                                         moves=mv[i:i + 1500], width=C)
+                cp.append(comp.programs[0])
+            crops.append(pr.crop_programs(k, self.work["P"]) + cp)
+        got = (pr, pr.programs(), crops)
+        if cache is not None:
+            cache[key] = got
+        return got
+
+    def encode_pixels(self, backend, img, vis_row: int = 0, max_slices=None, proj_gelu=None,
+                      cache: dict | None = None, s: int = 0) -> tuple:
+        """An image's every crop through the processor, tower and projector on the device: the
+        host writes its RGB pixels (uint8 [H, W, 3], as fp32) and the filters (constants per
+        size) only. Returns ([each crop's rows], the crops' (h, w), the grid)."""
+        img = np.asarray(img)
+        H, W = img.shape[:2]
+        pr, progs, crops = self.prep_programs(H, W, max_slices, cache)
+        u8 = _up(pr.top, 4096)
+        if getattr(self.cfg, "VU8", False) and u8 + _up(3 * H * W, 4) <= \
+                self.prep + self.device_prep:
+            from ..kernels import u8_input
+            raw = np.zeros(_up(3 * H * W, 4), np.uint8)       # the bytes, converted on the card
+            raw[:3 * H * W] = np.asarray(img, np.uint8).reshape(-1)
+            backend.write(s, u8, raw)
+            self._run_plain(backend, [u8_input.program(self.cfg, u8, self.prep, 3 * H * W)])
+        else:
+            backend.write(s, self.prep, np.ascontiguousarray(img, np.float32).reshape(H, 3 * W))
+        for at, a in pr.consts:
+            backend.write(s, at, a)
+        self._run_plain(backend, progs)
+        out, r = [], vis_row
+        for (h, w), cp in zip(pr.sizes, crops):
+            self._run_plain(backend, cp)
+            out.append(self.encode(backend, None, (h, w), vis_row=r, proj_gelu=proj_gelu,
+                                   cache=cache, s=s))
+            r += h * w // 16
+        return out, pr.sizes, pr.grid
 
 
 # =============================================================================== the model's image
@@ -1047,6 +1167,7 @@ class Spec(QW.Spec):
     vision_patches: int = 2048
     vision_rows: int = 2048
     vision_staged: bool = True
+    vision_device_prep: int = 0     # bytes of the device processor's scratch (0: the host's)
 
     @staticmethod
     def from_hf(model_dir) -> "Spec":
@@ -1106,7 +1227,8 @@ class Image(QW.Image):
                      MO.ExpertFormat(sp.hidden, sp.moe.ffn, self.cfg.D, self.wformat).nbytes)
         self.vision = None if sp.vision is None else \
             VisionImage(sp.vision, self.cfg, b, nmax=sp.vision_patches, out_rows=sp.vision_rows,
-                        fmt=sp.vision_fmt, resident=not staged, max_piece=mp)
+                        fmt=sp.vision_fmt, resident=not staged, max_piece=mp,
+                        device_prep=sp.vision_device_prep)
         if self.vision is not None:     # (an attribute of the image's own: the image cache keeps
             self.vis_tables = self.vision.tables    # its entries, opentpu/imgcache.py)
 
@@ -1240,6 +1362,14 @@ class Vision:
             self.stage()
         try:
             for im in images:
+                if getattr(im, "pixels", None) is not None:     # prepare(device=True)
+                    if not v.device_prep:
+                        raise ValueError("an image prepared for the device's processor: the "
+                                         "model's Spec.vision_device_prep is 0")
+                    v.encode_pixels(self.eng.backend, im.pixels, vis_row=r,
+                                    max_slices=im.max_slices, cache=self.cache)
+                    r += im.tokens
+                    continue
                 for P, size in zip(im.patches, im.sizes):
                     v.encode(self.eng.backend, P, size, vis_row=r, cache=self.cache)
                     r += size[0] * size[1] // 16
