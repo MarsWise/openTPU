@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--no-resident", action="store_true",
                     help="send each layer's weights with every call (the old way)")
     ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--card-config", action="store_true",
+                    help="--backend isa with the r5-m8 card's configuration (TFN etc.)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
     ap.add_argument("--host-attention", action="store_true",
@@ -124,7 +126,12 @@ def main():
         ref = pol.model.sample_actions(*x[:5], noise=x[5].clone())
         t_ref = time.time() - t0
     dev = copy.deepcopy(pol)
-    runner = TD.Runner(a.backend, dev=a.dev, check_isa=a.check_isa,
+    rcfg = None
+    if a.card_config and a.backend == "isa":     # the card's configuration (TFN: sin / cos)
+        from opentpu.isasim import board_config
+        rcfg = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
+                            TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    runner = TD.Runner(a.backend, cfg=rcfg, dev=a.dev, check_isa=a.check_isa,
                        resident=not a.no_resident)
     cov = TD.Coverage()
     n = TD.to_device(dev, runner, cov, wsplit=a.wsplit, rows=a.device_rows)
@@ -136,7 +143,7 @@ def main():
     print(f"{n} modules (nn.Linear / nn.Conv2d{' / activations / norms' if a.device_rows else ''}) on the device ({a.backend}, D={runner.cfg.D}, "
           f"MCOLS={runner.cfg.MCOLS}{', wsplit' if a.wsplit else ''})")
     import contextlib
-    ops = TD.device_ops(runner, cov) if a.device_rows else contextlib.nullcontext()
+    ops = TD.device_ops(runner, cov, min_elems=1) if a.device_rows else contextlib.nullcontext()
     with torch.no_grad(), TD.host_counter(cov), ops:
         t0 = time.time()
         got = dev.model.sample_actions(*x[:5], noise=x[5].clone())

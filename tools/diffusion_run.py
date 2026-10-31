@@ -141,12 +141,13 @@ def main():
     runner = TD.Runner(a.backend, cfg=rcfg, dev=a.dev, check_isa=a.check_isa)
     cov = TD.Coverage()
     n = TD.to_device(dev, runner, cov, wsplit=a.wsplit, rows=a.device_ops)
-    if a.device_ops and not TD.device_ddpm(dev.diffusion.noise_scheduler, runner, cov):
+    if a.device_ops and not TD.device_ddpm(dev.diffusion.noise_scheduler, runner, cov,
+                                                steps=dev.diffusion.num_inference_steps):
         print("the scheduler's update stays on the host (not DDPM epsilon / fixed_small)")
     print(f"{n} modules (nn.Linear / nn.Conv2d / nn.Conv1d / nn.ConvTranspose1d) on the device "
           f"({a.backend}, D={runner.cfg.D}, MCOLS={runner.cfg.MCOLS}"
           f"{', wsplit' if a.wsplit else ''})")
-    ops = TD.device_ops(runner, cov) if a.device_ops else contextlib.nullcontext()
+    ops = TD.device_ops(runner, cov, min_elems=1) if a.device_ops else contextlib.nullcontext()
     with torch.no_grad(), TD.host_counter(cov), ops:
         torch.manual_seed(a.seed + 1)
         t0 = time.time()

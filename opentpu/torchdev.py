@@ -452,11 +452,14 @@ class DeviceConv2d:
 class _Gemm:
     """y = x W^T (x [M, K], W [N, K] float32) as kernels/linear.py on the device, no bias."""
 
-    def __init__(self, w, runner: Runner, cov: Coverage, name: str, wsplit: bool, op: str):
+    def __init__(self, w, runner: Runner, cov: Coverage, name: str, wsplit: bool, op: str,
+                 b=None):
         import torch
-        lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=False)
+        lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=b is not None)
         with torch.no_grad():
             lin.weight.copy_(torch.from_numpy(np.ascontiguousarray(w, np.float32)))
+            if b is not None:                       # the bias on the device (kernels/linear.py)
+                lin.bias.copy_(torch.from_numpy(np.ascontiguousarray(b, np.float32)))
         self.lin = DeviceLinear(lin, runner, cov, name, wsplit, op=op)
 
     def __call__(self, a):
@@ -467,7 +470,7 @@ class _Gemm:
 class DeviceConv1d:
     """Replaces an nn.Conv1d's forward (groups 1, no dilation, zeros padding): the host lays the
     input out as rows of Cin x k (im2col, a layout move), the device multiplies them by the
-    weight [Cout, Cin k] (kernels/linear.py), the host adds the bias."""
+    weight [Cout, Cin k] and adds the bias (kernels/linear.py)."""
 
     def __init__(self, conv, runner: Runner, cov: Coverage, name: str = "",
                  wsplit: bool = False):
@@ -480,7 +483,7 @@ class DeviceConv1d:
         self.s, self.p = conv.stride[0], pad[0]
         self.b = (conv.bias.detach().float().cpu().numpy() if conv.bias is not None
                   else np.zeros(self.Cout, np.float32))
-        self.g = _Gemm(w.reshape(self.Cout, -1), runner, cov, name, wsplit, "conv1d")
+        self.g = _Gemm(w.reshape(self.Cout, -1), runner, cov, name, wsplit, "conv1d", self.b)
 
     def __call__(self, x):
         import torch
@@ -490,41 +493,74 @@ class DeviceConv1d:
         Lo = (L - self.k) // self.s + 1
         idx = np.arange(Lo)[:, None] * self.s + np.arange(self.k)[None, :]     # [Lo, k]
         cols = xb[:, :, idx].transpose(0, 2, 1, 3).reshape(B * Lo, self.Cin * self.k)
-        y = self.g(cols).reshape(B, Lo, self.Cout) + self.b
+        y = self.g(cols).reshape(B, Lo, self.Cout)
         return torch.from_numpy(np.ascontiguousarray(y.transpose(0, 2, 1))).to(dt)
 
 
 class DeviceConvTranspose1d:
-    """Replaces an nn.ConvTranspose1d's forward (groups 1, no dilation, no output padding): the
-    device computes every input position's contribution x W ([B L, Cin] x [Cin, Cout k]), the
-    host adds the overlapping ones into the output (col2im) and the bias."""
+    """Replaces an nn.ConvTranspose1d's forward (groups 1, no dilation) as the equivalent
+    convolution: the input with stride - 1 zeros between its positions and k - 1 - p zeros at
+    each end (output_padding more at the right), the kernel flipped and transposed. The host only
+    lays the input out (a layout move, im2col); the device multiplies and adds the bias
+    (kernels/linear.py): no host col2im sums."""
 
     def __init__(self, conv, runner: Runner, cov: Coverage, name: str = "",
                  wsplit: bool = False):
-        if conv.groups != 1 or conv.dilation != (1,) or conv.output_padding != (0,) \
-                or conv.padding_mode != "zeros":
+        if conv.groups != 1 or conv.dilation != (1,) or conv.padding_mode != "zeros":
             raise NotImplementedError(f"{name}: conv {conv} not on the device kernel")
         w = conv.weight.detach().float().cpu().numpy()          # [Cin, Cout, k]
         self.Cin, self.Cout, self.k = w.shape
-        self.s, self.p = conv.stride[0], conv.padding[0]
-        self.b = (conv.bias.detach().float().cpu().numpy() if conv.bias is not None
-                  else np.zeros(self.Cout, np.float32))
-        self.g = _Gemm(w.reshape(self.Cin, -1).T, runner, cov, name, wsplit, "conv_transpose1d")
-        self.cov = cov
+        self.s, self.p, self.op = conv.stride[0], conv.padding[0], conv.output_padding[0]
+        if self.p > self.k - 1:
+            raise NotImplementedError(f"{name}: padding {self.p} > k - 1")
+        b = (conv.bias.detach().float().cpu().numpy() if conv.bias is not None
+             else np.zeros(self.Cout, np.float32))
+        wf = np.ascontiguousarray(w[:, :, ::-1].transpose(1, 0, 2))   # [Cout, Cin, k] flipped
+        self.g = _Gemm(wf.reshape(self.Cout, -1), runner, cov, name, wsplit,
+                       "conv_transpose1d", b)
 
     def __call__(self, x):
         import torch
         dt = x.dtype
         xb = x.detach().float().cpu().numpy()
         B, _, L = xb.shape
-        c = self.g(xb.transpose(0, 2, 1).reshape(B * L, self.Cin)).reshape(B, L, self.Cout, self.k)
-        full = np.zeros((B, self.Cout, (L - 1) * self.s + self.k), np.float32)
-        for j in range(self.k):
-            full[:, :, j:j + (L - 1) * self.s + 1:self.s] += c[:, :, :, j].transpose(0, 2, 1)
-        Lo = (L - 1) * self.s - 2 * self.p + self.k
-        y = full[:, :, self.p:self.p + Lo] + self.b[None, :, None]
-        self.cov.elems["col2im"] += y.size
-        return torch.from_numpy(np.ascontiguousarray(y)).to(dt)
+        e = self.k - 1 - self.p
+        up = np.zeros((B, self.Cin, (L - 1) * self.s + 1 + 2 * e + self.op), np.float32)
+        up[:, :, e:e + (L - 1) * self.s + 1:self.s] = xb
+        Lo = up.shape[2] - self.k + 1
+        idx = np.arange(Lo)[:, None] + np.arange(self.k)[None, :]
+        cols = up[:, :, idx].transpose(0, 2, 1, 3).reshape(B * Lo, self.Cin * self.k)
+        y = self.g(cols).reshape(B, Lo, self.Cout)
+        return torch.from_numpy(np.ascontiguousarray(y.transpose(0, 2, 1))).to(dt)
+
+
+class DeviceMaxPool2d:
+    """nn.MaxPool2d (square kernel and stride, no dilation, floor mode) with the maxima on the
+    device (kernels/eltwise.py row_max): the host gathers each output's window (a layout move,
+    -inf padding), the device reduces it."""
+
+    def __init__(self, m, runner: Runner, cov: Coverage, name: str):
+        k, st, p = (m.kernel_size, m.stride or m.kernel_size, m.padding)
+        k, st, p = (v if isinstance(v, int) else v[0] for v in (k, st, p))
+        if m.dilation not in (1, (1, 1)) or m.ceil_mode or m.return_indices:
+            raise NotImplementedError(f"{name}: {m} not on the device kernel")
+        self.k, self.s, self.p, self.runner, self.cov = k, st, p, runner, cov
+
+    def __call__(self, x):
+        import torch
+        from .kernels import eltwise as E
+        k, s, p = self.k, self.s, self.p
+        xb = np.pad(x.detach().float().cpu().numpy(), ((0, 0), (0, 0), (p, p), (p, p)),
+                    constant_values=-np.inf)
+        B, C, H, W = xb.shape
+        OH, OW = (H - k) // s + 1, (W - k) // s + 1
+        iy = (np.arange(OH)[:, None] * s + np.arange(k)[None, :])[:, None, :, None]
+        ix = (np.arange(OW)[:, None] * s + np.arange(k)[None, :])[None, :, None, :]
+        win = xb[:, :, iy, ix].reshape(B * C * OH * OW, k * k)      # [.., OH, OW, k, k]
+        win = np.where(np.isneginf(win), np.float32(-3.0e38), win)  # (finite padding)
+        y = self.runner.rows(E.row_max, {"x": np.ascontiguousarray(win)}, k * k, out_cols=1)
+        self.cov.delems["max_pool2d"] += y.size
+        return torch.from_numpy(y.reshape(B, C, OH, OW)).to(x.dtype)
 
 
 def key_prefixes(mask):
@@ -733,7 +769,7 @@ class DeviceSpatialSoftmax:
         return torch.from_numpy(y).view(-1, m._out_c, 2).to(features.dtype)
 
 
-def device_ddpm(scheduler, runner: Runner, cov: Coverage) -> bool:
+def device_ddpm(scheduler, runner: Runner, cov: Coverage, steps: int | None = None) -> bool:
     """A diffusers DDPMScheduler's step (epsilon prediction, fixed_small variance, x0 clipping)
     on the device (kernels/ddpm.py): the scalar coefficients of the timestep on the host, the
     update of the sample on the device; the variance noise drawn as diffusers draws it (torch's
@@ -745,6 +781,30 @@ def device_ddpm(scheduler, runner: Runner, cov: Coverage) -> bool:
             c.variance_type != "fixed_small" or getattr(c, "thresholding", False):
         return False
     orig = scheduler.step
+    coeffs = {}
+
+    def coeff(t: int) -> dict:
+        """The timestep's scalar coefficients: schedule constants (as the weights are),
+        computed once per timestep, outside the run's counted work."""
+        if t not in coeffs:
+            with torch.no_grad():
+                prev_t = scheduler.previous_timestep(t)
+                a = scheduler.alphas_cumprod[t]
+                ap = scheduler.alphas_cumprod[prev_t] if prev_t >= 0 else scheduler.one
+                beta = 1 - a
+                cur = a / ap
+                coeffs[t] = dict(
+                    inv_sqrt_alpha_bar=float(1 / a.sqrt()),
+                    sqrt_one_minus_alpha_bar=float(beta.sqrt()),
+                    mean_x0=float(ap.sqrt() * (1 - cur) / beta),
+                    mean_xt=float(cur.sqrt() * (1 - ap) / beta),
+                    noise_scale=float(scheduler._get_variance(t).sqrt()) if t > 0 else 0.0,
+                    clip_range=float(c.clip_sample_range) if c.clip_sample else 3.0e38)
+        return coeffs[t]
+    if steps:                                      # the run's schedule, precomputed at setup
+        scheduler.set_timesteps(steps)
+        for t in scheduler.timesteps.tolist():
+            coeff(int(t))
 
     def step(model_output, timestep, sample, generator=None, return_dict=True, **kw):
         from types import SimpleNamespace
@@ -753,26 +813,15 @@ def device_ddpm(scheduler, runner: Runner, cov: Coverage) -> bool:
             return orig(model_output, timestep, sample, generator=generator,
                         return_dict=return_dict, **kw)
         t = int(timestep)
-        prev_t = scheduler.previous_timestep(t)
-        a = scheduler.alphas_cumprod[t]
-        ap = scheduler.alphas_cumprod[prev_t] if prev_t >= 0 else scheduler.one
-        beta = 1 - a
-        cur = a / ap
         noise = torch.zeros_like(model_output)
-        scale = 0.0
-        if t > 0:
+        if t > 0:       # the variance noise: drawn as diffusers draws it (an input, as the seed)
             noise = torch.randn(model_output.shape, generator=generator, dtype=model_output.dtype)
-            scale = float(scheduler._get_variance(t).sqrt())
         N = sample.shape[-1]
         y = runner.rows(ddpm_epsilon_rows,
                         {"sample": sample.reshape(-1, N).contiguous().numpy(),
                          "epsilon": model_output.reshape(-1, N).contiguous().numpy(),
                          "noise": noise.reshape(-1, N).contiguous().numpy()}, N,
-                        inv_sqrt_alpha_bar=float(1 / a.sqrt()),
-                        sqrt_one_minus_alpha_bar=float(beta.sqrt()),
-                        mean_x0=float(ap.sqrt() * (1 - cur) / beta),
-                        mean_xt=float(cur.sqrt() * (1 - ap) / beta), noise_scale=scale,
-                        clip_range=float(c.clip_sample_range) if c.clip_sample else 3.0e38)
+                        **coeff(t))
         cov.delems["ddpm_step"] += y.size
         out = torch.from_numpy(y).reshape(sample.shape)
         return SimpleNamespace(prev_sample=out) if return_dict else (out,)
@@ -780,13 +829,40 @@ def device_ddpm(scheduler, runner: Runner, cov: Coverage) -> bool:
     return True
 
 
+class DeviceSinusoidalEmb:
+    """LeRobot's DiffusionSinusoidalPosEmb (sin and cos of the timestep times the frequencies
+    exp(-i ln(10000) / (half - 1))) with sin / cos on the device (eltwise.sincos_embed, TFN);
+    the frequencies are the module's constants, computed once."""
+
+    def __init__(self, m, runner: Runner, cov: Coverage, name: str):
+        import math
+        half = m.dim // 2
+        self.f = np.exp(np.arange(half) * -(math.log(10000) / (half - 1))).astype(np.float32)
+        self.dim, self.runner, self.cov = 2 * half, runner, cov
+
+    def __call__(self, x):
+        import torch
+        from .kernels import eltwise as E
+        a = x.detach().float().reshape(-1, 1).contiguous().numpy()
+        y = self.runner.rows(E.sincos_embed, {"x": a}, self.dim, {"f": self.f})
+        self.cov.delems["sincos"] += y.size
+        return torch.from_numpy(y).reshape(*x.shape, self.dim)
+
+
 def row_module(m, runner: Runner, cov: Coverage, name: str):
     """The DeviceRows for module m, or None when its kind is not taken (an activation the
     target cannot run exactly: GELU's erf form needs the table functions)."""
     import torch.nn as nn
     cls = type(m).__name__
+    if isinstance(m, nn.MaxPool2d):
+        try:
+            return DeviceMaxPool2d(m, runner, cov, name)
+        except NotImplementedError:
+            return None
     if isinstance(m, nn.GroupNorm):
         return DeviceGroupNorm(m, runner, cov, name)
+    if cls == "DiffusionSinusoidalPosEmb" and getattr(runner.cfg, "TFN", False):
+        return DeviceSinusoidalEmb(m, runner, cov, name)
     if cls == "SpatialSoftmax" and hasattr(m, "pos_grid") and hasattr(m, "_out_c"):
         return DeviceSpatialSoftmax(m, runner, cov, name)
     if isinstance(m, nn.LayerNorm) and len(m.normalized_shape) == 1 and \
@@ -815,50 +891,103 @@ ACT_MODULES = {"SiLU": "silu", "SiLUActivation": "silu", "Sigmoid": "sigmoid", "
 
 
 def device_ops(runner: Runner, cov: Coverage, min_elems: int = 1024):
-    """A TorchFunctionMode running the sums, differences and products of two fp32 tensors (the
-    same shape, or the second a [N] vector over the last dimension) on the device
-    (kernels/eltwise.py binary), from min_elems outputs up; anything else is PyTorch's."""
+    """A TorchFunctionMode running fp32 elementwise arithmetic on the device (kernels/eltwise.py)
+    from min_elems outputs up: sums, differences, products and quotients of two tensors (the
+    same shape; a [N] row or a [.., 1] column operand broadcast on the device; any other
+    broadcast materialized by the host, a layout move), the same with a Python number (an
+    affine x * a + b), in place or not, and the functional activations (silu, sigmoid, tanh,
+    relu, gelu; sin / cos with the table functions). Anything else is PyTorch's."""
     import torch
     from torch.overrides import TorchFunctionMode
     from .kernels import eltwise as E
     ops = {"add": "add", "__add__": "add", "__radd__": "add", "mul": "mul", "__mul__": "mul",
-           "__rmul__": "mul", "sub": "sub", "__sub__": "sub",
-           "add_": "add", "__iadd__": "add", "mul_": "mul", "__imul__": "mul"}
-    inplace = {"add_", "__iadd__", "mul_", "__imul__"}
+           "__rmul__": "mul", "sub": "sub", "__sub__": "sub", "__rsub__": "rsub",
+           "div": "div", "__truediv__": "div", "true_divide": "div",
+           "add_": "add", "__iadd__": "add", "mul_": "mul", "__imul__": "mul",
+           "sub_": "sub", "__isub__": "sub", "div_": "div", "__itruediv__": "div"}
+    inplace = {"add_", "__iadd__", "mul_", "__imul__", "sub_", "__isub__", "div_",
+               "__itruediv__"}
+    tfn = bool(getattr(runner.cfg, "TFN", False))
+    unary = {"silu": "silu", "sigmoid": "sigmoid", "tanh": "tanh", "relu": "relu",
+             "mish": "mish"}
+    if tfn:
+        unary.update(sin="sin", cos="cos", gelu="gelu")
+
+    def fp(t):
+        return isinstance(t, torch.Tensor) and t.dtype == torch.float32 and \
+            not t.requires_grad and t.dim() >= 1
+
+    def done(name, a, y, key):
+        cov.delems[key] += y.size
+        y = torch.from_numpy(y).reshape(a.shape)
+        return a.copy_(y) if name in inplace else y
 
     class Ops(TorchFunctionMode):
         def __torch_function__(self, func, types, args=(), kwargs=None):
             kwargs = kwargs or {}
-            op = ops.get(getattr(func, "__name__", ""))
+            name = getattr(func, "__name__", "")
+            if name in unary and len(args) == 1 and not kwargs.get("inplace", False) and \
+                    set(kwargs) <= {"inplace"} and fp(args[0]) and args[0].numel() >= min_elems:
+                a = args[0]
+                N = a.shape[-1]
+                y = runner.rows(E.unary, {"x": a.reshape(-1, N).contiguous().numpy()}, N,
+                                fn=unary[name])
+                return done(name, a, y, unary[name])
+            if name in ("__rtruediv__", "__rdiv__", "__rpow__", "pow", "__pow__") and len(args) == 2 and \
+                    not kwargs and fp(args[0]) and args[0].numel() >= min_elems and \
+                    isinstance(args[1], (int, float)) and not isinstance(args[1], bool):
+                a, c = args[0], float(args[1])
+                fn = {"__rtruediv__": "rdiv", "__rdiv__": "rdiv", "__rpow__": "rpow"}.get(name)
+                if fn is None:                                    # x ** c: c 2, 0.5, -0.5, 1
+                    fn = {2.0: "sq", 0.5: "sqrt", -0.5: "rsqrt", -1.0: "recip"}.get(c)
+                if fn is not None and (fn != "rpow" or c > 0):
+                    N = a.shape[-1]
+                    y = runner.rows(E.scalar_fn, {"x": a.reshape(-1, N).contiguous().numpy()},
+                                    N, fn=fn, c=c)
+                    return done(name, a, y, fn)
+            op = ops.get(name)
             if op is not None and len(args) == 2 and not kwargs:
                 a, b = args
-                name = getattr(func, "__name__", "")
-                if op in ("add", "mul") and name not in inplace and \
-                        isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and \
-                        a.dim() == b.dim() >= 2 and a.shape[-1] == 1 and b.shape[-1] > 1:
-                    a, b = b, a                          # commutative: the full tensor first
-                if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and \
-                        a.dtype == b.dtype == torch.float32 and a.dim() >= 1 and \
-                        a.numel() >= min_elems and not (a.requires_grad or b.requires_grad):
+                num = isinstance(b, (int, float)) and not isinstance(b, bool)
+                if num and fp(a) and a.numel() >= min_elems and (op != "div" or b != 0):
+                    sc, sh = {"add": (1.0, b), "sub": (1.0, -b), "rsub": (-1.0, b),
+                              "mul": (b, 0.0), "div": (1.0 / b, 0.0)}[op]
                     N = a.shape[-1]
-                    if b.dim() == a.dim() >= 2 and b.shape[-1] == 1 and N > 1 and \
-                            b.shape[:-1] == a.shape[:-1]:
-                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy(),
-                                                   "b": b.reshape(-1, 1).contiguous().numpy()},
-                                        N, op=op, bcol=True)
-                    elif b.shape == a.shape:
-                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy(),
-                                                   "b": b.reshape(-1, N).numpy()}, N, op=op)
-                    elif b.numel() == N and b.shape[-1] == N and b.dim() <= a.dim():
-                        y = runner.rows(E.binary, {"a": a.reshape(-1, N).numpy()}, N,
-                                        {"b": b.reshape(N).numpy()}, op=op, brow=True)
-                    else:
-                        return func(*args, **kwargs)
-                    cov.delems[op] += y.size
-                    y = torch.from_numpy(y).reshape(a.shape)
+                    y = runner.rows(E.affine, {"x": a.reshape(-1, N).contiguous().numpy()}, N,
+                                    a=float(sc), b=float(sh))
+                    return done(name, a, y, op)
+                if op == "rsub" or not (fp(a) and fp(b)):
+                    return func(*args, **kwargs)
+                if op in ("add", "mul") and name not in inplace and \
+                        a.dim() == b.dim() and a.numel() < b.numel():
+                    a, b = b, a                          # commutative: the full tensor first
+                try:
+                    full = torch.broadcast_shapes(a.shape, b.shape)
+                except RuntimeError:
+                    return func(*args, **kwargs)
+                if full != a.shape:
                     if name in inplace:
-                        return a.copy_(y)
-                    return y
+                        return func(*args, **kwargs)
+                    a = a.expand(full).contiguous()      # (a layout move)
+                if a.numel() < min_elems:
+                    return func(*args, **kwargs)
+                N = a.shape[-1]
+                A = a.reshape(-1, N).contiguous().numpy()
+                if b.shape == a.shape:
+                    y = runner.rows(E.binary, {"a": A, "b": b.reshape(-1, N).contiguous()
+                                               .numpy()}, N, op=op)
+                elif b.numel() == N and b.shape[-1] == N:
+                    y = runner.rows(E.binary, {"a": A}, N, {"b": b.reshape(N).contiguous()
+                                                            .numpy()}, op=op, brow=True)
+                elif b.shape[-1] == 1 and N > 1 and \
+                        b.numel() * N == a.numel() and \
+                        tuple(b.shape[:-1]) == tuple(a.shape[-b.dim():-1]) == tuple(a.shape[:-1]):
+                    y = runner.rows(E.binary, {"a": A, "b": b.reshape(-1, 1).contiguous()
+                                               .numpy()}, N, op=op, bcol=True)
+                else:                                    # (any other broadcast: materialized)
+                    y = runner.rows(E.binary, {"a": A, "b": b.expand(a.shape).reshape(-1, N)
+                                               .contiguous().numpy()}, N, op=op)
+                return done(name, args[0] if name in inplace else a, y, op)
             return func(*args, **kwargs)
     return Ops()
 

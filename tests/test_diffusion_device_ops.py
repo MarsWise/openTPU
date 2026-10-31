@@ -119,3 +119,72 @@ def test_device_ddpm_step_matches_diffusers(t):
     got = dev.step(eps, t, x, generator=torch.Generator().manual_seed(5)).prev_sample
     np.testing.assert_allclose(got.numpy(), want.numpy(), rtol=1e-5, atol=1e-6)
     assert cov.delems["ddpm_step"] == 32
+
+
+def test_max_pool_and_sincos_on_device():
+    torch = pytest.importorskip("torch")
+    import math
+    import torch.nn as nn
+    torch.manual_seed(1)
+    r, cov = runner(True), TD.Coverage()
+    mp = nn.MaxPool2d(3, 2, 1)
+    x = torch.randn(2, 3, 9, 10)
+    want = mp(x)
+    dev = TD.row_module(mp, r, cov, "mp")
+    np.testing.assert_array_equal(dev(x).numpy(), want.numpy())
+
+    class DiffusionSinusoidalPosEmb(nn.Module):      # LeRobot's
+        def __init__(self, dim):
+            super().__init__()
+            self.dim = dim
+
+        def forward(self, t):
+            half = self.dim // 2
+            e = torch.exp(torch.arange(half) * -(math.log(10000) / (half - 1)))
+            e = t.unsqueeze(-1) * e.unsqueeze(0)
+            return torch.cat((e.sin(), e.cos()), dim=-1)
+    m = DiffusionSinusoidalPosEmb(32)
+    t = torch.tensor([0.0, 7.0, 63.0, 99.0])
+    np.testing.assert_allclose(TD.row_module(m, r, cov, "emb")(t).numpy(), m(t).numpy(),
+                               atol=2e-5)
+
+
+@pytest.mark.parametrize("s,p,op", [(2, 1, 0), (2, 0, 1), (1, 1, 0), (3, 2, 0)])
+def test_conv_transpose1d_as_device_conv(s, p, op):
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(s + p)
+    ct = torch.nn.ConvTranspose1d(6, 5, 4, s, p, output_padding=op)
+    x = torch.randn(2, 6, 7)
+    with torch.no_grad():
+        want = ct(x).numpy()
+    got = TD.DeviceConvTranspose1d(ct, runner(False), TD.Coverage())(x).numpy()
+    assert got.shape == want.shape
+    assert np.linalg.norm(got - want) / np.linalg.norm(want) < 0.02     # int8 MX weights
+
+
+def test_device_ops_general_elementwise():
+    """Numbers, quotients, broadcasts, functional activations and in-place forms on the device;
+    nothing left to PyTorch's elementwise kernels."""
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+    torch.manual_seed(3)
+    a = torch.rand(3, 4, 40) + 0.5
+    b = torch.rand(3, 4, 40) + 0.5
+    col, row, mid = torch.rand(3, 4, 1) + .5, torch.rand(40) + .5, torch.rand(1, 4, 40) + .5
+    with torch.no_grad():
+        want = [a * 2.5 + 1.0, 3.0 - a, a / 4.0, 2.0 / a, 10000.0 ** a, a ** 2, a ** -0.5,
+                a / b, a / col, a / row, a * mid, a - mid, F.silu(a), torch.sigmoid(a),
+                torch.sin(a), torch.cos(a)]
+    r, cov = runner(True), TD.Coverage()
+    with torch.no_grad(), TD.device_ops(r, cov, min_elems=1):
+        got = [a * 2.5 + 1.0, 3.0 - a, a / 4.0, 2.0 / a, 10000.0 ** a, a ** 2, a ** -0.5,
+               a / b, a / col, a / row, a * mid, a - mid, F.silu(a), torch.sigmoid(a),
+               torch.sin(a), torch.cos(a)]
+        c = a.clone()
+        c -= b
+        c *= col
+    for i, (g, w) in enumerate(zip(got, want)):
+        np.testing.assert_allclose(g.numpy(), w.numpy(), rtol=3e-5, atol=3e-5, err_msg=str(i))
+    np.testing.assert_allclose(c.numpy(), ((a - b) * col).numpy(), rtol=1e-6, atol=1e-6)
+    for k in ("rdiv", "rpow", "sq", "rsqrt", "div", "silu", "sin", "cos", "mul", "sub"):
+        assert cov.delems[k] > 0, k
