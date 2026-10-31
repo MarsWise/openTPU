@@ -16,6 +16,6 @@ if errorlevel 1 (
 git merge --ff-only FETCH_HEAD || (echo NOT a fast-forward: local changes, stop & pause & exit /b 1)
 git log --oneline -12
 git merge-base --is-ancestor %WANT% HEAD || (echo HEAD does not contain %WANT% & pause & exit /b 1)
-for /f %%h in ('git rev-parse --short=8 HEAD') do set HEADSHA=%%h
+for /f %%h in ('git rev-parse --short^=8 HEAD') do set HEADSHA=%%h
 echo OK: openTPU-r7 at %HEADSHA% (contains 8a4a7ac3)
 pause

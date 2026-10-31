@@ -32,8 +32,17 @@ sys.exit(0 if m and float(m[-1]) < float(sys.argv[2]) else 1)
 PY
 }
 cd "$R" || exit 1
-git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature \
-  && git merge -q --ff-only refs/remotes/claude/feature || { log "SYNC FAILED (not a fast-forward?)"; exit 1; }
+sync_tree() {   # fast-forward to the bundle; untracked files the branch adds are MOVED aside, not deleted
+  git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature || return 1
+  local BK="$R/runs/untracked-moved-$TS" f
+  for f in $(git diff --name-only --diff-filter=A HEAD refs/remotes/claude/feature); do
+    if [ -e "$f" ] && ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+      mkdir -p "$BK/$(dirname "$f")" && mv "$f" "$BK/$f" && echo "   moved untracked $f -> $BK/$f (the branch adds it)"
+    fi
+  done
+  git merge -q --ff-only refs/remotes/claude/feature
+}
+sync_tree || { log "SYNC FAILED (not a fast-forward?)"; exit 1; }
 log "tree $(git log --oneline -1)"
 git merge-base --is-ancestor 8a4a7ac3702bd4dcd4b0cc825d7139dc332fe719 HEAD || { log "the tree lacks r7 8a4a7ac3: stop"; exit 1; }
 . .venv/bin/activate

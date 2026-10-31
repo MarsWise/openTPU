@@ -11,11 +11,17 @@ if "%MODE%"=="" set MODE=Build
 cd /d C:\myOpenTPU\openTPU-r7 || (echo no C:\myOpenTPU\openTPU-r7 & pause & exit /b 1)
 findstr /c:"TGRQ" rtl\shell\otpu_ctrl.sv >nul || (echo the tree has no GRQ: run r7_sync.cmd & pause & exit /b 1)
 tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo a Vivado process is running: stop & pause & exit /b 1)
-for /f %%h in ('git rev-parse --short=8 HEAD') do set REV=%%h
+for /f %%h in ('git rev-parse --short^=8 HEAD') do set REV=%%h
 git log --oneline -1
 set LOG=%~dp0r7_build_%MODE%_%REV%.log
 echo === %MODE% of %REV%; log %LOG%; output build\vivado-r7-m8-133.33-%REV%
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\tools\build_r7_133.ps1' -Mode %MODE% *>&1 | Tee-Object -FilePath '%LOG%'"
+echo === the python the build uses (CFG_HASH):
+where python
+python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'numpy', numpy.__version__)"
+if errorlevel 1 goto nopy
+python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True)), '08x'))"
+if errorlevel 1 goto nohash
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { & '.\tools\build_r7_133.ps1' -Mode %MODE% } *>&1 | ForEach-Object { $_; Add-Content -LiteralPath '%LOG%' -Value \"$_\" -Encoding UTF8 }; exit $LASTEXITCODE"
 set RC=%errorlevel%
 echo === exit %RC%
 set OUTD=build\vivado-r7-m8-133.33-%REV%
@@ -24,3 +30,12 @@ for /r "%OUTD%" %%f in (*.bit) do certutil -hashfile "%%f" SHA256
 echo (nothing was loaded into the FPGA)
 pause
 exit /b %RC%
+:nopy
+echo The python on PATH cannot import numpy: the build computes CFG_HASH with it.
+echo Install it for that python: python -m pip install numpy   then run r7_build.cmd again.
+pause
+exit /b 1
+:nohash
+echo The CFG_HASH step failed: its traceback is above. Send it to Claude.
+pause
+exit /b 1
