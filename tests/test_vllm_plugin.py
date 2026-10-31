@@ -176,7 +176,7 @@ def test_fpga_only_rejects_cpu_sampling_before_allocating_slot():
     from opentpu.vllm.worker import OpenTPUWorker
     w = object.__new__(OpenTPUWorker)
     w.free, w.kept, w.opts = [0, 1], {}, {"fpga_only": True}
-    params = SimpleNamespace(temperature=.8, logprobs=None)
+    params = SimpleNamespace(temperature=.8, logprobs=None, min_p=.1)   # min-p: the host's
     with pytest.raises(Unsupported, match="refuses CPU sampling"):
         w._take_slot("request", [1], params, 0)
     assert w.free == [0, 1]

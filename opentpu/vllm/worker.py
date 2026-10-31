@@ -31,6 +31,7 @@ from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from . import ENV_BACKEND
+from .devsample import device_sampling
 from .platform import BLOCK_SIZE, Unsupported
 
 logger = init_logger(__name__)
@@ -142,8 +143,9 @@ def sample(logits: np.ndarray, params, rng: np.random.Generator) -> int:
 
 
 def _greedy(params) -> bool:
-    """A request the device's batched step serves: greedy, no logprobs asked."""
-    return float(params.temperature or 0.0) < 1e-5 and params.logprobs is None
+    """A request the device's batched step serves: its sampling all on the card (greedy, or
+    temperature / top-k / top-p / repetition penalty: devsample.device_sampling)."""
+    return device_sampling(params).ok
 
 
 def _logprobs(ids, lps) -> LogprobsLists | None:
@@ -289,13 +291,18 @@ class OpenTPUWorker(WorkerBase):
             params, rng = self.kept.pop(rid)
         else:
             rng = np.random.default_rng(seed)
-        if self.opts["fpga_only"] and not _greedy(params):
-            raise Unsupported("openTPU FPGA-only vLLM currently supports greedy sampling "
-                              "without logprobs; it refuses CPU sampling")
+        ds = device_sampling(params)
+        if self.opts["fpga_only"] and not ds.ok:
+            raise Unsupported("openTPU FPGA-only vLLM samples on the device (greedy, "
+                              "temperature, top-k, top-p, repetition penalty); this request's "
+                              "options (logprobs, min-p, presence / frequency penalties, logit "
+                              "bias ...) need the host: it refuses CPU sampling")
         s = self.free.pop()
         self.eng.reset(seq=s)
-        if self.opts["fpga_only"]:
-            self.steps.set_sampling(s, None)
+        if self.steps is not None and ds.ok:
+            self.steps.set_sampling(s, ds.samp, context=tokens)
+            if ds.capped:
+                self.stats["topk_capped"] = self.stats.get("topk_capped", 0) + 1
         r = _Req(rid, s, list(tokens), params, rng)
         self.reqs[rid] = r
         return r
@@ -372,8 +379,9 @@ class OpenTPUWorker(WorkerBase):
         decode = [r for r in decode if r not in dev]
         if dev:
             n0 = self.steps.runs
+            uni = [float(r.rng.random()) for r in dev]  # each request's seeded uniform
             picks = self.steps.run([(r.slot, eng.poss[r.slot]) for r in dev],
-                                   [r.tokens[-1] for r in dev])
+                                   [r.tokens[-1] for r in dev], uni)
             for r, t in zip(dev, picks):
                 logits[r.rid] = int(t)
             self.stats["decode_runs"] += self.steps.runs - n0
