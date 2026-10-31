@@ -25,6 +25,14 @@ def main():
     ap.add_argument("--prompts", type=int, default=3)
     ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4"],
                     help="the LM head's format (default: the model's)")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="> 0: sampled requests (seeded), picked on the device (OTPU_VLLM_FPGA_ONLY "
+                         "set: nothing sampled on the host), checked against the decode loop's "
+                         "sampler (generate.reference_pick) on the engine's logits with the "
+                         "requests' uniforms")
+    ap.add_argument("--top-k", type=int, default=40)
+    ap.add_argument("--top-p", type=float, default=0.95)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0)
     a = ap.parse_args()
     os.environ.setdefault("OTPU_VLLM_BACKEND", "isa")
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -40,9 +48,16 @@ def main():
               max_num_seqs=a.slots, additional_config={"opentpu": {"slots": a.slots,
                                                 "head_format": a.head_format}})
     print(f"vLLM engine up in {time.time() - t0:.1f}s on {os.environ['OTPU_VLLM_BACKEND']}")
-    sp = SamplingParams(temperature=0.0, max_tokens=a.tokens, ignore_eos=True, detokenize=False)
+    if a.temperature > 0:
+        os.environ["OTPU_VLLM_FPGA_ONLY"] = "1"
+    sps = [SamplingParams(temperature=a.temperature, top_k=a.top_k, top_p=a.top_p,
+                          repetition_penalty=a.repetition_penalty, seed=1000 + i,
+                          max_tokens=a.tokens, ignore_eos=True, detokenize=False)
+           if a.temperature > 0 else
+           SamplingParams(temperature=0.0, max_tokens=a.tokens, ignore_eos=True,
+                          detokenize=False) for i in range(len(ps))]
     t0 = time.time()
-    outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in ps], sp, use_tqdm=False)
+    outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in ps], sps, use_tqdm=False)
     dt = time.time() - t0
     got = [list(o.outputs[0].token_ids) for o in outs]
     st = llm.collective_rpc(lambda self: dict(self.stats))[0]
@@ -58,11 +73,19 @@ def main():
     e, _ = build_engine(a.model, os.environ["OTPU_VLLM_BACKEND"], a.max_model_len, 1,
                         head_format=a.head_format)
     try:
-        for p, g in zip(ps, got):
+        from opentpu.llm import generate as G
+        from opentpu.vllm.devsample import device_sampling
+        for i, (p, g) in enumerate(zip(ps, got)):
             e.reset()
             lg, ref = e.prefill(p), []
+            samp = device_sampling(sps[i]).samp
+            rng = np.random.default_rng(1000 + i)
             for _ in range(a.tokens):
-                ref.append(int(np.argmax(lg)))
+                if samp is None:
+                    ref.append(int(np.argmax(lg)))
+                else:
+                    u = np.minimum(np.float32(rng.random()), np.float32(1 - 2.0 ** -24))
+                    ref.append(int(G.reference_pick(np.asarray(lg), samp, p + ref, u)))
                 if len(ref) < a.tokens:
                     lg = e.step(ref[-1])
             m = g == ref
