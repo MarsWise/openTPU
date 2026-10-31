@@ -154,12 +154,18 @@ def _logprobs(ids, lps) -> LogprobsLists | None:
     top k; the sampled token's rank among all (1 = the most likely)."""
     if not lps:
         return None
-    K = max(k for _, _, k in lps.values())
+    K = max(len(v[3]) if len(v) == 4 else v[2] for v in lps.values())
     tok = np.zeros((len(ids), K + 1), np.int64)
     val = np.zeros((len(ids), K + 1), np.float32)
     rank = np.zeros(len(ids), np.int64)
     for i, rid in enumerate(ids):
         if rid not in lps:
+            continue
+        if len(lps[rid]) == 4:                  # the device's: (id, logprob, rank, top)
+            t, lp_t, rk, top = lps[rid]
+            tok[i, 0], val[i, 0], rank[i] = t, lp_t, rk
+            for j, (ti, v) in enumerate(top[:K]):
+                tok[i, 1 + j], val[i, 1 + j] = ti, v
             continue
         row, t, k = lps[rid]
         x = row.astype(np.float64)
@@ -183,6 +189,7 @@ class OpenTPUWorker(WorkerBase):
         self.kept: dict[str, tuple] = {}    # a preempted request's sampling (params, rng)
         self.free: list[int] = []
         self._pending = None
+        self.dev_lps: dict = {}     # rid -> the device pick's logprobs record
         self.resumed = 0
         self.stats = dict(steps=0, prefill_runs=0, decode_runs=0, decode_rows=0, device_s=0.0)
 
@@ -295,12 +302,12 @@ class OpenTPUWorker(WorkerBase):
         if self.opts["fpga_only"] and not ds.ok:
             raise Unsupported("openTPU FPGA-only vLLM samples on the device (greedy, "
                               "temperature, top-k, top-p, repetition penalty); this request's "
-                              "options (logprobs, min-p, presence / frequency penalties, logit "
+                              "options (prompt logprobs, min-p, presence / frequency penalties, logit "
                               "bias ...) need the host: it refuses CPU sampling")
         s = self.free.pop()
         self.eng.reset(seq=s)
         if self.steps is not None and ds.ok:
-            self.steps.set_sampling(s, ds.samp, context=tokens)
+            self.steps.set_sampling(s, ds.samp, context=tokens, logprobs=ds.lp)
             if ds.capped:
                 self.stats["topk_capped"] = self.stats.get("topk_capped", 0) + 1
         r = _Req(rid, s, list(tokens), params, rng)
@@ -384,6 +391,8 @@ class OpenTPUWorker(WorkerBase):
                                    [r.tokens[-1] for r in dev], uni)
             for r, t in zip(dev, picks):
                 logits[r.rid] = int(t)
+                if r.params.logprobs is not None:       # the device's record (batch._LogProbs)
+                    self.dev_lps[r.rid] = (int(t),) + self.steps.lp[r.slot]
             self.stats["decode_runs"] += self.steps.runs - n0
             self.stats["decode_rows"] += len(dev)
             self.stats["device_picks"] = self.stats.get("device_picks", 0) + len(dev)
@@ -416,6 +425,8 @@ class OpenTPUWorker(WorkerBase):
                 r = self.reqs[rid]
                 r.tokens.append(logits[rid])
                 out.append([logits[rid]])
+                if rid in self.dev_lps:
+                    lps[rid] = self.dev_lps.pop(rid)
             elif rid in logits:
                 if self.opts["fpga_only"]:
                     raise Unsupported("openTPU FPGA-only vLLM refuses host-side token sampling")

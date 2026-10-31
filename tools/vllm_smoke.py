@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--top-k", type=int, default=40)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--repetition-penalty", type=float, default=1.0)
+    ap.add_argument("--logprobs", type=int, default=None,
+                    help="request sample logprobs (computed on the device, batch._LogProbs) and "
+                         "check them against the reference engine's log-softmax")
     a = ap.parse_args()
     os.environ.setdefault("OTPU_VLLM_BACKEND", "isa")
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -52,14 +55,16 @@ def main():
         os.environ["OTPU_VLLM_FPGA_ONLY"] = "1"
     sps = [SamplingParams(temperature=a.temperature, top_k=a.top_k, top_p=a.top_p,
                           repetition_penalty=a.repetition_penalty, seed=1000 + i,
-                          max_tokens=a.tokens, ignore_eos=True, detokenize=False)
+                          max_tokens=a.tokens, ignore_eos=True, detokenize=False,
+                          logprobs=a.logprobs)
            if a.temperature > 0 else
            SamplingParams(temperature=0.0, max_tokens=a.tokens, ignore_eos=True,
-                          detokenize=False) for i in range(len(ps))]
+                          detokenize=False, logprobs=a.logprobs) for i in range(len(ps))]
     t0 = time.time()
     outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in ps], sps, use_tqdm=False)
     dt = time.time() - t0
     got = [list(o.outputs[0].token_ids) for o in outs]
+    glp = [o.outputs[0].logprobs for o in outs]
     st = llm.collective_rpc(lambda self: dict(self.stats))[0]
     print(f"vLLM: {len(ps)} requests x {a.tokens} tokens in {dt:.2f}s = "
           f"{len(ps) * a.tokens / dt:.2f} tokens/s; worker {st}")
@@ -80,15 +85,29 @@ def main():
             lg, ref = e.prefill(p), []
             samp = device_sampling(sps[i]).samp
             rng = np.random.default_rng(1000 + i)
-            for _ in range(a.tokens):
+            lp_err, lp_ok = 0.0, True
+            for j in range(a.tokens):
                 if samp is None:
                     ref.append(int(np.argmax(lg)))
                 else:
                     u = np.minimum(np.float32(rng.random()), np.float32(1 - 2.0 ** -24))
                     ref.append(int(G.reference_pick(np.asarray(lg), samp, p + ref, u)))
+                if a.logprobs is not None and glp[i] is not None and j < len(glp[i]) \
+                        and j < len(g) and g[j] == ref[-1]:
+                    x = np.asarray(lg, np.float64)
+                    lp = x - (x.max() + np.log(np.exp(x - x.max()).sum()))
+                    d = glp[i][j]
+                    want = [int(t) for t in np.argsort(-lp, kind="stable")[:a.logprobs]]
+                    lp_ok &= all(t in d for t in want) and d[ref[-1]].rank == \
+                        int((lp > lp[ref[-1]]).sum()) + 1
+                    lp_err = max([lp_err] + [abs(d[t].logprob - lp[t]) for t in d])
                 if len(ref) < a.tokens:
                     lg = e.step(ref[-1])
             m = g == ref
+            if a.logprobs is not None:
+                m = m and glp[i] is not None and lp_ok and lp_err < 2e-2
+                print(f"logprobs prompt[{len(p)}]: top {a.logprobs} ids and ranks "
+                      f"{'equal' if lp_ok else 'DIFFER'}, max |d logprob| {lp_err:.2e}")
             ok &= m
             print(f"{'MATCH' if m else 'MISMATCH'} prompt[{len(p)}]: vllm {g} engine {ref}")
     finally:

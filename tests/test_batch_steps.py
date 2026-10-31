@@ -328,3 +328,40 @@ def test_mixed_runs_feed_a_prompt_beside_decoding_rows():
             want.append(int(np.argmax(lg)))
             lg = e.step(want[-1])
         assert got[s] == want, s
+
+
+def test_logprobs_on_the_device():
+    """Rows with logprobs (BA._LogProbs): each pick's raw logprob, its rank and the top n
+    (ids and logprobs) from the device equal the log-softmax of a single-sequence engine's
+    logits (float64) to fp32's exp2 / log2 error; a greedy and a sampled row (a penalty)."""
+    eng, single, spec = _engines()
+    slots = [0, 2]
+    ps = _prompts(3, [11, 19])
+    samps = {0: None, 2: G.Sampling(0.8, 20, 0.9, 1.3)}
+    nlp = {0: 5, 2: 3}
+    st = BA.Steps(eng)
+    refs, ctx, nxt = {}, {}, {}
+    for s, p in zip(slots, ps):
+        lg = eng.prefill(p, seq=s)
+        nxt[s] = int(np.argmax(lg))
+        ctx[s] = list(p) + [nxt[s]]
+        st.set_sampling(s, samps[s], ctx[s], logprobs=nlp[s])
+        e = single()
+        e.prefill(p)
+        refs[s] = e
+    rng = np.random.default_rng(7)
+    for _ in range(3):
+        u = rng.random(2).astype(np.float32)
+        out = st.run([(s, eng.poss[s]) for s in slots], [nxt[s] for s in slots], uniforms=u)
+        for r, s in enumerate(slots):
+            x = refs[s].step(nxt[s]).astype(np.float64)
+            lp = x - (x.max() + np.log(np.exp(x - x.max()).sum()))
+            t = out[r]
+            got_lp, got_rank, top = st.lp[s]
+            assert abs(got_lp - lp[t]) < 2e-3, (s, got_lp, lp[t])
+            assert got_rank == int((lp > lp[t]).sum()) + 1
+            want = np.argsort(-lp, kind="stable")[:nlp[s]]
+            assert [i for i, _ in top] == [int(i) for i in want]
+            assert np.allclose([v for _, v in top], lp[want], atol=2e-3)
+            nxt[s] = t
+            ctx[s].append(t)

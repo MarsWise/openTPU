@@ -5,7 +5,7 @@
 #  1 Diffusion Policy resident: tiny card == ISA; lerobot/diffusion_pusht 10 and 100 steps vs float32
 #  2 SmolVLA resident: tiny card == ISA; lerobot/smolvla_base vs float32
 #  3 YOLOX-Nano strict FPGA-only (VU8) or --strict-fpga --fpga-nms (no VU8)
-#  4 vLLM BitNet 4 slots: sampled on the card, then greedy
+#  4 vLLM BitNet 4 slots: sampled on the card, greedy, sampled with logprobs (top 5) on the card
 #  5 Bonsai 2 4B with OTPU_GRQ=0 / 1 (TGRQ firmware and the model present only)
 # ECC cleared before and read after each step. No bitstream load, no rescan, no calibration change.
 set -u
@@ -103,6 +103,10 @@ grep -q "RESULT PASS" "$OUT/vllm_sampled.txt" && pass "vLLM sampled on the card"
 ecc
 OTPU_VLLM_BACKEND=board PYTHONPATH="$R" timeout 3600 "$V/bin/python" tools/vllm_smoke.py "$MD" --slots 4 --tokens 32 --max-model-len 256 --prompts 4 2>&1 | grep -E "^vLLM|MISMATCH|RESULT|Error|Traceback" | tee "$OUT/vllm_greedy.txt"
 grep -q "RESULT PASS" "$OUT/vllm_greedy.txt" && pass "vLLM greedy" || fail "vLLM greedy"
+ecc
+ecc clear
+OTPU_VLLM_BACKEND=board PYTHONPATH="$R" timeout 3600 "$V/bin/python" tools/vllm_smoke.py "$MD" --slots 4 --tokens 16 --max-model-len 256 --prompts 4 --temperature 0.8 --top-k 40 --top-p 0.95 --logprobs 5 2>&1 | grep -E "^vLLM|MATCH|logprobs|RESULT|Error|Traceback|Unsupported" | tee "$OUT/vllm_logprobs.txt"
+grep -q "RESULT PASS" "$OUT/vllm_logprobs.txt" && pass "vLLM logprobs on the card" || fail "vLLM logprobs on the card"
 ecc
 
 log "5. Bonsai 2 4B, TMM GSC with GRQ off / on"

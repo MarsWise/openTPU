@@ -52,6 +52,11 @@ LIVE = 64                       # live programs kept (row sets that may run agai
 PAD_AHEAD = 4                   # a padded group's own program: compiled for this many steps on
 FEED = "feed"                   # a row that only feeds its token (a prompt's): no LM head, no pick
 TOUT_STRIDE = 64                # bytes between two rows' picks in tout: a DRAM beat each
+LP = "lp"                       # a row kind with logprobs: (LP, n top, the pick's kind)
+LP_HDR = 8                      # lpo row: the pick's logprob, its rank, logsumexp, the id, pad
+LP_MAX = G.K_MAX                # top logprobs a row returns at most
+LP_STRIDE = 640                 # bytes between two rows' lpo records (whole DRAM beats)
+LP_CH = 2048                    # the rank's count runs over lr in chunks of this many logits
 
 
 def alloc(image, cfg, B: int, base: int) -> dict:
@@ -74,6 +79,9 @@ def alloc(image, cfg, B: int, base: int) -> dict:
     a["lg"] = [take(4 * V) for _ in range(B)]
     a["pa"] = [take(4 * V) for _ in range(B)]
     a["pb"] = [take(4 * V) for _ in range(B)]
+    a["VR"] = VR = -(-V // LP_CH) * LP_CH
+    a["lr"] = [take(4 * VR) for _ in range(B)]      # a logprobs row's raw logits
+    a["lpo"] = take(LP_STRIDE * R)                  # the rows' logprobs records
     a["end"] = -(-o // 4096) * 4096
     return a
 
@@ -90,11 +98,126 @@ def build(images, a: dict, spec, cfg) -> None:
             img[a["pa"][s]:a["pa"][s] + len(ones)] = ones
             img[a["pb"][s]:a["pb"][s] + len(ones)] = ones
             img[a["lg"][s]:a["lg"][s] + len(lg)] = lg
+            if "lr" in a:
+                lr = np.full(a["VR"], -np.inf, np.float32).view(np.uint8)
+                img[a["lr"][s]:a["lr"][s] + len(lr)] = lr
 
 
-def kind_of(samp) -> tuple | None:
-    """A row's compile-time kind: None (greedy, no penalty) or the Sampling's key."""
-    return None if samp is None else samp.key
+def kind_of(samp, logprobs=None) -> tuple | None:
+    """A row's compile-time kind: None (greedy, no penalty) or the Sampling's key; with
+    logprobs (0 .. LP_MAX: the top ones besides the pick's), (LP, n rounded up to 8, that)."""
+    k = None if samp is None else samp.key
+    if logprobs is None:
+        return k
+    n = int(logprobs)
+    if not 0 <= n <= LP_MAX:
+        raise ValueError(f"logprobs on the device: 0 .. {LP_MAX}")
+    return (LP, -(-n // 8) * 8, k)
+
+
+def _base(kind):
+    """The pick's kind of a row kind (a logprobs kind's inner one)."""
+    return kind[2] if isinstance(kind, tuple) and kind and kind[0] == LP else kind
+
+
+class _LogProbs:
+    """A sink around a row's pick sink: vLLM's raw logprobs (log-softmax of the LM head's logits
+    before temperature and penalties) on the device. Each chunk: its logits to lr (DRAM), their
+    maximum and sum of exp(l - max) (an online logsumexp), the maxima of their blocks of BLK;
+    token(): the pick (the inner sink's), lse = M + log(sum exp(m_c - M) s_c), the pick's logit
+    from lr and its rank (1 + the logits above it: a pass over lr in LP_CH chunks), the top n
+    (the n blocks with the largest maxima gathered from lr, the n largest of them, descending,
+    ties by position, as the sampler's selection); the record [pick - lse, rank, lse, id, 0..,
+    top - lse.., their ids..] to lpo."""
+
+    def __init__(self, b, m, inner, n: int, lr: int, out: int, iota, chunk: int):
+        self.b, self.inner, self.n, self.lr, self.out, self.iota = b, inner, n, lr, out, iota
+        self.v = m.v_loc
+        self.nc = -(-self.v // chunk)
+        self.cm, self.cs = b.alloc((self.nc,)), b.alloc((self.nc,))
+        self.nb = -(-self.v // G.BLK)
+        self.bm = b.alloc((self.nb,))
+        self.k = 0
+
+    def __call__(self, y, col0: int) -> None:
+        b = self.b
+        yv = y[0, :] if len(y.shape) == 2 else y
+        n = yv.cols
+        b.emit(I.st(self.lr + 4 * col0, yv.base, n, comment="raw logits"))
+        k = self.k
+        self.k += 1
+        mk = ol.max(yv)
+        self.cm[k:k + 1].set(mk)
+        self.cs[k:k + 1].set(ol.sum(ol.exp2((yv - mk) * ol.LOG2E)))
+        del mk
+        nf, k0 = n // G.BLK, col0 // G.BLK
+        if nf:
+            b.emit(I.vop(I.V_RMAX, self.bm.base + k0, yv.base, 0, nf, G.BLK, 1, G.BLK, 0,
+                         comment="block maxima"))
+        if n % G.BLK:
+            b.emit(I.vop(I.V_RMAX, self.bm.base + k0 + nf, yv.base + nf * G.BLK, 0, 1,
+                         n % G.BLK, 1, n % G.BLK, 0, comment="block maxima"))
+        self.inner(y, col0)
+
+    def token(self):
+        b, N, BLK = self.b, self.n, G.BLK
+        t = self.inner.token()
+        M = ol.max(self.cm)
+        S = ol.sum(self.cs * ol.exp2((self.cm - M) * ol.LOG2E))
+        lse = M + ol.log2(S) * ol.LN2
+        r = b.scratch()
+        b.rld(r, t * 4.0, comment="the pick's bytes")
+        lt = b.alloc((1,))
+        b.emit(I.ld(self.lr, lt.base, 1, ra=r, comment="the pick's logit"))
+        b.unscratch(r)
+        nch = -(-self.v // LP_CH)
+        L = Tensor(self.lr, (nch, LP_CH), (LP_CH, 1))
+        cnt = ol.zeros([1])
+        tt = ol.empty([1, LP_CH])
+        for i in ol.range(nch):
+            ol.load(L[i:i + 1, :], out=tt)
+            cnt.set(cnt + ol.sum(G._step(tt[0, :] - lt)))
+        del tt
+        rec = ol.zeros([LP_HDR + 2 * N])
+        rec[0:1].set(lt - lse)
+        rec[1:2].set(cnt + 1.0)
+        rec[2:3].set(lse)
+        rec[3:4].set(t)
+        if N:
+            nbk = min(N, self.nb)
+            cand, ids = b.alloc((nbk * BLK,)), b.alloc((nbk * BLK,))
+            pr, off, base = b.alloc((2,)), b.alloc((1,)), b.alloc((1,))
+            rk, rj, rb_, ro = b.scratch(), b.scratch(), b.scratch(), b.scratch()
+            b.rld(rk, ol.full([1], float(nbk)), comment="blocks")
+            G._loop(b, rk, [
+                I.argmax(pr.base, self.bm.base, 1, self.nb, comment="block"),
+                I.rld(rb_, pr.base + 1, comment="its index"),
+                G._fill(b, self.bm, G.NEG, ra=rb_, n=1, comment="knock out"),
+                I.vop(I.V_MUL, off.base, pr.base + 1, 0, 1, 1, 0, 0, 0, I.B_SCALAR, 4.0 * BLK,
+                      comment="block bytes"),
+                I.vop(I.V_MUL, base.base, pr.base + 1, 0, 1, 1, 0, 0, 0, I.B_SCALAR, float(BLK),
+                      comment="block id"),
+                I.rld(ro, off.base),
+                I.ld(self.lr, cand.base, BLK, ra=ro, rb=rj, comment="the block's logits"),
+                I.vop(I.V_ADD, ids.base, self.iota.base, base.base, 1, BLK, 0, 0, 0, I.B_ROW,
+                      ra=rj, comment="their ids"),
+                I.addi(rj, rj, BLK)])
+            for x in (rj, rb_, ro):
+                b.unscratch(x)
+            vals, sid = b.alloc((N,)), b.alloc((N,))
+            vals.set(G.NEG)
+            sid.set(0.0)
+            b.rld(rk, ol.full([1], float(N)), comment="top n")
+            G._select(b, cand, ids, rk, vals, sid)
+            b.unscratch(rk)
+            rec[LP_HDR:LP_HDR + N].set(vals - lse)
+            rec[LP_HDR + N:LP_HDR + 2 * N].set(sid)
+        ol.store(Tensor(self.out, (LP_HDR + 2 * N,), (1,)), rec)
+        return t
+
+    def after(self, tok) -> None:
+        if not isinstance(self.inner, G.Greedy):
+            self.inner.after(tok)
 
 
 def _mixed(kinds) -> bool:
@@ -206,10 +329,22 @@ def _sinks(b, m, spec, x, rows, kinds, pick, area) -> None:
     g0 = m.gen
     uni = Tensor(area["uni"], (area["R"],), (1,))
     consts, sts, sinks = {}, [], []
+    iota = None
     for r in pick:
-        (slot, _), kind = rows[r], kinds[r]
+        (slot, _), kind = rows[r], _base(kinds[r])
+        lp = kinds[r] != kind
+        if lp and b.S != 1:
+            raise CompileError("logprobs rows run on one slice")
+        if lp and iota is None:
+            iota = ol.load(g0.iota)
+
+        def wrap(sk, r=r, slot=slot):
+            if not lp:
+                return sk
+            return _LogProbs(b, m, sk, kinds[r][1], area["lr"][slot],
+                             area["lpo"] + LP_STRIDE * r, iota, chunk)
         if kind is GREEDY:
-            sinks.append(G.Greedy(b, m.v_loc, chunk))
+            sinks.append(wrap(G.Greedy(b, m.v_loc, chunk)))
             sts.append(None)
             continue
         if b.S != 1:
@@ -220,7 +355,7 @@ def _sinks(b, m, spec, x, rows, kinds, pick, area) -> None:
         st = ol.load(Tensor(area["st"][slot], (G.STATE_WORDS,), (1,)))
         g = SimpleNamespace(addr={"lg": area["lg"][slot], "pa": area["pa"][slot],
                                   "pb": area["pb"][slot]}, uni=uni, iota=g0.iota)
-        sinks.append(G.Sampler(b, m, g, samp, st, None, consts[kind], u_at=r))
+        sinks.append(wrap(G.Sampler(b, m, g, samp, st, None, consts[kind], u_at=r)))
         sts.append(st)
     _head(x, m, spec, sinks, chunk)
     if len(pick) < len(rows):
@@ -228,7 +363,7 @@ def _sinks(b, m, spec, x, rows, kinds, pick, area) -> None:
     for r, sk in zip(pick, sinks):
         t = sk.token()
         ol.store(Tensor(area["tout"] + TOUT_STRIDE * r, (1,), (1,)), t)
-        if kinds[r] is not GREEDY:
+        if not isinstance(sk, G.Greedy):
             sk.after(t)
         del t
 
@@ -306,13 +441,20 @@ class Steps:
                        "programs": 0, "reused": 0, "padded": 0, "write_s": 0.0,
                        "start_s": 0.0, "wait_s": 0.0, "read_s": 0.0}
         self._pad_to: dict = {}           # (slots, kinds) -> the rows its padding waits for
+        self.lp_n: dict = {}              # slot -> its logprobs (top n) when it has them
+        self.lp: dict = {}                # slot -> its last pick's (logprob, rank, [(id, lp)])
 
-    def set_sampling(self, slot: int, samp, context=()) -> None:
+    def set_sampling(self, slot: int, samp, context=(), logprobs=None) -> None:
         """Slot `slot` picks greedily (samp None) or with samp (generate.Sampling): its state
         words, and with a penalty its factors over `context` (the ids so far, the token it
-        feeds next among them)."""
+        feeds next among them). logprobs (0 .. LP_MAX): each pick's raw logprobs on the device
+        too (_LogProbs; self.lp[slot] after each step)."""
         eng, a = self.eng, self.a
-        self.kinds[slot] = kind_of(samp)
+        self.kinds[slot] = kind_of(samp, logprobs)
+        if logprobs is not None:
+            self.lp_n[slot] = int(logprobs)
+        else:
+            self.lp_n.pop(slot, None)
         if samp is None:
             return
         st = G.state_words(eng.spec, 0, 0, 0, [], eng.block, samp)
@@ -640,6 +782,16 @@ class Steps:
         t2 = time.perf_counter()
         out = eng.backend.read(0, a["tout"], TOUT_STRIDE * len(grp)).view(np.float32)[
             ::TOUT_STRIDE // 4]
+        ks = tuple(self.kinds.get(s) for s, _ in grp) if kinds is None else kinds
+        for r, ((s, _), k) in enumerate(zip(grp, ks)):
+            if isinstance(k, tuple) and k and k[0] == LP:
+                n = k[1]
+                w = eng.backend.read(0, a["lpo"] + LP_STRIDE * r, 4 * (LP_HDR + 2 * n)).view(
+                    np.float32)
+                want = self.lp_n.get(s, n)
+                self.lp[s] = (float(w[0]), int(w[1]),
+                              [(int(i), float(v)) for v, i in
+                               zip(w[LP_HDR:LP_HDR + want], w[LP_HDR + n:LP_HDR + n + want])])
         tm["read_s"] += time.perf_counter() - t2
         return out
 
