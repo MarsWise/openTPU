@@ -105,6 +105,11 @@ def main():
                     help="--backend isa with the r5-m8 card's configuration (TFN etc.)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--resident", action="store_true",
+                    help="the whole policy as a resident graph (opentpu/smolvla_resident.py): "
+                         "vision, connector, prefix layers and every Euler step of the expert "
+                         "on the device; the host writes the preprocessed images, state, "
+                         "noise and the instruction's token rows, and reads the actions")
     ap.add_argument("--host-attention", action="store_true",
                     help="the attention products on the host (stage 1)")
     a = ap.parse_args()
@@ -125,6 +130,8 @@ def main():
         t0 = time.time()
         ref = pol.model.sample_actions(*x[:5], noise=x[5].clone())
         t_ref = time.time() - t0
+    if a.resident:
+        return run_resident(a, pol, x, ref[0].numpy(), t_ref)
     dev = copy.deepcopy(pol)
     rcfg = None
     if a.card_config and a.backend == "isa":     # the card's configuration (TFN: sin / cos)
@@ -165,6 +172,47 @@ def main():
           f"first step float {np.round(r[0], 3).tolist()} device {np.round(g[0], 3).tolist()}")
     if a.save:
         np.savez(a.save, ref=r, dev=g)
+    return 0
+
+
+def run_resident(a, pol, x, ref, t_ref):
+    """SmolVLA with nothing computed on the host (the inputs written once, the actions read)."""
+    from opentpu import resident as RG, smolvla_resident as SR
+    from opentpu.isasim import board_config
+    imgs, masks, toks, lmask, state, noise = x
+    if not (all(bool(mk.all()) for mk in masks) and bool(lmask.all())):
+        raise SystemExit("--resident takes every image and language token valid (no padding)")
+    board = None
+    if a.backend == "board":
+        from opentpu.host.board import Board, XdmaTransport, device_config
+        board = Board(XdmaTransport(a.dev), check=False)
+        c = device_config(board.info())
+    else:
+        c = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
+                         TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    t0 = time.time()
+    vla = SR.build(pol, c, toks[0].numpy())
+    progs = vla.programs()
+    img = vla.image([i[0].numpy() for i in imgs], state[0].numpy(), noise[0].numpy())
+    print(f"resident policy: {len(progs)} programs ({len(vla.enc)} prefix, {len(vla.step[0])} "
+          f"a step x {vla.steps}), DRAM image {len(img) / 2**20:.1f} MiB, compiled in "
+          f"{time.time() - t0:.1f}s")
+    t0 = time.time()
+    if board is None:
+        img, n = RG.run_isa(c, progs, img)
+        got, st = vla.actions(img), {"instructions": n}
+    else:
+        board.write(0, img)
+        st = RG.run_board(board, progs, -(-(len(img) + (1 << 20)) // 4096) * 4096)
+        got = board.read(vla.x.addr, vla.x.nbytes).view(np.float32).reshape(vla.chunk, vla.A)
+        if a.check_isa:
+            iso, _ = RG.run_isa(c, progs, img)
+            print("card == ISA:", np.array_equal(got, vla.actions(iso)))
+    rel = float(np.linalg.norm(got - ref) / np.linalg.norm(ref))
+    print(f"device run {time.time() - t0:.1f}s ({st}), float run {t_ref:.2f}s")
+    print(f"actions [{ref.shape[0]} x {ref.shape[1]}] vs float32: rel L2 {rel:.4f}, max |d| "
+          f"{float(np.abs(got - ref).max()):.4f} (range {float(np.abs(ref).max()):.3f}); host: "
+          f"inputs written, actions read, nothing computed")
     return 0
 
 

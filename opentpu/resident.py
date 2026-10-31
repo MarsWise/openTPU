@@ -458,3 +458,207 @@ def _graph_2d_ops():
 
 
 _graph_2d_ops()
+
+
+# ---------------------------------------------------------------- attention
+@ol.jit
+def attention_k(q, k, v, o, kv, H: int, KVH: int, dh: int, groups: tuple, scale: float,
+                block: int = 128):
+    """o rows = softmax(q k^T * scale) v per head (GQA), q [Lq, H*dh], k / v [Lk, KVH*dh] in
+    PyTorch's [L, heads * d] rows, o [Lq, H*dh] likewise. groups: (r0, r1, n): query rows
+    r0 .. r1 - 1 see keys 0 .. n - 1 (a prefix-LM / causal mask as groups of rows). The keys
+    and values are quantized once into the kv scratch (sdpa's layout), each group's heads
+    then attend its first n keys (flash attention, attention._attend_heads)."""
+    from .compiler import Affine, k_scale_bytes
+    from .kernels.attention import _attend_heads
+    from .kernels.sdpa import up, LOG2E
+    from .kernels.vit import VitKV, vit_append
+    D = ol.block_size()
+    dp = up(dh, D)
+    Lk = k.shape[0]
+    cap = up(Lk, D)
+    R = ol.current().cfg.act_rows
+    base = Affine.of(kv.base)
+    heads, a = {}, 0
+    for g in range(KVH):
+        e = {}
+        for name, n in (("k", cap * dp), ("ks", cap * k_scale_bytes(dp, D)), ("vt", dp * cap),
+                        ("vs", 4 * cap)):
+            e[name] = base + a
+            a += n
+        a = up(a, 64)
+        heads[g] = e
+    cache = VitKV(heads, cap, dp, D, 1, 0, dv=dh)
+    kt = ol.zeros([R, dp])
+    vt = ol.zeros([R, dp])
+    for g in range(KVH):
+        for r0 in range(0, Lk, R):
+            n = min(R, Lk - r0)
+            ol.load(k[r0:r0 + n, g * dh:(g + 1) * dh], out=kt[0:n, 0:dh])
+            ol.load(v[r0:r0 + n, g * dh:(g + 1) * dh], out=vt[0:n, 0:dh])
+            vit_append(cache, g, r0, kt[0:n, :], vt[0:n, :])
+    del kt, vt
+    G = ol.mxu_columns()
+    rep = H // KVH
+    sc = scale * LOG2E
+    for r0g, r1g, nk in groups:
+        blk = min(block, up(nk, D))
+        for r0 in range(r0g, r1g, G):
+            n = min(G, r1g - r0)
+            qt = ol.zeros([H * n, dp])
+
+            def qh(h, r0=r0, n=n, qt=qt):
+                t = qt[h * n:(h + 1) * n, :]
+                ol.load(q[r0:r0 + n, h * dh:(h + 1) * dh], out=t[:, 0:dh])
+                return t
+            out = ol.empty([n, H * dh])
+
+            def emit(i, acc, den, out=out):
+                out[:, i * dh:(i + 1) * dh].set(acc[:, 0:dh] * ol.recip(den)[:, None])
+            _attend_heads([lambda h=h: qh(h) for h in range(H)], cache,
+                          [h // rep for h in range(H)], nk, blk, sc, emit=emit)
+            ol.store(o[r0:r0 + n, :], out)
+            del out, qt
+
+
+def _attn_op():
+    def attention(self, q: DT, k: DT, v: DT, H: int, KVH: int, dh: int, groups,
+                  scale: float | None = None, o: DT | None = None, per_prog: int = 4,
+                  name: str = "attn") -> DT:
+        """Masked GQA attention as programs of `per_prog` row groups each (every program
+        quantizes the keys again: the scratch is its own)."""
+        from .kernels.sdpa import kv_words
+        o = o or self.tensor(q.L, H * dh)
+        kv = self.alloc(4 * kv_words(KVH, k.L, dh, self.D))
+        kvt = Tensor(kv, (kv_words(KVH, k.L, dh, self.D),), (1,))
+        groups = [tuple(int(x) for x in gr) for gr in groups]
+        for i in range(0, len(groups), per_prog):
+            self.op(f"{name}.{i // per_prog}", attention_k, q=q.rows(), k=k.rows(), v=v.rows(),
+                    o=o.rows(), kv=kvt, H=H, KVH=KVH, dh=dh,
+                    groups=tuple(groups[i:i + per_prog]),
+                    scale=dh ** -0.5 if scale is None else scale)
+        return o
+    Graph.attention = attention
+
+
+_attn_op()
+
+
+# ---------------------------------------------------------------- transformer pieces
+@ol.jit
+def rope_k(x, cos, sin, y, H: int, dh: int):
+    """Rotate-half RoPE per head: x [L, H*dh] (PyTorch's rows), cos / sin [L, dh / 2] (the
+    rows' positions' tables): first half x1 cos - x2 sin, second x2 cos + x1 sin."""
+    L = x.shape[0]
+    h2 = dh // 2
+    R = max(1, min(L, ol.current().cfg.act_rows))
+    t = ol.empty([R, H * dh])
+    for r0 in range(0, L, R):
+        n = min(R, L - r0)
+        v = t[0:n, :]
+        ol.load(x[r0:r0 + n, :], out=v)
+        c, s = ol.load(cos[r0:r0 + n, :]), ol.load(sin[r0:r0 + n, :])
+        for h in range(H):
+            x1 = v[:, h * dh:h * dh + h2]
+            x2 = v[:, h * dh + h2:(h + 1) * dh]
+            a = x1 * c - x2 * s
+            x2.set(x2 * c + x1 * s)
+            x1.set(a)
+            del a
+        ol.store(y[r0:r0 + n, :], v)
+        del c, s
+
+
+@ol.jit
+def axpy_k(x, v, y, a: float):
+    """y = x + a v (an Euler step)."""
+    t = ol.load(x)
+    u = ol.load(v)
+    t.set(t + u * a)
+    ol.store(y, t)
+
+
+@ol.jit
+def scale_k(x, y, a: float):
+    t = ol.load(x)
+    t.set(t * a)
+    ol.store(y, t)
+
+
+def _tf_ops():
+    from .kernels import eltwise as E
+
+    def rms_norm(self, x: DT, w, eps: float, y: DT | None = None, name="rms_norm") -> DT:
+        y = y or self.tensor(x.L, x.C)
+        self.op(name, E.rms_norm, x=x.rows(), w=self.vec(w), y=y.rows(), M=x.L, N=x.C, eps=eps)
+        return y
+
+    def layer_norm(self, x: DT, w, b, eps: float, y: DT | None = None, name="layer_norm") -> DT:
+        y = y or self.tensor(x.L, x.C)
+        self.op(name, E.layer_norm, x=x.rows(), w=self.vec(w), b=self.vec(b), y=y.rows(),
+                M=x.L, N=x.C, eps=eps)
+        return y
+
+    def rope(self, x: DT, H: int, dh: int, positions, base: float = 10000.0,
+             name="rope") -> DT:
+        """In place (SmolVLA's apply_rope: radians = position / base^(2i / dh))."""
+        pos = np.asarray(positions, np.float64)[:, None]
+        ts = base ** ((2.0 / dh) * np.arange(dh // 2, dtype=np.float32))
+        rad = (pos.astype(np.float32) / ts[None, :]).astype(np.float32)
+        c = self.tensor(x.L, dh // 2)
+        s = self.tensor(x.L, dh // 2)
+        self.consts.append((c.addr, np.cos(rad).astype(np.float32)))
+        self.consts.append((s.addr, np.sin(rad).astype(np.float32)))
+        self.op(name, rope_k, x=x.rows(), cos=c.rows(), sin=s.rows(), y=x.rows(), H=H, dh=dh)
+        return x
+
+    def scale(self, x: DT, a: float, y: DT | None = None, name="scale") -> DT:
+        y = y or x
+        self.op(name, scale_k, x=x.rows(), y=y.rows(), a=float(a))
+        return y
+
+    def axpy(self, x: DT, v: DT, a: float, name="axpy") -> DT:
+        self.op(name, axpy_k, x=x.rows(), v=v.rows(), y=x.rows(), a=float(a))
+        return x
+
+    def mul(self, a: DT, b: DT, y: DT | None = None, name="mul") -> DT:
+        y = y or self.tensor(a.L, a.C)
+        self.op(name, binary_k, a=a.rows(), b=b.rows(), y=y.rows(), op="mul")
+        return y
+
+    def add_row(self, x: DT, row: Tensor, name="add_row") -> DT:
+        self.op(name, binary_k, a=x.rows(), b=row, y=x.rows(), op="add", brow=True)
+        return x
+
+    def copy_view(self, src: Tensor, dst: Tensor, name="copy") -> None:
+        self.op(name, copy_k, x=src, y=dst)
+
+    Graph.rms_norm, Graph.layer_norm, Graph.rope, Graph.scale, Graph.axpy = \
+        rms_norm, layer_norm, rope, scale, axpy
+    Graph.mul, Graph.add_row, Graph.copy_view = mul, add_row, copy_view
+
+
+_tf_ops()
+
+
+@ol.jit
+def copies_k(src, dst, moves: tuple, width: int):
+    """Row moves in one program: (source row, destination row, destination column) of `width`
+    words each, src / dst [rows, cols] views (a pixel shuffle, a prefix's assembly)."""
+    t = ol.empty([1, width])
+    for sr, dr, dc in moves:
+        ol.load(src[sr:sr + 1, 0:width], out=t)
+        ol.store(dst[dr:dr + 1, dc:dc + width], t)
+
+
+def _copy_rows():
+    def copy_rows(self, src: Tensor, dst: Tensor, moves, width: int, per_prog: int = 1500,
+                  name="copies"):
+        moves = [tuple(int(v) for v in m) for m in moves]
+        for i in range(0, len(moves), per_prog):
+            self.op(f"{name}.{i // per_prog}", copies_k, src=src, dst=dst,
+                    moves=tuple(moves[i:i + per_prog]), width=width)
+    Graph.copy_rows = copy_rows
+
+
+_copy_rows()

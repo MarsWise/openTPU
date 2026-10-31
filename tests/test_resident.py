@@ -160,3 +160,75 @@ def test_resident_ops_rtl(have_verilator):
             drams, _, _ = rtlsim.run(c, [p], [im.copy()], axi=True, stall=30, seed=i)
             np.testing.assert_array_equal(drams[0], ref, err_msg=name)
             im = ref
+
+
+@pytest.mark.parametrize("H,KVH,dh", [(4, 2, 64), (3, 1, 32)])
+def test_masked_attention_groups(H, KVH, dh):
+    rng = np.random.default_rng(H)
+    Lq, Lk, P = 12, 20, 8
+    q = rng.normal(size=(Lq, H * dh)).astype(np.float32)
+    k = rng.normal(size=(Lk, KVH * dh)).astype(np.float32)
+    v = rng.normal(size=(Lk, KVH * dh)).astype(np.float32)
+    # rows 0..3 see the 7-key prefix-LM block, row 4 all 8 prefix keys, then causal suffix rows
+    groups = [(0, 4, 7), (4, 5, 8)] + [(r, r + 1, P + r - 4) for r in range(5, Lq)]
+    g = RG.Graph(cfg())
+    qt, kt, vt = g.tensor(Lq, H * dh), g.tensor(Lk, KVH * dh), g.tensor(Lk, KVH * dh)
+    o = g.attention(qt, kt, vt, H, KVH, dh, groups)
+    got, = run(g, [(qt, q), (kt, k), (vt, v)], [o])
+    want = np.zeros_like(got)
+    for r0, r1, n in groups:
+        for h in range(H):
+            gq = h // (H // KVH)
+            s = q[r0:r1, h * dh:(h + 1) * dh] @ k[:n, gq * dh:(gq + 1) * dh].T * dh ** -0.5
+            p = np.exp(s - s.max(1, keepdims=True))
+            p /= p.sum(1, keepdims=True)
+            want[r0:r1, h * dh:(h + 1) * dh] = p @ v[:n, gq * dh:(gq + 1) * dh]
+    assert rel(got, want) < 0.03, rel(got, want)
+
+
+def test_smolvla_resident_tiny():
+    """SmolVLA (vision, connector, prefix layers, 10 Euler steps of the expert) on the device
+    against the policy's own float sample_actions."""
+    pytest.importorskip("lerobot")
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from smolvla_run import inputs, tiny_policy
+    from opentpu import smolvla_resident as SR
+    pol, pc = tiny_policy(0)
+    imgs, masks, toks, lmask, state, noise = inputs(pc, 0, 1000)
+    with torch.no_grad():
+        ref = pol.model.sample_actions(imgs, masks, toks, lmask, state,
+                                       noise=noise.clone())[0].numpy()
+    vla = SR.build(pol, cfg(), toks[0].numpy())
+    img = vla.image([i[0].numpy() for i in imgs], state[0].numpy(), noise[0].numpy())
+    img, _ = RG.run_isa(vla.g.cfg, vla.programs(), img)
+    assert rel(vla.actions(img), ref) < 0.03
+
+
+def test_resident_transformer_ops_rtl(have_verilator):
+    """Masked attention (prefix-LM + causal groups), RoPE, RMSNorm, row moves: RTL == ISA."""
+    import dataclasses
+    from opentpu import rtlsim
+    from opentpu.isasim import Machine
+    rng = np.random.default_rng(9)
+    g = RG.Graph(cfg())
+    x = g.tensor(10, 128)
+    n = g.rms_norm(x, np.ones(128), 1e-5)
+    q = g.linear(n, rng.normal(0, .1, (128, 128)), None)
+    k = g.linear(n, rng.normal(0, .1, (64, 128)), None)
+    g.rope(q, 4, 32, np.arange(10))
+    g.rope(k, 2, 32, np.arange(10))
+    o = g.attention(q, k, k, 4, 2, 32, [(0, 6, 6), (6, 7, 7)] + [(r, r + 1, r + 1)
+                                                               for r in range(7, 10)])
+    y = g.tensor(4, 256)
+    g.copy_rows(o.rows(), y.rows(), [(9, 0, 128), (0, 3, 0), (5, 1, 64)], 64)
+    img = g.image()
+    g.put(img, x, rng.normal(size=(10, 128)))
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=1 << max(20, (len(img) - 1).bit_length()))
+    img = np.pad(img, (0, c.DRAM_BYTES - len(img)))
+    for i, (name, p) in enumerate(g.compile()):
+        ref = Machine(c, [p], [img.copy()]).run().slices[0].dram
+        drams, _, _ = rtlsim.run(c, [p], [img.copy()], axi=True, stall=30, seed=i)
+        np.testing.assert_array_equal(drams[0], ref, err_msg=name)
+        img = ref
