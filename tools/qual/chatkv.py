@@ -126,6 +126,7 @@ def main(argv=None) -> int:
     cyc_on = a.backend != "isa"            # the ISA simulator counts no cycles
     rec: list = []
     chat = Chat(eng, tok, a.think, recording(rec, eng), a.max_new, clock_mhz=mhz)
+    chat.host_first = True                 # each turn's first-token logits to the recording pick
     print(f"{path.name} {eng.image.wformat} head {eng.image.head_format}, {a.backend}"
           f"{f' {mhz:g} MHz' if mhz else ''}, cap {a.cap}, think {a.think}, mtp {chat.use_mtp}, "
           f"stateful {eng.stateful}, snapshots "

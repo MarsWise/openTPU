@@ -109,8 +109,12 @@ def _moe_card():
 
 
 def _greedy_chat(eng) -> Chat:
-    return Chat(eng, Tok(), False,
-                sampler(0, 0, 1.0, None, softcap=getattr(eng.spec, "softcap", None)), N)
+    """The prefill's logits to the host's pick (host_first): these tests count the prompt's
+    prefill parts and their heads (a device-first turn feeds its last token on the card)."""
+    c = Chat(eng, Tok(), False,
+             sampler(0, 0, 1.0, None, softcap=getattr(eng.spec, "softcap", None)), N)
+    c.host_first = True
+    return c
 
 
 def _until_eos(tokens, eos):
@@ -343,6 +347,7 @@ def test_a_streamed_chat_rolls_back_to_the_reply(ckpt, formats, where, slots, mo
     assert eng.expert_major == (not slots)
     rec, tok = [], _QwenTok()
     chat = Chat(eng, tok, False, _recording(rec, getattr(eng.spec, "softcap", None)), N)
+    chat.host_first = True              # each turn's first-token logits to the recording pick
     stateful = fam != "gemma4"
     assert chat.on_card and eng.stateful == stateful
     assert (eng._snaps.base is None) == (where == "host") if stateful else eng._snaps is None
@@ -593,12 +598,13 @@ def test_the_scripted_chat_checks_a_run_against_its_reference(tmp_path, monkeypa
     assert chatmoe.main(argv + ["--check", str(tmp_path / "bad.json")]) == 1
     out = capsys.readouterr().out
     assert "[FAIL]" in out and "turn 2 from token 0" in out
-    # each turn's prompt calls: with 2 slots a layer layer-major (no room for expert-major)
-    assert [(c["rows"], c["em"]) for c in t1["calls"]] == [(6, False)]
+    # each turn's prompt calls: with 2 slots a layer layer-major (no room for expert-major);
+    # the prompt's last token is fed by the card's loop (device_first): 5 rows prefilled
+    assert [(c["rows"], c["em"]) for c in t1["calls"]] == [(5, False)]
     assert t1["calls"][0]["misses"] == t1["prefill_misses"] and not t1["calls"][0]["need_lines"]
     assert t1["calls"][0]["requests"] > 0 and t1["calls"][0]["serve_s"] > 0    # (the host's
     assert t1["calls"][0]["parts_s"] == 0                                       # time on them)
-    assert sum(c["rows"] for c in t2["calls"]) == t2["prompt_tokens"]
+    assert sum(c["rows"] for c in t2["calls"]) == t2["prompt_tokens"] - 1    # (its last: the card)
     # the pool's page cache around each call and turn (mincore: a fraction of its experts),
     # the reads by where they came from, a turn read from the disk marked cold
     assert ref["pool_gb"] > 0 and 0 <= ref["pool_at_load"] <= 1
@@ -608,21 +614,21 @@ def test_the_scripted_chat_checks_a_run_against_its_reference(tmp_path, monkeypa
         assert all(c["pool_before"] is None and c["reads"] for c in t["calls"])  # (no --pool-calls)
     assert 0 < sum(v[0] for c in t1["calls"] for v in c["reads"].values()) <= \
         sum(v[0] for v in t1["reads"].values())
-    # the DRAM filled, expert-major from 6 rows a call (--em-rows 6): the first turn's call,
-    # not the second's 4 rows; the same tokens as the 2-slot run's; --trace: each call's
+    # the DRAM filled, expert-major from 5 rows a call (--em-rows 5): the first turn's call
+    # (its 6 tokens less the last, which the card feeds), not the second's 3 rows; the same tokens as the 2-slot run's; --trace: each call's
     # server timeline (need lines, then requests)
-    full = [str(d), "--cfg", str(tmp_path / "cfg.pkl"), "--max-new", "5", "--em-rows", "6",
+    full = [str(d), "--cfg", str(tmp_path / "cfg.pkl"), "--max-new", "5", "--em-rows", "5",
             "--turn", "11 22 33 44 55 66", "--turn", "77 88 99",
             "--trace", str(tmp_path / "trace.json"), "--out", str(tmp_path / "em.json")]
     assert chatmoe.main(full + ["--check", str(tmp_path / "ref.json"), "--pool-calls"]) == 0
     r = json.loads((tmp_path / "em.json").read_text())
     assert all(0 <= c[k] <= 1 for t in r["turns"] for c in t["calls"]
                for k in ("pool_before", "pool_after"))       # (--pool-calls: each call's too)
-    assert r["expert_major"] and r["em_rows"] == 6
+    assert r["expert_major"] and r["em_rows"] == 5
     c1, c2 = (t["calls"] for t in r["turns"])
-    assert [(c["rows"], c["em"]) for c in c1] == [(6, True)] and c1[0]["need_lines"] > 0
+    assert [(c["rows"], c["em"]) for c in c1] == [(5, True)] and c1[0]["need_lines"] > 0
     assert c2 and not any(c["em"] or c["need_lines"] for c in c2)
-    assert "call: 6 rows expert-major" in capsys.readouterr().out
+    assert "call: 5 rows expert-major" in capsys.readouterr().out
     tr = json.loads((tmp_path / "trace.json").read_text())["calls"]
     assert [(c["rows"], c["em"]) for c in tr] == [(c["rows"], c["em"]) for c in c1 + c2]
     assert "n" in {e[2] for e in tr[0]["events"]} and "d" in {e[2] for e in tr[1]["events"]}

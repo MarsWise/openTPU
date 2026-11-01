@@ -763,7 +763,8 @@ def test_chat_decodes_on_the_device():
     shown = []
     reply, t = card.ask("hello there", lambda d, turn: shown.append(d))
     assert card._reply == ref[:16] and reply == "".join(shown) and t.end == "max_new"
-    assert t.gen_tokens == 16 and t.decode_steps == 15 and card.eng.pos == len(card.fed) == 26
+    # the first token is picked on the card too (device_first): every token a decode step
+    assert t.gen_tokens == 16 and t.decode_steps == 16 and card.eng.pos == len(card.fed) == 26
     card.resume()
     assert card._reply == ref[:32] and card.fed == host.fed[:len(card.fed)]
     j = next(j for j in range(33, 40) if ref[j] not in ref[32:j])
