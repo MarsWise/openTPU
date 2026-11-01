@@ -47,8 +47,10 @@ class _Lazy(dict):
 
 
 def main(argv):
+    perm = "--qk-permuted" in argv
+    argv = [a for a in argv if a != "--qk-permuted"]
     path, pieces = argv[0], argv[1:]
-    w = GL.GGUFLlama(path)
+    w = GL.GGUFLlama(path, qk_permuted=perm)
     spec = GL.spec_from_gguf(w)
     print(spec)
     vocab = w.g.kv["tokenizer.ggml.tokens"]

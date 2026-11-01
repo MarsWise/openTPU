@@ -3,9 +3,9 @@ Granite 4.2) as opentpu's qwen3.Spec (qk_norm False, llama.py's family) and weig
 Hugging Face names qwen3 reads, dequantized from any type opentpu/gguf.py knows (F32, F16,
 BF16, Q8_0, Q4_K, Q5_K, Q6_K). llama.cpp's converter permutes the q and k rows for its RoPE
 (LlamaModel.permute: within a head, the two halves interleaved); `unpermute` undoes it, so the
-rows are Hugging Face's (rotate_half). Refused: Granite's non-default multipliers this code has
-no field for (attention.scale other than 1/sqrt(head_dim), embedding / residual / logit
-scales other than 1), biases, unmapped tensors."""
+rows are Hugging Face's (rotate_half), when the file has them permuted (qk_permuted).
+Granite's attention multiplier is folded into the q rows; refused: its embedding / residual /
+logit scales other than 1, biases, unmapped tensors."""
 from __future__ import annotations
 
 import math
@@ -52,9 +52,9 @@ class GGUFLlama(Mapping):
                             ("logit_scale", 1.0)):
                 if abs(kv.get(k, want) - want) > 1e-12:
                     raise ValueError(f"granite {k} {kv[k]}: no such multiplier here")
-            if abs(kv.get("attention.scale", 1 / math.sqrt(d)) - 1 / math.sqrt(d)) > 1e-9:
-                raise ValueError(f"granite attention.scale {kv['attention.scale']} is not "
-                                 f"1/sqrt({d}): no attention multiplier here")
+        # Granite's attention multiplier s (scores q.k * s, not / sqrt(d)): folded into the q
+        # rows offline, q * s sqrt(d) (RoPE is linear: the scores are the same)
+        self.qscale = float(kv.get("attention.scale", 1 / math.sqrt(d))) * math.sqrt(d)
         self.nq, self.nkv = nq, kv["attention.head_count_kv"]
         self.tied = "output.weight" not in g.tensors
         self._where = {"model.embed_tokens.weight": "token_embd.weight",
@@ -84,6 +84,8 @@ class GGUFLlama(Mapping):
         gname = self._where[name]
         ti = self.g.tensors[gname]
         v = GG.dequant(self.g.raw(gname), ti.type).reshape(ti.shape[::-1])
+        if name.endswith("q_proj.weight") and self.qscale != 1.0:
+            v = v * np.float32(self.qscale)
         if self.qk_permuted and name.endswith("q_proj.weight"):
             v = unpermute(v, self.nq)
         elif self.qk_permuted and name.endswith("k_proj.weight"):
