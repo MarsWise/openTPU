@@ -242,3 +242,212 @@ def spec_from_hf(path):
     from dataclasses import replace
     from .qwen35 import Spec
     return replace(Spec.from_hf(path), native_bonsai=True, embed="f32", mix="", pair_loop=True)
+
+
+# --- PrismML's GGUF packs (llama.cpp fork, branch prism): PTQ1_0 / PQ2_0 / Q2_0 -----------------
+
+# GGUF blk.<i>.<name> -> (HF name under model.layers.<i>., transform)
+_GG = {"attn_norm.weight": ("input_layernorm.weight", "norm"),
+       "post_attention_norm.weight": ("post_attention_layernorm.weight", "norm"),
+       "attn_qkv.weight": ("linear_attn.in_proj_qkv.weight", None),
+       "attn_gate.weight": ("linear_attn.in_proj_z.weight", None),
+       "ssm_alpha.weight": ("linear_attn.in_proj_a.weight", None),
+       "ssm_beta.weight": ("linear_attn.in_proj_b.weight", None),
+       "ssm_out.weight": ("linear_attn.out_proj.weight", None),
+       "ssm_conv1d.weight": ("linear_attn.conv1d.weight", "conv"),
+       "ssm_a": ("linear_attn.A_log", "alog"),
+       "ssm_dt.bias": ("linear_attn.dt_bias", None),
+       "ssm_norm.weight": ("linear_attn.norm.weight", None),
+       "attn_q.weight": ("self_attn.q_proj.weight", None),
+       "attn_k.weight": ("self_attn.k_proj.weight", None),
+       "attn_v.weight": ("self_attn.v_proj.weight", None),
+       "attn_output.weight": ("self_attn.o_proj.weight", None),
+       "attn_q_norm.weight": ("self_attn.q_norm.weight", "norm"),
+       "attn_k_norm.weight": ("self_attn.k_norm.weight", "norm"),
+       "ffn_gate.weight": ("mlp.gate_proj.weight", None),
+       "ffn_up.weight": ("mlp.up_proj.weight", None),
+       "ffn_down.weight": ("mlp.down_proj.weight", None)}
+
+
+class GGUFWeights(Mapping):
+    """Bonsai 2 text weights from PrismML's GGUF (PTQ1_0, PQ2_0, Q2_0 with equal half-block
+    scales), under the HF names qwen35 reads, as RotatedWeights gives them: a ternary matrix
+    as its exact s * trit values in the Hadamard basis (the image repacks them losslessly), the
+    norms zero-centred (llama.cpp stores 1 + w; the DeltaNet gate norm as is), A_log from
+    llama.cpp's -exp(A_log), conv taps [C, 1, K]. `ternary(name)` gives a matrix's trits and
+    group-128 scales (the T5 / GSC operands, opentpu/llm/ptq1.py). With more DeltaNet value
+    than key heads the GGUF keeps llama.cpp's V-head order (value head h reads key head
+    h % nk): spec_from_gguf sets Spec.lin_tiled and the tensors stay as they are (out_proj's
+    columns are rotated in that order). Refused: other ternary types, a missing or
+    inconsistent Hadamard manifest, an untied head."""
+
+    def __init__(self, path):
+        from .. import gguf as GG
+        self.path = str(path)
+        self.g = g = GG.GGUF(path)
+        kv = g.kv
+        if kv.get("general.architecture") != "qwen35":
+            raise ValueError(f"{path}: architecture {kv.get('general.architecture')}, not qwen35")
+        if (kv.get("prism.hadamard.version") != 2
+                or kv.get("prism.hadamard.transform") != "normalized-sylvester-walsh-hadamard"
+                or kv.get("prism.hadamard.axis") != "input-last-dimension"
+                or kv.get("prism.hadamard.sign_mode") != "explicit"
+                or kv.get("prism.hadamard.tied_output") is not True):
+            raise ValueError("unsupported Prism Hadamard contract in the GGUF")
+        self.block = int(kv["prism.hadamard.block_size"])
+        nk, nv = kv["qwen35.ssm.group_count"], kv["qwen35.ssm.time_step_rank"]
+        if nv % nk:
+            raise ValueError(f"DeltaNet {nv} value heads over {nk} key heads")
+        widths, vals = kv["prism.hadamard.sign_widths"], kv["prism.hadamard.sign_values"]
+        if sum(widths) != len(vals) or not set(vals) <= {-1, 1}:
+            raise ValueError("Hadamard signs: widths and values disagree")
+        self._signs, o = {}, 0
+        for w in widths:
+            self._signs[w] = np.asarray(vals[o:o + w], np.float32)
+            o += w
+        self.rotated = set(kv["prism.hadamard.weight_names"])
+        self.inverse = set(kv["prism.hadamard.inverse_weight_names"])
+        if self.inverse != {"token_embd.weight"} or "output.weight" in g.tensors:
+            raise ValueError("only the tied head with an inverse-rotated embedding is supported")
+        self._where = {"model.embed_tokens.weight": "token_embd.weight",
+                       "lm_head.weight": "token_embd.weight",
+                       "model.norm.weight": "output_norm.weight"}
+        self._how = {"model.norm.weight": "norm"}
+        for n in g.tensors:
+            if not n.startswith("blk."):
+                continue
+            _, i, rest = n.split(".", 2)
+            if rest not in _GG:
+                raise ValueError(f"unmapped GGUF tensor {n}")
+            hf, how = _GG[rest]
+            self._where[f"model.layers.{i}.{hf}"] = n
+            self._how[f"model.layers.{i}.{hf}"] = how
+        for n in self.rotated:
+            ti = g.tensors[n]
+            if ti.type not in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) or ti.shape[0] not in self._signs:
+                raise ValueError(f"rotated {n}: type {ti.type}, input width {ti.shape[0]}")
+        for n, ti in g.tensors.items():
+            if ti.type in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) and n not in self.rotated | self.inverse:
+                raise ValueError(f"ternary {n} outside the Hadamard manifest")
+        self._small, self._big = {}, None
+
+    def ternary(self, gname: str):
+        """(trits [n, k] int8 in {-1, 0, 1}, scales [n, k / 128] fp32) of a GGUF matrix."""
+        from .. import gguf as GG
+        from . import ptq1 as P
+        ti = self.g.tensors[gname]
+        k, n = ti.shape
+        raw = self.g.raw(gname)
+        if ti.type == GG.PTQ1_0:
+            t, d = P.ptq1_trits(raw)
+        elif ti.type in (GG.PQ2_0, GG.Q2_0):
+            t, d = P.pq2_trits(raw, 128 if ti.type == GG.PQ2_0 else 64)
+            if np.any(t == 3):
+                raise ValueError(f"{gname}: reserved code 3")
+            if ti.type == GG.Q2_0:
+                d = d.reshape(-1, 2)
+                if not np.array_equal(d[:, 0], d[:, 1]):
+                    raise ValueError(f"{gname}: Q2_0 half-block scales differ (not group 128)")
+                d = d[:, 0]
+        else:
+            raise ValueError(f"{gname}: GGUF type {ti.type} is not ternary")
+        return (t.reshape(n, k).astype(np.int8) - 1), d.reshape(n, k // 128)
+
+    def _value(self, name):
+        from .. import gguf as GG
+        gname = self._where[name]
+        ti = self.g.tensors[gname]
+        if ti.type in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0):
+            t, s = self.ternary(gname)
+            n, k = t.shape
+            return (t.reshape(n, -1, 128) * s[..., None]).reshape(n, k).astype(np.float32)
+        if ti.type == GG.F32:
+            v = np.frombuffer(bytes(self.g.raw(gname)), np.float32).reshape(ti.shape[::-1])
+        elif ti.type == GG.F16:
+            v = np.frombuffer(bytes(self.g.raw(gname)), np.float16).reshape(ti.shape[::-1])
+        else:
+            raise ValueError(f"{gname}: GGUF type {ti.type}")
+        v = np.array(v, np.float32)
+        if not np.isfinite(v).all():
+            raise ValueError(f"nonfinite {gname}")
+        how = self._how.get(name)
+        if how == "norm":
+            v = v - np.float32(1)
+        elif how == "conv":
+            v = v[:, None, :]
+        elif how == "alog":
+            if np.any(v >= 0):
+                raise ValueError(f"{gname}: -exp(A_log) must be negative")
+            v = np.log(-v).astype(np.float32)
+        return v
+
+    def __getitem__(self, name):
+        if name in self._small:
+            return self._small[name]
+        if self._big is not None and self._big[0] == name:
+            return self._big[1]
+        v = self._value(name)
+        if v.nbytes <= 16 << 20:
+            self._small[name] = v
+        else:
+            self._big = (name, v)
+        return v
+
+    def embedding_rows(self, ids):
+        """Embedding rows in the model's basis (the inverse Hadamard of the stored rows)."""
+        from .. import gguf as GG
+        from . import ptq1 as P
+        ti = self.g.tensors["token_embd.weight"]
+        k = ti.shape[0]
+        ids = np.asarray(ids, np.int64)
+        nb, bb = k // 128, GG.BLOCK[ti.type][1]
+        raw = self.g.raw("token_embd.weight").reshape(-1, nb * bb)[ids].reshape(-1)
+        if ti.type == GG.PTQ1_0:
+            t, d = P.ptq1_trits(raw)
+        else:
+            t, d = P.pq2_trits(raw, 128 if ti.type == GG.PQ2_0 else 64)
+            d = d.reshape(-1, 128 // (128 if ti.type == GG.PQ2_0 else 64))[:, 0]
+        y = ((t.astype(np.float32) - 1) * d[:, None]).reshape(len(ids), k)
+        return hadamard(y, self.block, self._signs[k], inverse=True)
+
+    def embedding_table(self):
+        n = self.g.tensors["token_embd.weight"].shape[1]
+        k = self.g.tensors["token_embd.weight"].shape[0]
+        out = np.empty((n, k), np.float32)
+        for r in range(0, n, 4096):
+            out[r:r + 4096] = self.embedding_rows(np.arange(r, min(r + 4096, n)))
+        return out
+
+    def signs_for(self, width):
+        return self._signs[width]
+
+    def __iter__(self):
+        return iter(self._where)
+
+    def __len__(self):
+        return len(self._where)
+
+
+def spec_from_gguf(path_or_weights):
+    """qwen35.Spec of a Bonsai 2 GGUF (its qwen35.* keys; the layer kinds from its tensors)."""
+    from .qwen35 import ATTN, LIN, Spec
+    w = path_or_weights if isinstance(path_or_weights, GGUFWeights) else GGUFWeights(path_or_weights)
+    kv, t = w.g.kv, w.g.tensors
+    L = kv["qwen35.block_count"]
+    kinds = tuple(ATTN if f"blk.{i}.attn_q.weight" in t else LIN for i in range(L))
+    every = kv.get("qwen35.full_attention_interval")
+    if every and kinds != tuple(ATTN if (i + 1) % every == 0 else LIN for i in range(L)):
+        raise ValueError("layer kinds disagree with full_attention_interval")
+    d = kv["qwen35.attention.key_length"]
+    nv = kv["qwen35.ssm.time_step_rank"]
+    return Spec(hidden=kv["qwen35.embedding_length"], kinds=kinds,
+                n_q=kv["qwen35.attention.head_count"], n_kv=kv["qwen35.attention.head_count_kv"],
+                head_dim=d, rope_dim=kv["qwen35.rope.dimension_count"], lin_heads=nv,
+                lin_dk=kv["qwen35.ssm.state_size"], lin_dv=kv["qwen35.ssm.inner_size"] // nv,
+                ffn=kv["qwen35.feed_forward_length"], vocab=t["token_embd.weight"].shape[1],
+                conv_k=kv["qwen35.ssm.conv_kernel"],
+                eps=kv["qwen35.attention.layer_norm_rms_epsilon"],
+                theta=kv["qwen35.rope.freq_base"], tied=True,
+                eos=(kv.get("tokenizer.ggml.eos_token_id", 248046), 248044),
+                lin_kheads=kv["qwen35.ssm.group_count"], embed="f32", mix="", pair_loop=True,
+                native_bonsai=True, lin_tiled=nv != kv["qwen35.ssm.group_count"])

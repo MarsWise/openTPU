@@ -144,6 +144,8 @@ class Spec:
                             # draft head) and two slots of every DeltaNet state and convolution
                             # window for the speculative verify (opentpu/llm/mtp.py, docs/mtp.md 9)
     native_bonsai: bool = False  # exact packed weights + VPU Hadamard; native GSC firmware
+    lin_tiled: bool = False # DeltaNet value head h reads key head h % lin_nk (llama.cpp's GGUF
+                            # order, "tiled"), not h // (lin_heads / lin_nk) (HF's, "grouped")
 
     @property
     def layers(self) -> int:
@@ -152,6 +154,18 @@ class Spec:
     @property
     def lin_nk(self) -> int:
         return self.lin_kheads or self.lin_heads
+
+    def key_head(self, h: int) -> int:
+        """The DeltaNet key head of value head h (lin_tiled: llama.cpp's order)."""
+        nk = self.lin_nk
+        return h % nk if self.lin_tiled else h // (self.lin_heads // nk)
+
+    def kv_repeat(self, a, axis: int):
+        """Key-head rows [.., nk, ..] -> one per value head, along axis, in this order."""
+        r = self.lin_heads // self.lin_nk
+        if self.lin_tiled:
+            return np.concatenate([a] * r, axis=axis)
+        return np.repeat(a, r, axis=axis)
 
     def mlp_prefix(self, p: str) -> str:
         """The checkpoint prefix of layer prefix p's dense MLP (Qwen3.5-MoE: the shared
@@ -284,8 +298,8 @@ def reference_logits(spec: Spec, W: dict, tokens, hidden: bool = False):
             pad = np.concatenate([np.zeros((K - 1, qkv.shape[1]), f32), qkv])
             y = _silu(sum(pad[j:j + T] * w[:, j] for j in range(K)))
             q, k, v = np.split(y, [nk * dk, 2 * nk * dk], axis=1)
-            q = np.repeat(_l2norm(q.reshape(T, nk, dk)) / f32(math.sqrt(dk)), nh // nk, axis=1)
-            k = np.repeat(_l2norm(k.reshape(T, nk, dk)), nh // nk, axis=1)
+            q = spec.kv_repeat(_l2norm(q.reshape(T, nk, dk)) / f32(math.sqrt(dk)), 1)
+            k = spec.kv_repeat(_l2norm(k.reshape(T, nk, dk)), 1)
             v = v.reshape(T, nh, dv)
             z = (h @ W[a + "in_proj_z.weight"].T).reshape(T, nh, dv)
             beta = 1 / (1 + np.exp(-(h @ W[a + "in_proj_b.weight"].T)))
@@ -470,8 +484,8 @@ def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "i
                 wc = W[a + "conv1d.weight"][:, 0, :]
                 y = _silu(sum(win[j] * wc[:, j] for j in range(K)))
                 q, k, v = np.split(y, [nk * dk, 2 * nk * dk])
-                q = np.repeat(_l2norm(q.reshape(nk, dk)) / math.sqrt(dk), nh // nk, axis=0)
-                k = np.repeat(_l2norm(k.reshape(nk, dk)), nh // nk, axis=0)
+                q = spec.kv_repeat(_l2norm(q.reshape(nk, dk)) / math.sqrt(dk), 0)
+                k = spec.kv_repeat(_l2norm(k.reshape(nk, dk)), 0)
                 v = v.reshape(nh, dv)
                 z = (w(a + "in_proj_z.weight") @ h).reshape(nh, dv)
                 beta = 1 / (1 + np.exp(-(w(a + "in_proj_b.weight") @ h)))
@@ -732,7 +746,11 @@ class Image(EmbedHost):
         self.C = 2 * dk + dv                            # convolved channels per head (q, k, v)
         self.R = self.C + dv                            # projected rows per head (and z)
         rk = spec.lin_heads // spec.lin_nk
-        self.shared = rk % 2 == 0 if spec.qk_share is None else spec.qk_share
+        self.shared = rk % 2 == 0 and not spec.lin_tiled if spec.qk_share is None \
+            else spec.qk_share
+        if self.shared and spec.lin_tiled and rk > 1:
+            raise ValueError("tiled DeltaNet heads: a pair's two value heads read different key "
+                             "heads (no shared q and k)")
         if self.shared and rk % 2:
             raise ValueError(f"{rk} value heads per key head: a pair shares its q and k only "
                              "when they are even")
@@ -1021,10 +1039,11 @@ class Image(EmbedHost):
                 a = p + "linear_attn."
                 qkv, wz = W[a + "in_proj_qkv.weight"], W[a + "in_proj_z.weight"]
                 wout = W[a + "out_proj.weight"]
-                # the convolved channels of head h: the q and k rows of its key head h // rk
+                # the convolved channels of head h: the q and k rows of its key head
+                # (spec.key_head: h // rk, or h % nk tiled)
                 # (a key head's rows repeat for each of its value heads), its v rows
-                chans = [np.r_[h // rk * dk:(h // rk + 1) * dk,
-                               NK + h // rk * dk:NK + (h // rk + 1) * dk,
+                chans = [np.r_[spec.key_head(h) * dk:(spec.key_head(h) + 1) * dk,
+                               NK + spec.key_head(h) * dk:NK + (spec.key_head(h) + 1) * dk,
                                2 * NK + h * dv:2 * NK + (h + 1) * dv]
                          for h in range(spec.lin_heads)]
                 taps = W[a + "conv1d.weight"][:, 0, :]                   # [channels, K]
