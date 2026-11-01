@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 import tomllib
 
@@ -58,6 +60,36 @@ def main() -> int:
         raise AssertionError("Unexpected source commit; update the source pin and this check")
     if "128*m*0.13333" not in page:
         raise AssertionError("Check MXU ceiling calculation; update this test on change")
+
+    deep_path = ROOT / "docs/silicon-explorer/deep.html"
+    deep = deep_path.read_text(encoding="utf-8")
+    deep_markup, sep, deep_tail = deep.partition("<script>")
+    if not sep or "</script>" not in deep_tail:
+        raise AssertionError("Deep explorer missing inline script")
+    deep_ids = re.findall(r'\bid="([^"]+)"', deep_markup)
+    if len(deep_ids) != len(set(deep_ids)):
+        raise AssertionError("Duplicate Deep Explorer IDs")
+    deep_script = deep_tail.partition("</script>")[0]
+    deep_refs = re.findall(r'\$\("([^"]+)"\)', deep_script)
+    missing_deep = sorted(set(deep_refs).difference(deep_ids))
+    if missing_deep:
+        raise AssertionError("Missing deep UI controls: " + ", ".join(missing_deep))
+    if '55b975c14346cc692f1765729d750d79e8bc0b04' not in deep_script:
+        raise AssertionError("Deep explorer pinned commit changed; verify source and update checker")
+    for key in ('DSP48E1','TMM','TMEM','CHASH','Full adder','LUT6','CMOS NAND'):
+        if key not in deep:
+            raise AssertionError("Deep explorer is missing subsystem " + key)
+    smoke = ROOT / "docs/silicon-explorer/smoke.mjs"
+    if not smoke.is_file():
+        raise AssertionError("Deep explorer smoke test not found")
+    if shutil.which("node"):
+        result = subprocess.run(["node", str(smoke)], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError("Node deep smoke failed:\n" + result.stdout + "\n" + result.stderr)
+        print(result.stdout.strip())
+    else:
+        print("NOTE: node not installed; run node docs/silicon-explorer/smoke.mjs when available")
+    print(f"PASS: deep atlas {len(deep_ids)} IDs, {len(deep_refs)} ID references, pinned RTL source")
 
     print(f"PASS: {len(declared_ids)} IDs, {len(referenced_ids)} DOM references")
     print("PASS: FPGA target, board parameters, source paths and pinned architecture")
