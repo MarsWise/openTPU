@@ -28,7 +28,11 @@ the KV context, updated while the reply streams; /stats adds DRAM, session total
 The model runs on the device, the prompt several tokens per run (Engine.prefill_chunks; a
 dense model's from programs at run-time positions, compiled once per bucket: docs/prefill.md)
 and the reply token by token; the host only tokenizes, looks up the embedding rows, applies the
-chat template and samples from the logits. A checkpoint without a chat template (a base model,
+chat template and samples from the logits. With the decode loop on the device (resident, greedy
+or the device's sampler) the loop picks every token of a reply, its first too: the prompt's
+last token is fed by the loop instead of the prefill (Chat.device_first; --host-first-token:
+the prefill's logits to the host's pick); --strict-fpga-only refuses whatever the host would
+still compute (sampling's uniforms, MTP's first token). A checkpoint without a chat template (a base model,
 which continues the text instead of answering) is refused unless --raw. The KV cache stays in
 device DRAM across turns; a turn feeds what its rendering of the conversation does not share
 with what the device holds: the new message, and the last reply again where the template
@@ -310,6 +314,7 @@ class Turn:
     context: int = 0                  # KV positions filled
     reused: int = 0                   # KV positions kept from the earlier turns
     restarted: bool = False           # nothing kept: the whole history fed again
+    first_on_device: bool = False     # the reply's first token picked by the card's loop
     end: str = ""
     mtp_iters: int = 0                # MTP's verify iterations (--mtp)
     mtp_accepted: int = 0             # ... whose draft was accepted
@@ -456,6 +461,8 @@ class Chat:
         self.session = Session()
         self.last: Turn | None = None
         self._next = None                   # logits after a reply cut at max_new (resume())
+        self.host_first = False             # the prefill's logits to the host's pick (device_first)
+        self.strict_first = False           # a turn whose first token the host would pick fails
         self._reply: list[int] = []         # the last reply's tokens
         self.mtp = None                     # an MTP engine's decoder (opentpu/llm/mtp.py)
         self.images: list = []              # the conversation's images (minicpmv.ImageInput)
@@ -598,9 +605,24 @@ class Chat:
         if self.use_mtp:
             logits = self._prefill_mtp(ids, n, turn, t0, on_update, stop, at, vis)
         else:
-            cut = [at] if at is not None and at < len(ids) else []
-            for a, b in zip([n] + cut, cut + [len(ids)]):
-                kw = {} if b == len(ids) else {"logits": False}     # up to the snapshot: no head
+            # the device picks the first token (device_first): the prompt's last token is not
+            # prefilled but fed by the card's decode loop (Engine.generate_card), whose LM head
+            # picks the reply's first token there; no logits reach the host (as otpu-serve's
+            # _prefill). The snapshot then goes before that token at the latest.
+            first = self.device_first(ids, n, vis)
+            if self.strict_first and not first:
+                self.history.pop()
+                raise RuntimeError("strict FPGA-only: this turn's first token would be picked "
+                                   "on the host (Chat.device_first)")
+            end = len(ids) - 1 if first else len(ids)
+            if at is not None and not n < at <= end:
+                at = None
+            cut = [at] if at is not None and at < end else []
+            for a, b in zip([n] + cut, cut + [end]):
+                if a >= b:
+                    continue
+                # up to the snapshot, or before a last token the device feeds: no head
+                kw = {} if b == len(ids) else {"logits": False}
                 if vis is not None:
                     kw["vis"] = vis[a - n:b - n]
                 for part, logits in self.eng.prefill_chunks(ids[a:b], **kw):
@@ -617,6 +639,10 @@ class Chat:
                     break
                 if self.eng.pos == at:
                     self._snapshot()
+            if first and not turn.end:
+                logits = int(ids[-1])       # (an int: a token to feed, _decode_card)
+                turn.first_on_device = True
+                turn.prefill_tokens += 1    # (the prompt's, fed by the loop's first step)
         reply = self._decode(logits, [], turn, t0, on_update, stop)
         self.history.append({"role": "assistant", "content": reply})
         self.session.add(turn)
@@ -647,6 +673,18 @@ class Chat:
         sp = getattr(self.pick, "params", None)
         return bool(getattr(self.pick, "greedy", False)) or (sp is not None
                                                              and G.Sampling.fits(**sp))
+
+    def device_first(self, ids, n: int, vis=None) -> bool:
+        """The reply's first token is picked on the device: the decode loop runs on the card
+        (on_card), the prompt has a token to feed at a run-time position of the loop (past
+        the engine's first run-time position: Engine._conv_lo) and that token is text (an
+        image token's input is its vision row, which only the prefill takes). Off with
+        host_first (the earlier behaviour: the prefill's logits to the host's pick)."""
+        if self.host_first or not self.on_card or len(ids) <= n:
+            return False
+        if len(ids) - 1 < getattr(self.eng, "_conv_lo", 0):
+            return False
+        return vis is None or int(vis[len(ids) - 1 - n]) < 0
 
     @property
     def use_mtp(self) -> bool:
@@ -1044,7 +1082,15 @@ def main(argv=None):
                          "print where each stage runs (opentpu/llm/placement.py); does not "
                          "guarantee FPGA-only prefill token selection or random generation")
     ap.add_argument("--strict-fpga-only", action="store_true",
-                    help="require the entire numerical generation pipeline on the FPGA")
+                    help="require the entire numerical generation pipeline on the FPGA: "
+                         "--strict-fpga, and the first token of every reply picked by the "
+                         "device's loop; greedy only (sampling's uniforms come from the "
+                         "host until the device has an RNG), no --mtp (its prefill picks the "
+                         "first token on the host)")
+    ap.add_argument("--host-first-token", action="store_true",
+                    help="pick each reply's first token on the host from the prefill's "
+                         "logits (the earlier behaviour; by default the device's decode loop "
+                         "feeds the prompt's last token and picks it)")
     ap.add_argument("--wformat", default=FM.AUTO,
                     choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", "ternary_gsc", FM.MIX],
                     help="weight format of the layers (docs/quant.md; fp4 needs a bitstream "
@@ -1100,9 +1146,8 @@ def main(argv=None):
                           "for: spin (the default), sleep S seconds, or predict each gap "
                           "(docs/offload.md 10.10): less host CPU, the same speed on Gen2")
     a = ap.parse_args(argv)
-    if a.strict_fpga_only:
-        ap.error("strict FPGA-only execution is unavailable: chat normally picks the first "
-                 "prefill token on the host and sampled decoding uses host-generated uniforms")
+    if a.strict_fpga_only and a.host_first_token:
+        ap.error("--strict-fpga-only: the first token on the device, not --host-first-token")
     if a.top_p is not None and not 0 <= a.top_p <= 1:     # (Hugging Face's range)
         ap.error(f"--top-p {a.top_p}: 0 .. 1 (0 keeps the most likely token only)")
     path = model_dir(a.model)
@@ -1209,13 +1254,19 @@ def main(argv=None):
     if a.mtp and not chat.use_mtp:
         print("otpu-chat: --mtp: these sampling settings stay on the host; plain decode",
               flush=True)
-    if a.strict_fpga:
+    chat.host_first = a.host_first_token
+    if a.strict_fpga or a.strict_fpga_only:
         from opentpu.llm import placement as PL
-        print("placement:\n" + PL.report(eng, chat.on_card), flush=True)
-        bad = PL.strict_errors(eng, chat.on_card)
+        sampled = not getattr(pick, "greedy", False)
+        kw = dict(first=not (a.host_first_token or chat.use_mtp), sampled=sampled,
+                  penalty=sampled and sp["repetition_penalty"] not in (None, 1.0))
+        print("placement:\n" + PL.report(eng, chat.on_card, **kw), flush=True)
+        # --strict-fpga: the stages of the model; --strict-fpga-only: and the token's pick
+        bad = PL.strict_errors(eng, chat.on_card, **(kw if a.strict_fpga_only else {}))
         if bad:
-            raise SystemExit("otpu-chat: --strict-fpga: the host would compute: "
-                             + "; ".join(bad))
+            flag = "--strict-fpga-only" if a.strict_fpga_only else "--strict-fpga"
+            raise SystemExit(f"otpu-chat: {flag}: the host would compute: " + "; ".join(bad))
+        chat.strict_first = a.strict_fpga_only
     chat.max_slices = a.max_slices
     if not chat.use_mtp:                # the decode loop's bucket programs ahead, in the
         from opentpu.host import gen_warm as GW     # background (opentpu/host/gen_warm.py)

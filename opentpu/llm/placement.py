@@ -9,9 +9,15 @@ from __future__ import annotations
 DEVICE, MOVE, HOST = "device", "host-move", "host"
 
 
-def placement(eng, on_card: bool) -> list[tuple[str, str, str]]:
+def placement(eng, on_card: bool, first: bool = True, sampled: bool = False,
+              penalty: bool = False) -> list[tuple[str, str, str]]:
     """[(stage, where, how)] for an engine; on_card: the decode loop runs on the device
-    (Engine.generate_card: greedy or the device's sampler), else the host picks each token."""
+    (Engine.generate_card: greedy or the device's sampler), else the host picks each token.
+    With the loop on the device: first, the loop picks a reply's first token too (its last
+    prompt token fed by the loop: chat.Chat.device_first, otpu-serve's _prefill), else the
+    host picks it from the prefill's logits; sampled, the sampler's uniforms (the host's
+    generator: the device has no RNG yet); penalty, the repetition penalty's factors of the
+    prompt's ids (written by the host; the device adds its own tokens')."""
     img = eng.image
     out = []
     if not getattr(eng, "device_inputs", False):
@@ -37,17 +43,26 @@ def placement(eng, on_card: bool) -> list[tuple[str, str, str]]:
     if on_card:
         out.append(("token selection (decode loop)", DEVICE,
                     "Engine.generate_card: ARGMAX / the device's sampler"))
+        out.append(("first token of a reply", DEVICE if first else HOST,
+                    "the loop feeds the prompt's last token and picks it" if first else
+                    "the host reads the prefill's logits and picks it"))
+        if sampled:
+            out.append(("sampling uniforms", HOST, "the host's random generator (no RNG on "
+                        "the device yet: V_RAND)"))
+        if sampled and penalty:
+            out.append(("repetition penalty of the prompt", HOST, "the host writes R and 1/R "
+                        "for the context's ids"))
     else:
         out.append(("token selection", HOST, "the host reads the logits and samples"))
     return out
 
 
-def strict_errors(eng, on_card: bool) -> list[str]:
+def strict_errors(eng, on_card: bool, **kw) -> list[str]:
     """The stages strict FPGA mode refuses: those the host computes."""
-    return [f"{s}: {how}" for s, w, how in placement(eng, on_card) if w == HOST]
+    return [f"{s}: {how}" for s, w, how in placement(eng, on_card, **kw) if w == HOST]
 
 
-def report(eng, on_card: bool) -> str:
-    rows = placement(eng, on_card)
+def report(eng, on_card: bool, **kw) -> str:
+    rows = placement(eng, on_card, **kw)
     w = max(len(s) for s, _, _ in rows)
     return "\n".join(f"  {s:<{w}}  {where:<9}  {how}" for s, where, how in rows)

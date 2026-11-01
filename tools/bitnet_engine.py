@@ -12,7 +12,9 @@ Usage: python tools/bitnet_engine.py MODEL_DIR [--backend board|isa] [--dev /dev
             arguments, the embedding / RoPE rows from tables in the image: a step writes no
             inputs and compiles nothing; the prompt in runs of several rows (prompt runs)
   generate  resident, and the greedy loop on the card (ARGMAX, the token fed back, HALT
-            CHAIN): one device run for all the tokens, no logits read by the host
+            CHAIN): one device run for all the tokens, no logits read by the host; the
+            prompt's last token is fed by the loop, which picks the first token too
+            (--host-first-token or --save: the host picks it from the prompt's logits)
 The prompt is fed token by token in step / pipeline, then greedy decoding.
 --save writes ids / first-token logits / tokens like tools/bitnet_generate.py --save, so
 tools/bitnet_compare.py compares it with tools/bitnet_hf_reference.py's HF transformers run.
@@ -41,6 +43,11 @@ def main():
                          "MM PAIR at M = 1 on a bitstream with CAPS bit5, half the head's time)")
     ap.add_argument("--mode", default="generate",
                     choices=("step", "pipeline", "resident", "generate"))
+    ap.add_argument("--host-first-token", action="store_true",
+                    help="--mode generate: pick the first token on the host from the prompt's "
+                         "logits (the earlier behaviour; also with --save, which keeps them). "
+                         "By default the card's loop feeds the prompt's last token and picks "
+                         "the first token too: no logits reach the host")
     a = ap.parse_args()
     import dataclasses
     from tokenizers import Tokenizer
@@ -82,18 +89,27 @@ def main():
         raise SystemExit("--mode generate: the backend does not run the generate loop "
                          "(CAPS GEN) or the image has no resident tables")
     t0 = time.time()
-    if resident:                            # prompt runs, then the last token's logits
+    # the first token on the card: the prompt but its last token, which the loop feeds
+    dev_first = a.mode == "generate" and not (a.host_first_token or a.save) and len(ids) > 1
+    if dev_first:
+        for _ in eng.prefill_chunks(ids[:-1], logits=False):
+            pass
+        first = None
+    elif resident:                          # prompt runs, then the last token's logits
         logits = None
         for _, lg in eng.prefill_chunks(ids):
             logits = lg if lg is not None else logits
     else:
         for t in ids:
             logits = eng.step(t)
-    first = logits.copy()
+    if not dev_first:
+        first = logits.copy()
     t_pre = time.time() - t0
     n0 = len(eng.stats)
     out, t1 = [], time.time()
-    if a.mode == "generate":                # the loop on the card: the first token from the
+    if dev_first:                           # every token picked on the card
+        out = eng.generate_card(ids[-1], a.tokens, stop_ids=[])
+    elif a.mode == "generate":              # the loop on the card: the first token from the
         out = [int(np.argmax(logits))]      # prompt's logits, then N - 1 picked on the card
         out += eng.generate_card(out[0], a.tokens - 1, stop_ids=[])
     else:
@@ -108,8 +124,9 @@ def main():
     dec = [s.get("cycles", 0) for s in eng.stats[n0:] if isinstance(s, dict)]
     core = getattr(eng.backend, "info", {}).get("core_khz", 133333)
     if dec and a.mode == "generate":
-        per = sum(dec) / max(len(out) - 1, 1)
-        print(f"card cycles: {sum(dec)} in {len(dec)} run(s) for {len(out) - 1} tokens = "
+        k = len(out) - (0 if dev_first else 1)    # (the tokens the runs picked)
+        per = sum(dec) / max(k, 1)
+        print(f"card cycles: {sum(dec)} in {len(dec)} run(s) for {k} tokens = "
               f"{per:.0f} a token = {per / core:.1f} ms at {core / 1000:.2f} MHz")
     elif dec:
         print(f"card cycles a step: median {int(np.median(dec))} = "

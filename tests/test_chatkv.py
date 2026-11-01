@@ -387,11 +387,39 @@ def test_chat_turns_roll_back_to_the_reply(case, card, think):
         assert turn.prefill_tokens == len(ids) - reused
         ref = make(plain=True)
         want = ref.prefill(ids)
-        assert np.array_equal(_bits(rec[-1]), _bits(want)), i
+        # the card's loop picks the first token (Chat.device_first; MTP's prefill: the host)
+        assert turn.first_on_device == (card and not mtp), i
+        if not turn.first_on_device:
+            assert np.array_equal(_bits(rec[-1]), _bits(want)), i
         assert chat._reply == [x for x in _greedy(ref, want, 6) if x not in spec.eos], i
         start = len(tok.apply_chat_template(chat.history[:-1], False, think, True)) + \
             len(f"{tok.S}assistant\n")
-    assert len(rec) == len(MESSAGES) and (rollbacks == 4 if not think else rollbacks < 4)
+    assert len(rec) == (0 if card and not mtp else len(MESSAGES))
+    assert rollbacks == 4 if not think else rollbacks < 4
+
+
+def test_chat_first_token_on_the_card_or_the_host():
+    """The loop on the card picks a reply's first token (Chat.device_first: the prompt's last
+    token fed by Engine.generate_card, no logits to the host) and the reply is the host's
+    pick's, the prefill's greedy decode; host_first keeps the earlier path (the prefill's
+    logits to the host's pick). strict_first refuses a turn the host would pick for."""
+    W, spec, cfg = _model("qwen3")
+    tok = _QwenTok()
+    for host_first in (False, True):
+        rec = []
+        eng = Engine(spec, W, cap=512, cfg=cfg, resident=True, prompt_runs=True, snapshots=1)
+        chat = Chat(eng, tok, False, _recording(rec), 6)
+        chat.host_first = host_first
+        reply, turn = chat.ask(MESSAGES[0])
+        ids = tok.apply_chat_template(chat.history[:-1], True, False, True)
+        assert turn.first_on_device != host_first and len(rec) == host_first
+        assert turn.prefill_tokens == len(ids)
+        ref = Engine(spec, W, cap=512, cfg=cfg)
+        assert chat._reply == [x for x in _greedy(ref, ref.prefill(ids), 6)
+                               if x not in spec.eos]
+    chat.strict_first = True                # (host_first: this turn's pick is the host's)
+    with pytest.raises(RuntimeError, match="first token"):
+        chat.ask(MESSAGES[1])
 
 
 @pytest.mark.parametrize("case", ["qwen3", "qwen35"])

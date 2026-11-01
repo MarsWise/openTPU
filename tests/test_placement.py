@@ -34,3 +34,20 @@ def test_per_position_inputs_are_refused(tiny):
     bad = PL.strict_errors(eng, on_card=False)
     assert any(b.startswith("token embedding") for b in bad)
     assert "host" in PL.report(eng, False)
+
+
+def test_first_token_and_sampling_are_stages(tiny):
+    """The loop on the device: the reply's first token is the device's only when the loop
+    feeds the prompt's last token (first); sampling's uniforms and the prompt's penalty
+    factors are the host's until the device has an RNG (otpu-chat --strict-fpga-only)."""
+    W, spec = tiny
+    cfg = device_config(spec, 256, rows=PREFILL_ROWS, lookup=True, S=1)
+    eng = Engine(spec, W, cap=256, cfg=cfg, resident=True)
+    where = {s: w for s, w, _ in PL.placement(eng, True)}
+    assert where["first token of a reply"] == PL.DEVICE
+    bad = PL.strict_errors(eng, True, first=False)
+    assert len(bad) == 1 and bad[0].startswith("first token of a reply")
+    bad = PL.strict_errors(eng, True, sampled=True, penalty=True)
+    assert [b.split(":")[0] for b in bad] == ["sampling uniforms",
+                                             "repetition penalty of the prompt"]
+    assert PL.strict_errors(eng, True, sampled=True, penalty=False)[0].startswith("sampling")
