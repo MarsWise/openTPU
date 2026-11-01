@@ -1,107 +1,154 @@
-# openTPU Silicon Explorer
+# Inside openTPU — interactive hardware atlas (v2)
 
-**[Open the full interactive Deep Silicon Atlas](deep.html)**: hierarchical navigation from board → slice → systolic column → 16-position DSP chain → individual DSP48E1 signals, plus VPU reduction, ternary arithmetic, physical DDR channel mapping and a DRAM-limited inference estimator. **[Open the earlier overview interface](index.html)** for the original blocks-and-metrics view.
+**[Open the primary single-file interactive website: index.html](index.html)**
 
-An **independently authored, standalone interactive architecture atlas** of openTPU, written from the actual openTPU RTL, board target configuration, documentation and dated FPGA benchmark measurements.
+This is an independently authored interactive exploration of the **actual openTPU architecture** based on the pinned NextGen hardware source, not an Esperanto ET-SoC-1 clone with its labels replaced.
 
-The goal is an educational and engineering companion to `otpu-lens`:
+Source snapshot: \`MarsWise/openTPU@55b975c14346cc692f1765729d750d79e8bc0b04\` on the \`feature/nextgen-hardware-first-vla-bitnet-vllm\` branch.
 
-- **Silicon Explorer** explains the structure of the hardware and points to the real SystemVerilog source for each component.
-- **otpu-lens** visualizes a measured/simulated workload trace, cycle-by-cycle, with utilization, stalls, dataflow and timing.
+Publication branch: **\`docs/opentpu-atlas-v2\`**. No changes were made to the running accelerator, working NextGen feature branch, main branch or the original author’s repositories. No upstream PR was opened.
 
-## Open it
+## Launch it
 
-Download `deep.html` (full deep zoom) or `index.html` (classic overview) and open it in a local browser. There are **no dependencies, server, internet requirements or build steps**.
+- **One file:** Download [index.html](index.html) using GitHub Raw/Download and open it in a modern browser. It includes HTML, CSS and JavaScript inline, with no internet access or dependencies required after saving.
+- **Maintainable version:** [atlas.html](atlas.html) with adjacent [atlas.css](atlas.css) and [atlas.js](atlas.js) serves the same frontend and can be modified more conveniently.
+- **If GitHub Pages is enabled:** Publish the appropriate directory on the \`docs/opentpu-atlas-v2\` branch or copy this directory to a configured site. Creating source files alone does not activate Pages.
+- **Older prototypes:** [classic.html](classic.html) and [deep.html](deep.html) are retained as archives.
 
-GitHub's ordinary source viewer does not execute HTML. To make a public page, configure GitHub Pages or another static file host to serve this directory. No deployment was enabled automatically.
+## What was studied in the original author’s ET-SoC-1 project
 
-## Sections
+Author’s original [ET-SoC-1 interactive chip diagram](https://spacesheep.dev/@yaroslavvb/et-soc1-chip-diagram) and its original [committed HTML report](https://github.com/yaroslavvb/et-soc1-prototyping/blob/main/docs/reports/2026-09-27-et-soc1-chip-diagram.html).
 
-1. **Chip** — interactive YPCB-00338 board and channels, PCIe/XDMA, control, trace and slice.
-2. **Slice** — sequencer/scoreboard, DMA, MXU, VPU, quantizer, ACT RAM, TMEM, collective and DRAM adapter.
-3. **Systolic MXU** — m4/m8 selection; 128 positions per column; eight 16-position groups; arithmetic upper bounds and core dataflow.
-4. **Vector unit** — eight lanes, two composite lanes, supported operation families.
-5. **Memory** — live 8-way TMEM address-to-bank decoder and board memory hierarchy.
-6. **ISA / dataflow** — step between actual processing units for MM/LD/VOP/QACT/GATHER/TMM.
-7. **Benchmarks** — device and wall decode and measured DDR traffic from README; separate BitNet measured results and unverified research work.
-8. **RTL sources** — pinned deep links to the implementation and verification documents.
+The author’s project has a coherent feature system, not independent cards:
 
-The separate [Deep Silicon Atlas](deep.html) extends these views with 512 selectable INT8 PE positions, DSP48E1 input/product/accumulator details, deep zoom to logical memory and processor internals, a full-adder and CMOS NAND educational microscope, a LUT6 truth-table calculator, configurable switching-energy equation, ternary arithmetic, and DRAM interleaving formulas.
+| Interaction pattern found in original | openTPU Atlas v2 equivalent |
+|---|---|
+| One hierarchical diagram that changes with zoom | A single SVG architecture stage with nested source-backed components |
+| Click to inspect; double-click/Enter to zoom | Same interaction across all hierarchy nodes |
+| Source-backed contextual panel with forward/up paths | Detailed inspector with facts, provenance, pinned RTL links and zoom actions |
+| Twelve step-by-step flows (load, latency, link, matmul, FMA, etc.) | Twelve **openTPU-specific** dataflows, not reusing ET-SoC-1 names/claims |
+| Stage play/pause, previous/next, speed | Stage chips, play/pause, 0.5×/1×/2×, progress captions |
+| Camera follows flow | Follow/manual mode; direct hierarchy navigation and pan/zoom |
+| Guided tour with 18 slides | 18 chapters covering board → PE → FPGA logic → verification |
+| Hierarchy from system to chip and circuits to physics | Host, board, FPGA, slice, MXU, 512 logical PE positions, DSP register paths, LUT/CMOS/atom **textbook** continuation |
+| Inline sources / measured-versus-inferred notes | Each block explicitly identifies whether sourced, measured, derived, or conceptual |
+| Responsive and keyboard-driven interface | Works on desktop and mobile, keyboard shortcuts, shareable deep links |
+| Performance and experiment context | Hardware-tied BitNet FPGA measurements, arithmetic ceilings and real otpu-lens profile import |
 
-All diagrams are **logical**, not Vivado routed placement, and all interconnect paths are illustrative rather than an RTL-simulation output.
+No original source code, web assets, photos, hand-authored text or visual artwork from that work were reproduced. The user-facing design, data model and SVG drawings are new.
 
-## The source snapshot
+## Actual architecture represented
 
-The explorer's RTL links pin to the feature branch commit:
+\`\`\`text
+Host, programming + driver
+ └─ PCIe Gen2 ×8 / XDMA → YPCB-00338
+     ├─ Kintex-7 XC7K480T (core at 133.33 MHz)
+     │   ├─ FPGA shell: control, trace, clocks, native DRAM, CHASH
+     │   ├─ openTPU slice (S=1)
+     │   │   ├─ Sequencer / IMEM / scoreboard / dispatch
+     │   │   ├─ DMA (LD, ST, stream)
+     │   │   ├─ MXU: D128 × MCOLS4; 4 columns
+     │   │   │   ├─ weights & scales from DDR3
+     │   │   │   ├─ each column → 8 × 16 PE chains = 128 DSP48E1 PEs
+     │   │   │   │   └─ PE: A/D, INMODE, BREG, multiplier M, ALU P, PCIN/PCOUT
+     │   │   │   ├─ MXCE: nine DSPs / column end, exact 48-bit accumulation
+     │   │   │   └─ ternary TMM and GSC experimental variants
+     │   │   ├─ VPU: 8 FP32 lanes; 2 long composite lanes
+     │   │   ├─ QUANT → ACT RAM
+     │   │   ├─ TMEM: 65,536 × FP32; 8 banks, arbitration, bypass
+     │   │   └─ Collective BAR/GATHER (general RTL; only one board slice)
+     │   └─ Technology concepts: DSP48E1 / LUT6 / CARRY4 / BRAM / FF
+     └─ 2 × 2 GiB DDR3-1066, 64 data bits each
+\`\`\`
 
-`55b975c14346cc692f1765729d750d79e8bc0b04`
+The deeper physical branch continues through textbook NAND/MOSFET, silicon crystal, atom and subnuclear structures. This is for explanation of scale **only**: it is not an extracted Xilinx gate-level or transistor-level floorplan.
 
-Source branch: `feature/nextgen-hardware-first-vla-bitnet-vllm`. This documentation is built in a **separate** branch: `docs/opentpu-silicon-explorer`. No synthesizable RTL, `main`, or the user's existing feature branch was modified. No PR is created.
+## Twelve dataflows
 
-Primary facts:
+1. **Boot / load:** host → PCIe → shell → program loader → IMEM → dispatcher.
+2. **DDR stream:** channel mapping → bridge → arbiter → prefetch → reuse → output.
+3. **INT8 matmul:** QACT → ACT RAM → chunk FIFO → four columns → 16-DSP chain → column end → TMEM.
+4. **BitNet / TMM:** ternary packing → decode → DSP → GSC → M=1/M=16 effective utilization.
+5. **FP4 weights:** compressed storage → scale read → integer MXU → FP32 numerical epilogue.
+6. **Quantization:** FP32 scratchpad → bank grant → QACT → scale → ACT RAM.
+7. **FP32 vector:** TMEM → VPU lanes → separate rounded multiply and add → optional reduction → TMEM.
+8. **Attention math:** compiler/scoreboard → matmul → reductions → composite functions → local memory.
+9. **Bank conflict:** TMEM → same bank → arbiter → forwarding → 2× BRAM implementation.
+10. **Resident decode:** reusing programs → sequencer → device argmax → HALT/CHAIN → token result.
+11. **Host ↔ PCIe:** host → XDMA → DDR bridge → address mapping → completion/counters.
+12. **One DSP bit:** column → group → PE → registered inputs → DSP multiplier → P accumulator → PCOUT → textbook logic boundary.
 
-| Field | Value | Where it comes from |
+The stage animation conveys **functional steps**, not real cycle latency. See the native profile support below for measured traces.
+
+## Real trace support: \`.otpuprof\`
+
+Use the \`Open .otpuprof / .json\` control near the bottom of the page. All file processing is local in the browser.
+
+- The file format is gzip-compressed JSON, \`{"format":"openTPU-profile","version":1,"profiles":[...]}\`; browser-native \`DecompressionStream("gzip")\` is used for gzip (supported in modern Chrome/Edge/Firefox).
+- Each valid dynamic \`instrs\` entry includes \`slice\`, \`pc\`, \`unit\`, \`name\`, \`detail\`, \`dispatch\`, \`start\`, \`end\` and source.
+- The atlas orders instructions by their **actual recorded start cycles**, shows their true cycle ranges and instruction metadata, and highlights the associated functional hardware.
+- This is **instruction-start stepping**, not a false promise of per-cycle reconstructed internal activity; for genuine timeline, stalls, hardware floorplan playback and quantitative counters use [otpu-lens](../../docs/lens.md) / \`python3 -m opentpu.lens open run.otpuprof\`.
+- Profile imports are bounded and reject unrecognized or newer schema.
+
+Example:
+
+\`\`\`sh
+python3 -m opentpu.lens record mlp attn -o run.otpuprof
+python3 -m opentpu.lens info run.otpuprof
+\`\`\`
+
+## Numbers and provenance
+
+| Field | Value | Kind |
 |---|---:|---|
-| Board | Inspur YPCB-00338, Kintex-7 XC7K480T | `targets/ypcb-00338.toml`, `docs/board.md` |
-| Number of slices on board | 1 | `targets/ypcb-00338.toml` |
-| MXU depth D | 128 | same |
-| Default MXU columns | 4 | same; m8 is a separate variant |
-| VPU lanes | 8 | same |
-| VPU composite lanes | 2 | same, `rtl/vpu/otpu_vpu.sv` |
-| Logical TMEM | 65,536 FP32 words, 256 KiB | target + `rtl/mem/otpu_tmem.sv` |
-| ACT RAM base INT8 payload | 16 × 128 × 128 = 262,144 bytes (additional scale data not included) | target + `rtl/mem/otpu_actram.sv` |
-| DDR3 | two 2 GiB channels at 1066 MT/s | target + `docs/board.md` |
-| Theoretical DDR3 bandwidth | 17.056 GB/s | derived, 2 channels × 8 bytes per transfer × 1066 million transfers/s |
-| Core clock | 133.33 MHz | target, not a measurement newly produced by this diagram |
-| MXU m4 arithmetic ceiling | 512 integer products/cycle or ~68.3 GMAC/s | derived, D × MCOLS × clock |
-| MXU m8 arithmetic ceiling | 1,024 integer products/cycle | derived; does **not** certify timing closure or deployed bitstream |
+| Default FPGA | Kintex-7 XC7K480T-2 | Target configuration |
+| DRAM | 2 × 2 GiB DDR3-1066 | Target configuration |
+| Core frequency | 133.33 MHz | Build target; not newly measured |
+| D / MCOLS / LANES | 128 / 4 / 8 | Target configuration |
+| TMEM logical capacity | 65,536 FP32 words, 256 KiB | Target configuration |
+| TMEM banks | 8, word address % 8 | RTL |
+| ACT RAM raw INT8 payload | 16 × 128 × 128 = 256 KiB | Derived (excluding scale record) |
+| Nominal raw DDR bandwidth | 17.056 GB/s | Derived, **not** sustained bandwidth |
+| INT8 matrix arithmetic ceiling | 512 MAC/cycle | Derived from D × MCOLS, **not** model throughput |
+| TMM M=1 | 127.7 MAC/cycle / 34.1 GOPS | Dated **physical FPGA measurement** |
+| TMM M=16 | 511.6 MAC/cycle / 136.4 GOPS | Dated **physical FPGA measurement** |
+| BitNet 2B4T device decode | 145.8 ms/token | Dated **physical FPGA measurement** |
+| Same run including host | 271.5 ms/token | Dated physical FPGA + host |
 
-**Do not conflate** GMAC/s with GOPS: 1 integer MAC is often counted as two operations (multiply plus add), whereas the displayed MXU arithmetic ceiling is in products/MACs.
+Reference [target](../../targets/ypcb-00338.toml) and [BitNet test log](../nextgen/BITNET_COMPAT.md). Some relative paths above are relative to this directory: the live UI always links to the pinned commit and precise project paths.
 
-Published mainline benchmark values are transcribed from `README.md`, whose dated runs and their device-versus-wall measurement protocol apply. These results are not guaranteed for a newer bitstream or a different card.
+### Important distinctions
 
-**BitNet** values are from `docs/nextgen/BITNET_COMPAT.md`: 145.8 ms/token on-device and 271.5 ms/token wall in a specified 2026-10-20 30-layer host-driven FPGA test; TMM 16×2048×1024 is 511.6 MAC/cycle / 136.4 GOPS (board measurement). This is a different test configuration from the general README leaderboard and does not represent a guaranteed current board speed. **Bonsai** and **SmolVLA** research status is not promoted to physical-device verified without evidence.
+- One signed INT8 multiply plus add can be counted as 2 operations, but the described \`MAC/cycle\` is a different unit from \`GOPS\`.
+- OpenTPU's staged \`otpu_fmadd\` rounds the multiply and add separately. It is **not** the ET-SoC-1's true fused FP32 FMA pipeline.
+- \`m8\` is a build variant, not a claim that the currently flashed \`m4\` FPGA has eight MXU columns.
+- \`GSC\`, \`TPAIR\`, \`TQUAD\` and model integration status depend on capabilities and exact firmware/bitstream.
+- All lower-than-RTL gate/cell drawings are **textbook**, and no placed Xilinx DSP/BRAM or detailed transistor masks are invented.
 
-## Keeping the explorer honest
+## Controls
 
-Every time the architecture changes:
-1. Read `targets/ypcb-00338.toml` and the relevant RTL headers.
-2. Update the numbers and block descriptions in `index.html`; preserve explicit distinctions between targets and real bitstreams.
-3. Update the `SNAP` constant and `ROOT` pin in the script to the source commit verified.
-4. If benchmarks changed, cite the benchmark method, date, build ID and exact model.
-5. Run `python3 docs/silicon-explorer/check.py` from the repository root. This is a static/source consistency check, **not** a functional RTL simulation.
-6. For dynamic execution, continue to use `otpu-lens`; do not generate fake performance or activity animations.
+- **Click / tap:** inspect a part.
+- **Double-click / Enter:** descend one level.
+- **Breadcrumb or ↑ Zoom out:** navigate upward.
+- **Drag and wheel:** pan/zoom the current drawing.
+- **1–9, 0, B, M:** launch one of 12 flows.
+- **Space, arrows:** pause/play and advance stages.
+- **T:** 18-chapter guided tour.
+- **S, C, P, F:** speed, camera-follow toggle, panel toggle and fullscreen.
+- **Copy link:** share the current view, flow and stage through the URL hash.
+- **Search:** any part or individual DSP \`col3g7pe15\`.
 
-## Future enhancements
+## Reproduce checks
 
-- A generated machine-readable architecture manifest extracted from `target.py`, SystemVerilog parameters and module hierarchy.
-- Import `.otpuprof` or delegate trace playback to the existing Lens app (subject to its profile format).
-- Actual Vivado `util_hier.rpt`, timing reports, pblock routing and post-route snapshots (with hardware provenance).
-- Drill into DSP48E1 internal mappings, integer reductions, TMEM arbitration and GSC packed weight format; distinguish RTL behavior from physical logic.
-- Multi-target variants: BCU1525 VU9P and ASIC flows as separately verified profiles.
+\`\`\`sh
+node docs/silicon-explorer/atlas.test.mjs
+python3 docs/silicon-explorer/verify_atlas.py
+\`\`\`
 
-## Attribution and licensing
+The tests validate the frontend module state and source references against the pinned configuration. They do not certify Vivado routing, resource use, FPGA power or visual rendering in every browser.
 
-This document uses technical facts from this repository and names the external ET-SoC-1 visualization as inspiration. **No source HTML, media, deep zoom or visual assets are copied** from the original `yaroslavvb/et-soc1-prototyping` site. A public source file without an explicit reuse license should not be republished verbatim as our own.
+## Developing the interactive site
 
-This is an independently authored visualization, **not** a hardware accelerator implementation, silicon floorplan, HDL synthesis tool or real-time telemetry display.
+Edit \`atlas.html\`, \`atlas.css\`, and \`atlas.js\`. Bundle these into standalone \`index.html\` by inserting the CSS into a \`<style>\` element, then placing the JavaScript just before \`</body>\`. Keep the source revision pinned unless the architecture and numerical data have been re-reviewed.
 
-## Deep Atlas provenance, implementation and boundaries
-
-- The interactive tree contains **512 logical PE positions** for the m4 target (4 columns × 8 groups × 16 products) and describes their DSP48E1 A/D input selection, BREG, multiplier M, PCIN→P/PCOUT accumulators. It does not fabricate a transistor-level netlist or physical routing.
-- Source-based memory explorations: TMEM bank = word address mod 8; DDR3 native adapter assigns 64-byte beats to channel (beat mod 2) XOR parity(chunk) when CHASH is enabled (see pinned RTL source).
-- Real measured BitNet board runs are listed separately from theoretical peak arithmetic and from the hypothetical weight-bandwidth roofline.
-- The UI contains a conceptual instruction flow navigator, not a fake trace; the existing `otpu-lens` profile viewer remains the authoritative cycle activity viewer.
-- Source links in the page are pinned to commit `55b975c14346cc692f1765729d750d79e8bc0b04`, not the moving feature branch.
-- Deep HTML is dependency-free. It works locally without a service worker, network, third-party scripts or backend. It is not yet deployed through GitHub Pages.
-
-## Test the deep site
-
-Run from the repository root:
-
-```sh
-python3 docs/silicon-explorer/check.py
-node docs/silicon-explorer/smoke.mjs
-```
-
-The Python check validates source/target consistency, UI element IDs and referenced files. When Node is installed it also runs the zero-dependency frontend smoke test. The smoke test exercises page startup, deep navigation to an individual DSP multiplier, signed INT8 arithmetic, invalid ternary weights, bank address decoding, LUT truth-table evaluation and a full-adder. It **does not** replace visual testing in Chrome/Firefox, accessibility audit, source-level simulation, FPGA board measurements or Vivado timing.
+The original [classic.html](classic.html), [deep.html](deep.html), and [README_legacy.md](README_legacy.md) are kept for reference only. **\`index.html\` is the primary product.**
