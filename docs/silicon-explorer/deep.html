@@ -149,7 +149,7 @@ function link(id,path){const e=$(id);e.href=REPO+path;return e}
 $("revision").textContent=SHA.slice(0,12);
 const tabs=[["explore","Deep zoom"],["dsp","DSP48E1"],["ternary","Ternary"],["memory","Memory"],["vpu","VPU"],["flow","Dataflow"],["performance","Performance"],["sources","RTL sources"]];
 function navigate(tab){if(!$(tab))tab="explore";document.querySelectorAll(".page").forEach(p=>p.classList.toggle("active",p.id===tab));document.querySelectorAll(".navbtn").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));if(location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);window.scrollTo(0,0);if(tab==="explore")render();}
-tabs.forEach(t=>{let b=el("button","navbtn",t[1]);b.dataset.tab=t[0];b.onclick=()=>navigate(t[0]);$("nav").append(b)});addEventListener("hashchange",()=>navigate(location.hash.slice(1)||"explore"));navigate(location.hash.slice(1)||"explore");
+tabs.forEach(t=>{let b=el("button","navbtn",t[1]);b.dataset.tab=t[0];b.onclick=()=>navigate(t[0]);$("nav").append(b)});addEventListener("hashchange",()=>navigate(location.hash.slice(1)||"explore"));
 const tree=new Map(),add=(id,parent,title,desc,source,tag="rtl",facts=[],note="",refs=[])=>{tree.set(id,{id,parent,title,desc,source,tag,facts,note,refs,children:[]});if(parent){const p=tree.get(parent);if(!p)throw Error("Missing parent "+parent);p.children.push(id)}};
 add("chip",null,"openTPU Kintex-7","One physical YPCB-00338 FPGA card with host PCIe, two DDR3 channels and an openTPU compute slice.","targets/ypcb-00338.toml","rtl",[["FPGA","XC7K480T"],["Memory","4 GiB DDR3"],["Core","133.33 MHz"],["Host","PCIe Gen2 x8"]],"Clock, physical routing and dies cannot be inferred from the logical block diagram.");
 add("host","chip","Host / PCIe","User-space driver, model packing, kernels, register and DMA access.","opentpu/host/board.py","rtl",[["PCIe target","Gen2 ×8"],["Interface","XDMA / AXI"]],"Negotiated PCIe width depends on the actual board and slot.");
@@ -308,6 +308,7 @@ const sources=[
 ["ISA simulator","opentpu/isasim.py","Bit-exact interpretation"]
 ];
 sources.forEach(s=>{const c=el("div","block",""),a=el("a","",s[0]);a.href=REPO+s[1];a.target="_blank";a.rel="noopener noreferrer";c.append(a,el("p","meta",s[2]),el("code","readme",s[1]));$("sourceGrid").append(c)});
+navigate(location.hash.slice(1)||"explore");
 })();
 </script>
 </body>
