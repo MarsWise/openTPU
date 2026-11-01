@@ -56,7 +56,7 @@ def main(argv):
     grouped = "--grouped" in argv           # (the check of the V-head order: HF's instead)
     argv = [a for a in argv if a != "--grouped"]
     path, pieces = argv[0], argv[1:]
-    w = B.GGUFWeights(path)
+    w = B.GGUFWeights(path, allow_unverified=True)
     spec = B.spec_from_gguf(w)
     if grouped:
         spec = dataclasses.replace(spec, lin_tiled=False)

@@ -277,11 +277,11 @@ class GGUFWeights(Mapping):
     llama.cpp's -exp(A_log), conv taps [C, 1, K]. `ternary(name)` gives a matrix's trits and
     group-128 scales (the T5 / GSC operands, opentpu/llm/ptq1.py). With more DeltaNet value
     than key heads the GGUF keeps llama.cpp's V-head order (value head h reads key head
-    h % nk): spec_from_gguf sets Spec.lin_tiled and the tensors stay as they are (out_proj's
-    columns are rotated in that order). Refused: other ternary types, a missing or
+    h % nk) or not: unverified, refused unless allow_unverified (Spec.lin_tiled is the tiled
+    order's switch). Refused: other ternary types, a missing or
     inconsistent Hadamard manifest, an untied head."""
 
-    def __init__(self, path):
+    def __init__(self, path, allow_unverified: bool = False):
         from .. import gguf as GG
         self.path = str(path)
         self.g = g = GG.GGUF(path)
@@ -298,6 +298,12 @@ class GGUFWeights(Mapping):
         nk, nv = kv["qwen35.ssm.group_count"], kv["qwen35.ssm.time_step_rank"]
         if nv % nk:
             raise ValueError(f"DeltaNet {nv} value heads over {nk} key heads")
+        if nv != nk and not allow_unverified:
+            # Bonsai 2 4B / 9B (32 value heads over 16, gdn_v_grouped): the fp32 reference gives
+            # no sensible next token with the grouped, the tiled or a mixed head order yet
+            # (tools/bonsai2_gguf_check.py); 2B (16 over 16) is checked
+            raise ValueError(f"Bonsai 2 GGUF with {nv} DeltaNet value heads over {nk} key heads: "
+                             "its head order is not verified yet (only the 2B is)")
         widths, vals = kv["prism.hadamard.sign_widths"], kv["prism.hadamard.sign_values"]
         if sum(widths) != len(vals) or not set(vals) <= {-1, 1}:
             raise ValueError("Hadamard signs: widths and values disagree")
