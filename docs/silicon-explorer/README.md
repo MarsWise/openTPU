@@ -1,5 +1,7 @@
 # openTPU Silicon Explorer
 
+**[Open the full interactive Deep Silicon Atlas](deep.html)**: hierarchical navigation from board → slice → systolic column → 16-position DSP chain → individual DSP48E1 signals, plus VPU reduction, ternary arithmetic, physical DDR channel mapping and a DRAM-limited inference estimator. **[Open the earlier overview interface](index.html)** for the original blocks-and-metrics view.
+
 An **independently authored, standalone interactive architecture atlas** of openTPU, written from the actual openTPU RTL, board target configuration, documentation and dated FPGA benchmark measurements.
 
 The goal is an educational and engineering companion to `otpu-lens`:
@@ -9,7 +11,7 @@ The goal is an educational and engineering companion to `otpu-lens`:
 
 ## Open it
 
-Download `index.html` and open it in a local browser. There are **no dependencies, server, internet requirements or build steps**.
+Download `deep.html` (full deep zoom) or `index.html` (classic overview) and open it in a local browser. There are **no dependencies, server, internet requirements or build steps**.
 
 GitHub's ordinary source viewer does not execute HTML. To make a public page, configure GitHub Pages or another static file host to serve this directory. No deployment was enabled automatically.
 
@@ -81,3 +83,12 @@ Every time the architecture changes:
 This document uses technical facts from this repository and names the external ET-SoC-1 visualization as inspiration. **No source HTML, media, deep zoom or visual assets are copied** from the original `yaroslavvb/et-soc1-prototyping` site. A public source file without an explicit reuse license should not be republished verbatim as our own.
 
 This is an independently authored visualization, **not** a hardware accelerator implementation, silicon floorplan, HDL synthesis tool or real-time telemetry display.
+
+## Deep Atlas provenance, implementation and boundaries
+
+- The interactive tree contains **512 logical PE positions** for the m4 target (4 columns × 8 groups × 16 products) and describes their DSP48E1 A/D input selection, BREG, multiplier M, PCIN→P/PCOUT accumulators. It does not fabricate a transistor-level netlist or physical routing.
+- Source-based memory explorations: TMEM bank = word address mod 8; DDR3 native adapter assigns 64-byte beats to channel (beat mod 2) XOR parity(chunk) when CHASH is enabled (see pinned RTL source).
+- Real measured BitNet board runs are listed separately from theoretical peak arithmetic and from the hypothetical weight-bandwidth roofline.
+- The UI contains a conceptual instruction flow navigator, not a fake trace; the existing `otpu-lens` profile viewer remains the authoritative cycle activity viewer.
+- Source links in the page are pinned to commit `55b975c14346cc692f1765729d750d79e8bc0b04`, not the moving feature branch.
+- Deep HTML is dependency-free. It works locally without a service worker, network, third-party scripts or backend. It is not yet deployed through GitHub Pages.
