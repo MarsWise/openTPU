@@ -913,11 +913,11 @@ $("node-search").addEventListener("input",search);
 $("btn-copy").onclick=async()=>{uiState();try{await navigator.clipboard.writeText(location.href);say("Link copied")}catch(e){say("Copy URL from the address bar")}};
 const wrap=$("svg-wrap");
 svgRoot.addEventListener("wheel",ev=>{ev.preventDefault();const factor=ev.deltaY<0?1.13:.88;zoom=Math.max(.5,Math.min(3.5,zoom*factor));applyCamera()},{passive:false});
-svgRoot.addEventListener("pointerdown",e=>{if(e.button!==0)return;pointer={x:e.clientX,y:e.clientY,panX,panY};suppressClick=false;wrap.classList.add("dragging");svgRoot.setPointerCapture?.(e.pointerId)});
+svgRoot.addEventListener("pointerdown",e=>{if(e.button!==0)return;pointer={x:e.clientX,y:e.clientY,panX,panY,captured:false};suppressClick=false});
 svgRoot.addEventListener("pointermove",e=>{
  if(!pointer)return;
  const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
- if(Math.abs(dx)+Math.abs(dy)>6)suppressClick=true;
+ if(Math.abs(dx)+Math.abs(dy)>6){suppressClick=true;if(!pointer.captured){pointer.captured=true;wrap.classList.add("dragging");svgRoot.setPointerCapture?.(e.pointerId)}}
  const w=svgRoot.getBoundingClientRect().width||1120,s=1120/w;
  panX=pointer.panX+dx*s;panY=pointer.panY+dy*s;applyCamera();
 });
