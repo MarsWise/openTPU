@@ -256,6 +256,23 @@ def rand(counters, key: int = 0, key_reg: int = 0) -> Tile:
     return current().rand(counters, key, key_reg)
 
 
+def has_aff() -> bool:
+    """The target has VOP AFF, the fused row/column affine (Config.VAFF)."""
+    return bool(getattr(current().cfg, "VAFF", False))
+
+
+def aff(x, p, g, h=None, out=None) -> Tile:
+    """(x * p[:, None]) * g[None, :] + h[None, :] in one VPU pass (VOP AFF; h None: no bias;
+    each step rounded as MUL then MAC). out: write there (e.g. x itself, in place)."""
+    return current().aff(x, p, g, h, out)
+
+
+def aff_params(g, h):
+    """G and H laid out for VOP AFF once (two copies a 256-column part), for many aff calls
+    with the same gain and bias (a LayerNorm's rows tiles)."""
+    return current().aff_params(g, h)
+
+
 def has_bfly() -> bool:
     """The target has VOP BFLY, the Hadamard butterfly stage (Config.VBFLY)."""
     return bool(getattr(current().cfg, "VBFLY", False))

@@ -1,5 +1,5 @@
 @echo off
-rem Claude: build r8 (m8, 133.33 MHz; r7 + VRAND, TCQ, TATAN, QST4, LDX, TD5, VBFLY) with Vivado in
+rem Claude: build r8 (m8, 133.33 MHz; r7 + VRAND, TCQ, TATAN, QST4, LDX, TD5, VBFLY, VAFF) with Vivado in
 rem C:\myOpenTPU\openTPU-r7: tools\build_r8_133.ps1. Run r7_sync.cmd first.
 rem   r8_build.cmd            full build (several hours); otpu.bit only if setup/hold pass
 rem   r8_build.cmd Synth      synthesis + structural checks only (about an hour): try this first
@@ -9,7 +9,7 @@ setlocal
 set MODE=%~1
 if "%MODE%"=="" set MODE=Build
 cd /d C:\myOpenTPU\openTPU-r7 || (echo no C:\myOpenTPU\openTPU-r7 & pause & exit /b 1)
-findstr /c:"VBFLY" rtl\shell\otpu_ctrl.sv >nul || (echo the tree has no r8 units: run r7_sync.cmd & pause & exit /b 1)
+findstr /c:"VAFF" rtl\shell\otpu_ctrl.sv >nul || (echo the tree has no r8 units: run r7_sync.cmd & pause & exit /b 1)
 tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo a Vivado process is running: stop & pause & exit /b 1)
 for /f %%h in ('git rev-parse --short^=8 HEAD') do set REV=%%h
 git log --oneline -1
@@ -19,7 +19,7 @@ echo === the python the build uses (CFG_HASH):
 where python
 python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'numpy', numpy.__version__)"
 if errorlevel 1 goto nopy
-python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True, QST4=True, LDX=True, TD5=True, VBFLY=True)), '08x'))"
+python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True, QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True)), '08x'))"
 if errorlevel 1 goto nohash
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { & '.\tools\build_r8_133.ps1' -Mode %MODE% } *>&1 | ForEach-Object { $_; Add-Content -LiteralPath '%LOG%' -Value \"$_\" -Encoding UTF8 }; exit $LASTEXITCODE"
 set RC=%errorlevel%

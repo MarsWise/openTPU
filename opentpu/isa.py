@@ -72,6 +72,11 @@ V_BFLY = 29               # the Hadamard butterfly stage at stride s = imm (u32,
 #                           dst(r, c) = A(r, c) + B(r, c) if c & s == 0, else B(r, c) - A(r, c)
 #                           (Config.VBFLY; dst must not overlap A)
 VFUNCS[V_BFLY] = "bfly"
+V_AFF = 30                # the fused row/column affine (Config.VAFF):
+#                           dst(r, c) = (A(r, c) * P(r)) * G(c) + H(c), P per row (B ROW),
+#                           G(c) = T[imm + c], H(c) = T[imm + cols + c] (-0 with flag DONE);
+#                           cols <= 256 (the column buffers), G and H read first
+VFUNCS[V_AFF] = "aff"
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
 V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS, \
     V_ATAN = range(0x20, 0x2B)          # V_ATAN: atan on [0, 1] (Config.TATAN, CAPS2 bit12)
@@ -594,7 +599,7 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND, V_BFLY) else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND, V_BFLY, V_AFF) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
@@ -617,6 +622,19 @@ def bfly(dst, a, rows, cols, drs, ars, s, ra=0, rb=0, comment="bfly"):
            f"BFLY: stride {s}, cols {cols}: a power of two with cols % 2s == 0")
     return vop(V_BFLY, dst, a, a, rows, cols, drs, ars, ars, B_FULL, s,
                ra=ra, rb=rb, rc=rb, comment=comment)
+
+
+def aff(dst, a, p, gh, rows, cols, drs, ars, prs=1, bias=True, ra=0, rb=0, rc=0, rd=0,
+        comment="aff"):
+    """VOP AFF (Config.VAFF): dst(r, c) = (A(r, c) * T[p + r*prs]) * G(c) + H(c), G(c) =
+    T[R[rd] + gh + c] and H(c) = T[R[rd] + gh + cols + c] (bias False: H = -0, flag DONE);
+    each step a rounded mul then a rounded add, as MUL then MAC. cols <= 256; G and H are read
+    into the column buffers before anything is written."""
+    _check(0 < cols <= OUTER_MAX_COLS, f"AFF: cols {cols} (at most {OUTER_MAX_COLS})")
+    ins = vop(V_AFF, dst, a, p, rows, cols, drs, ars, prs, B_ROW, gh, ra=ra, rb=rb, rc=rc,
+              rd=rd, comment=comment)
+    ins.flags = 0 if bias else F_DONE
+    return ins
 
 
 def argmax(dst, a, rows, cols, drs=2, ars=0, base=0, ra=0, rb=0, rd=0, comment="argmax"):

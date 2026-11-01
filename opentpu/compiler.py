@@ -834,6 +834,13 @@ class _Parts:
         return _Parts(self.b, self.rows, c1 - c0)
 
 
+class AffParams:
+    """VOP AFF's G and H side by side per 256-column part (Builder.aff_params)."""
+
+    def __init__(self, t, cols: int):
+        self.t, self.cols = t, cols
+
+
 class Stationary:
     """A tile quantized into ACT RAM blocks [ab, ab+KB), in chunks of up to ACT_ROWS rows.
     `pair`: its rows are also in ACT rows M..2M-1 (QACT DUP), so 4-bit MMs run at full rate
@@ -1594,6 +1601,52 @@ class Builder:
         ars = x.rs if len(x.shape) == 2 else 0
         drs = out.rs if len(out.shape) == 2 else 0
         self.emit(I.rand(out.base, x.base, out.rows, out.cols, drs, ars, key, rd=key_reg))
+        out.fresh = True
+        return out
+
+    def aff_params(self, g, h) -> "AffParams":
+        """G and H side by side per 256-column part ([g | h] of each part, 2 * cols words), the
+        layout VOP AFF reads: built once (two copies a part) for many aff calls."""
+        if not isinstance(g, Tile) or not isinstance(h, Tile) or g.shape != h.shape \
+                or len(g.shape) != 1:
+            raise CompileError("aff_params: g and h must be [cols] tiles")
+        cols = g.cols
+        t = self.alloc((2 * cols,))
+        for c0 in builtins.range(0, cols, I.OUTER_MAX_COLS):
+            c1 = min(c0 + I.OUTER_MAX_COLS, cols)
+            w = c1 - c0
+            self.vop(I.V_COPY, t[2 * c0:2 * c0 + w], g[c0:c1], None)
+            self.vop(I.V_COPY, t[2 * c0 + w:2 * c1], h[c0:c1], None)
+        return AffParams(t, cols)
+
+    def aff(self, x, p, g, h=None, out=None) -> Tile:
+        """out = (x * p[:, None]) * g[None, :] + h[None, :] (VOP AFF, Config.VAFF): p a [rows]
+        tile, g / h [cols] tiles (h None: no bias), or g an AffParams (aff_params: G and H
+        laid out once). 256 columns a VOP."""
+        if not getattr(self.cfg, "VAFF", False):
+            raise CompileError("aff: the target has no VOP AFF (Config.VAFF)")
+        if h is not None:
+            g, h = self.aff_params(g, h), None
+        x = self.materialize(x)
+        if not isinstance(p, Tile) or p.shape != (x.rows,):
+            raise CompileError(f"aff: the row vector must be a [{x.rows}] tile")
+        packed = isinstance(g, AffParams)
+        if (g.cols if packed else None) != x.cols and not (
+                isinstance(g, Tile) and g.shape == (x.cols,)):
+            raise CompileError(f"aff: column vectors must be [{x.cols}] tiles")
+        self.check_live(x, p, g.t if packed else g)
+        if out is None:
+            out = self.alloc(x.shape)
+        elif (out.rows, out.cols) != (x.rows, x.cols):
+            raise CompileError(f"aff: out {out.shape} vs {x.shape}")
+        ars = x.rs if len(x.shape) == 2 else 0
+        drs = out.rs if len(out.shape) == 2 else 0
+        for c0 in builtins.range(0, x.cols, I.OUTER_MAX_COLS):
+            c1 = min(c0 + I.OUTER_MAX_COLS, x.cols)
+            w = c1 - c0
+            base = g.t.base + 2 * c0 if packed else g.base + c0
+            self.emit(I.aff(out.base + c0, x.base + c0, p.base, base, x.rows, w, drs, ars, 1,
+                            bias=packed))
         out.fresh = True
         return out
 

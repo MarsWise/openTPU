@@ -85,7 +85,7 @@ def test_vpu_hadamard_kernel(inverse):
 @pytest.mark.parametrize("grq", [False, True])
 @pytest.mark.parametrize("dstep", [False, True])
 def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq,
-                                                                 grouped_source=False):
+                                                                 grouped_source=False, rtl=False):
     """Both layer kinds and the tied head; the reference unfolds weights, the device rotates x."""
     from dataclasses import replace
     from opentpu.isasim import Config
@@ -172,6 +172,20 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
                  rows=1, wformat='ternary_gsc')
     tokens = [4, 9, 12, 7, 31]
     ref = reference_logits(replace(spec, native_bonsai=False), effective, tokens)
+    if rtl:     # the last token on the Verilator RTL from the ISA's DRAM state: bit for bit
+        from opentpu.llm.rtl_backend import RtlBackend
+        for t in tokens[:-1]:
+            eng.step(t)
+        n = eng.image.nbytes
+        isa = eng.backend
+        r = RtlBackend(eng.cfg, [sl.dram[:n] for sl in isa.machine.slices])
+        want = eng.step(tokens[-1])
+        eng.backend, eng.pos = r, eng.pos - 1
+        got = eng.step(tokens[-1])
+        assert np.array_equal(want.view(np.uint32), got.view(np.uint32))
+        for sl in range(eng.cfg.S):
+            assert np.array_equal(isa.machine.slices[sl].dram[:n], r.drams[sl][:n])
+        return
     actual = np.stack([eng.step(t) for t in tokens])
     cosine = (actual * ref).sum(1) / np.linalg.norm(actual, axis=1) / np.linalg.norm(ref, axis=1)
     assert cosine.min() > .99
@@ -191,6 +205,15 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
 def test_grouped_gguf_wrapper_runs_native_hybrid_on_isa(monkeypatch, dstep, grq):
     test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=dstep, grq=grq,
                                                                grouped_source=True)
+
+
+def test_grouped_gguf_wrapper_native_hybrid_rtl(monkeypatch, have_verilator):
+    """Bonsai 2 4B / 9B's load-time head conversion (GroupedGDNWeights): a token of the hybrid
+    decoder (DeltaNet with two value heads a key head, attention, tied head) on the RTL equals
+    the ISA bit for bit, logits and every DRAM byte."""
+    test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=True,
+                                                               grq=False, grouped_source=True,
+                                                               rtl=True)
 
 
 def test_native_hadamard_gsc_linear_rtl(have_verilator):

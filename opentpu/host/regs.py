@@ -91,13 +91,14 @@ CAP2_QST4 = 8192     # QST Q4, 4-bit ROW rows
 CAP2_LDX = 16384    # LDX indexed row gather
 CAP2_TD5 = 32768    # TMM T5 dense trits
 CAP2_VBFLY = 65536    # VOP BFLY, the Hadamard butterfly stage
+CAP2_VAFF = 131072   # VOP AFF, the fused row/column affine
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
         return {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False,
-                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False, "td5": False, "vbfly": False}
+                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False, "td5": False, "vbfly": False, "vaff": False}
     return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR),
             "tquad": bool(v & CAP2_TQUAD), "tfn": bool(v & CAP2_TFN),
             "tgsc": bool(v & CAP2_TGSC), "vcmp": bool(v & CAP2_VCMP),
@@ -109,7 +110,8 @@ def caps2(v: int | None) -> dict:
             "qst4": bool(v & CAP2_QST4),
             "ldx": bool(v & CAP2_LDX),
             "td5": bool(v & CAP2_TD5),
-            "vbfly": bool(v & CAP2_VBFLY)}
+            "vbfly": bool(v & CAP2_VBFLY),
+            "vaff": bool(v & CAP2_VAFF)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

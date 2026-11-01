@@ -10,6 +10,8 @@ def rmsnorm(x, gamma, eps: float):
     r = ol.rsqrt(ss * (1.0 / x.cols) + eps)
     if gamma is None:
         return x * r[:, None]
+    if ol.has_aff():                           # VOP AFF: x r gamma in one pass
+        return ol.aff(x, r, gamma)
     return (x * r[:, None]) * gamma[None, :]
 
 

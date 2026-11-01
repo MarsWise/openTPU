@@ -425,7 +425,7 @@ def run(a, t, dev: str, sim: bool) -> tuple[list[Row], list[str]]:
                     bad.append(f"REGMAP {v[2]}")
                 if c2 and (v[8] & ~(R.CAP2_GATHER | R.CAP2_TPAIR | R.CAP2_TQUAD |
                                      R.CAP2_TFN | R.CAP2_TGSC | R.CAP2_VCMP | R.CAP2_TBIN | R.CAP2_TBGSC | R.CAP2_VU8 |
-                                     R.CAP2_TGRQ | R.CAP2_VRAND | R.CAP2_TCQ | R.CAP2_TATAN | R.CAP2_QST4 | R.CAP2_LDX | R.CAP2_TD5 | R.CAP2_VBFLY)
+                                     R.CAP2_TGRQ | R.CAP2_VRAND | R.CAP2_TCQ | R.CAP2_TATAN | R.CAP2_QST4 | R.CAP2_LDX | R.CAP2_TD5 | R.CAP2_VBFLY | R.CAP2_VAFF)
                            or not v[8] & R.CAP2_GATHER
                            and (i.get("cfg") or {}).get("S", 1) > 1):
                     bad.append(f"CAPS2 {v[8]:#x}")      # reserved bits, or no GATHER at S > 1

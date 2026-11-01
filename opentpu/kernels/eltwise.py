@@ -86,6 +86,8 @@ def layer_norm(x, w, b, y, M: int, N: int, eps: float):
     then the centered variance)."""
     R = rows_a_tile(N, 2)
     wv, bv = ol.load(w), ol.load(b)
+    if ol.has_aff() and M > 1:             # G and H laid out for VOP AFF once (one row:
+        wv, bv = ol.aff_params(wv, bv), None   # MUL + MAC is as fast as the layout's copies)
     t = ol.empty([R, N])
     for m0 in range(0, M, R):
         n = min(R, M - m0)
@@ -105,7 +107,11 @@ def rms_norm(x, w, y, M: int, N: int, eps: float):
         n = min(R, M - m0)
         v = t[0:n, :]
         ol.load(x[m0:m0 + n, :], out=v)
-        v.set(lib.rmsnorm(v, wv, eps))
+        if ol.has_aff():                   # in place: x r w in one pass (VOP AFF)
+            r = ol.rsqrt(ol.sum(v * v, axis=1) * (1.0 / N) + eps)
+            ol.aff(v, r, wv, out=v)
+        else:
+            v.set(lib.rmsnorm(v, wv, eps))
         ol.store(y[m0:m0 + n, :], v)
 
 

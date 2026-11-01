@@ -21,8 +21,9 @@ def test_bfly_plan_matches_architecture(script, enabled):
                             cwd=ROOT, text=True, capture_output=True, check=True)
     text = result.stdout
     assert re.search(r"OTPU_VBFLY_GEN\s+" + str(int(enabled)) + r"\b", text)
+    assert re.search(r"OTPU_VAFF_GEN\s+" + str(int(enabled)) + r"\b", text)
     if enabled:
         cfg = replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True,
                       VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True,
-                      QST4=True, LDX=True, TD5=True, VBFLY=True)
+                      QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True)
         assert f"hash={arch_hash(cfg):08x}" in text

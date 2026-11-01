@@ -77,6 +77,12 @@ def layernorm_(x, w, b, eps: float, cols: int = 384) -> None:
         xv = x[:, c0:c1]
         xv.set(xv - mean[:, None])
     r = ol.rsqrt(ol.sumsq(x) * n + eps)
+    from ..compiler import AffParams
+    # VOP AFF: (x r) w + b, 256 columns a pass (w: an aff_params, b None; or both tiles, laid
+    # out here: two copies, worth it over several rows only)
+    if ol.has_aff() and (isinstance(w, AffParams) or x.rows > 1):
+        ol.aff(x, r, w, b, out=x)
+        return
     for c0, c1 in parts:
         xv = x[:, c0:c1]
         if ol.has_tfn():                       # VOP MAC: (x r) * w + b in one pass

@@ -125,6 +125,7 @@ module otpu_ctrl #(
   parameter bit LDX = 1'b0,          // CAPS2 bit14: LDX indexed row gather
   parameter bit TD5 = 1'b0,          // CAPS2 bit15: TMM T5 dense trits
   parameter bit VBFLY = 1'b0,        // CAPS2 bit16: VOP BFLY, the Hadamard butterfly stage
+  parameter bit VAFF = 1'b0,         // CAPS2 bit17: VOP AFF, the fused row/column affine
   parameter bit TPAIR = 1'b0,            // CAPS2 bit1: the build is TMM PAIR's (the target's TPAIR;
                                          //   the MXU takes it in every build since)
   parameter int LDP = 2,                 // cycles after LOAD before the loaders' busy shows (>= 2)
@@ -217,7 +218,7 @@ module otpu_ctrl #(
   // holds it, opentpu/target.py arch_hash)
   // bit2 TQUAD: TMM QUAD, the K-split by four (likewise)
   // bit3 TFN: the table functions (likewise)
-  localparam logic [31:0] CAPS2 = {15'd0, VBFLY, TD5, LDX, QST4, TATAN, TCQ, VRAND, TGRQ, VU8, TBGSC, TBIN, VCMP, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
+  localparam logic [31:0] CAPS2 = {14'd0, VAFF, VBFLY, TD5, LDX, QST4, TATAN, TCQ, VRAND, TGRQ, VU8, TBGSC, TBIN, VCMP, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
 
   logic [63:0] cycles;
   logic [31:0] n_brd, n_bwr, n_ard, n_awr, n_bst, scratch;

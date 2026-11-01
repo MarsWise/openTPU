@@ -85,7 +85,8 @@ module otpu_fpga_top_ld #(
   parameter bit QST4 = 1'b0,                // QST Q4, 4-bit ROW rows (CAPS2 bit13)
   parameter bit LDX = 1'b0,                // LDX indexed row gather (CAPS2 bit14)
   parameter bit TD5 = 1'b0,                // TMM T5 dense trits (CAPS2 bit15)
-  parameter bit VBFLY = 1'b0                // VOP BFLY, the Hadamard butterfly stage (CAPS2 bit16)
+  parameter bit VBFLY = 1'b0,                // VOP BFLY, the Hadamard butterfly stage (CAPS2 bit16)
+  parameter bit VAFF = 1'b0                // VOP AFF, the fused row/column affine (CAPS2 bit17)
 ) (
   // board
   input  logic        SYS_CLK,              // 50 MHz, AA28
@@ -310,7 +311,7 @@ module otpu_fpga_top_ld #(
                     .DSTEP(DSTEP), .HOSTCAL(1'b1), .XREG(PCIE_GEN == 2),
                     .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
                     .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
-                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY)) u_sys (
+                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .VAFF(VAFF)) u_sys (
     .clk(core_clk), .clk_f, .rst(core_rst), .ctl_mrst(lrs2), .xclk(xdma_aclk), .xrst,
     .calib, .ded, .temp(device_temp), .led(board_led), .i2c_lo, .i2c_pin({lm73_alert_n, i2c_lvl}),
     .s_ctl_awaddr(ctl_awaddr[11:0]), .s_ctl_awvalid(ctl_awvalid), .s_ctl_awready(ctl_awready),

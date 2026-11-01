@@ -44,6 +44,7 @@ class Config:
     LDX: bool = False        # LDX, the DMA's indexed row gather from DRAM (CAPS2 bit14)
     TD5: bool = False        # TMM T5: dense trits, five a byte (opentpu/trits.py; CAPS2 bit15)
     VBFLY: bool = False      # VOP BFLY, the Hadamard butterfly stage (kernels/hadamard.py; CAPS2 bit16)
+    VAFF: bool = False       # VOP AFF, the fused row/column affine (LayerNorm, RMSNorm; CAPS2 bit17)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
@@ -106,6 +107,7 @@ def board_config(**kw) -> Config:
                 LDX=bool(int(env.get("OTPU_LDX", 0))),
                 TD5=bool(int(env.get("OTPU_TD5", 0))),
                 VBFLY=bool(int(env.get("OTPU_VBFLY", 0))),
+                VAFF=bool(int(env.get("OTPU_VAFF", 0))),
                 TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
@@ -883,6 +885,21 @@ class Slice:
             raise SimError("VOP U8: needs Config.VU8")
         if func == I.V_RAND and not self.cfg.VRAND:
             raise SimError("VOP RAND: needs Config.VRAND")
+        if func == I.V_AFF:
+            if not getattr(self.cfg, "VAFF", False):
+                raise SimError("VOP AFF: needs Config.VAFF")
+            if bmode != I.B_ROW or cols > I.OUTER_MAX_COLS:
+                raise SimError("VOP AFF: P per row (bmode ROW), cols <= 256")
+            Gv = self.tget(np.broadcast_to(w7 + c, (1, cols)))          # read before writes
+            Hv = (np.full((1, cols), -0.0, np.float32) if ins.flags & I.F_DONE
+                  else self.tget(np.broadcast_to(w7 + cols + c, (1, cols))))
+            Av = self.tget(a + r * ars + c)
+            Pv = self.tget(np.broadcast_to(b + r * brs, (rows, cols)))
+            didx = dst + r * drs + c
+            self._check_hazard(didx.reshape(-1), [(a + r * ars + c).reshape(-1),
+                                                  np.broadcast_to(b + r * brs, (rows, cols)).reshape(-1)])
+            self.tput(didx, F.add(F.mul(F.mul(Av, Pv), Gv), Hv))
+            return
         if func == I.V_BFLY:
             if not getattr(self.cfg, "VBFLY", False):
                 raise SimError("VOP BFLY: needs Config.VBFLY")

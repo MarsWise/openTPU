@@ -16,7 +16,7 @@ package otpu_pkg;
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20,
                          V_CMP_GT = 21, V_CMP_EQ = 22, V_SEL = 23,
                          V_U8_0 = 24, V_U8_1 = 25, V_U8_2 = 26, V_U8_3 = 27,
-                         V_RAND = 28, V_BFLY = 29;
+                         V_RAND = 28, V_BFLY = 29, V_AFF = 30;
   // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
   // otpu_se_comp only (the stream engine's composites)
   localparam logic [7:0] V_TFN0 = 8'h20;
@@ -30,7 +30,7 @@ package otpu_pkg;
   // the composite functions' classes (otpu_se_comp's microcode; the VPU decodes a chunk's as it
   // loads it)
   localparam logic [2:0] CC_NONE = 3'd0, CC_EXP = 3'd1, CC_EXS = 3'd2, CC_RCP = 3'd3,
-                         CC_RSQ = 3'd4, CC_LOG = 3'd5, CC_TFN = 3'd6;
+                         CC_RSQ = 3'd4, CC_LOG = 3'd5, CC_TFN = 3'd6, CC_AFF = 3'd7;
   function automatic logic [2:0] f_cc(input logic [7:0] f);
     case (f)
       V_EXP2:    return CC_EXP;
@@ -38,6 +38,7 @@ package otpu_pkg;
       V_RECIP:   return CC_RCP;
       V_RSQRT:   return CC_RSQ;
       V_LOG2:    return CC_LOG;
+      V_AFF:     return CC_AFF;
       default:   return is_tfn(f) ? CC_TFN : CC_NONE;
     endcase
   endfunction
@@ -176,7 +177,7 @@ package otpu_pkg;
 
   // the functions that read operand B in its bmode (OUTER's is always B_ROW)
   function automatic logic reads_b(input logic [7:0] f);
-    return is_binary(f) || f == V_RDOT || f == V_OUTER;
+    return is_binary(f) || f == V_RDOT || f == V_OUTER || f == V_AFF;
   endfunction
 
   function automatic logic is_reduce(input logic [7:0] f);
@@ -385,6 +386,8 @@ package otpu_pkg;
             f.rd[0] = mk(SP_TMEM, c.w2, p.p0 + cols);
           if (c.w6[23:16] == V_MAC || c.w6[23:16] == V_SEL)
             f.rd[2] = mk(SP_TMEM, c.w7, cols);   // MAC's C or SEL's buffered mask
+          if (c.w6[23:16] == V_AFF)               // AFF's G, then H (none with DONE)
+            f.rd[2] = mk(SP_TMEM, c.w7, c.flags[VF_DONE] ? cols : 2 * cols);
           if (reads_b(c.w6[23:16])) begin
             case (c.w6[25:24])
               B_FULL: f.rd[1] = mk(SP_TMEM, c.w3, p.p1 + cols);

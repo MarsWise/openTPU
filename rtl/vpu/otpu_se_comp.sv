@@ -67,7 +67,9 @@ module otpu_se_comp
   input  logic [2:0]       in_c,
   input  logic [3:0]       in_tf,            // TFN: the function (VOP func - 0x20)
   input  f32_t             in_a [LANES],     // operand A
-  input  f32_t             in_b [LANES],     // operand B (EXP2SUB)
+  input  f32_t             in_b [LANES],     // operand B (EXP2SUB; AFF: the row's P)
+  input  f32_t             in_g [LANES],     // AFF: G(c), the column buffer C
+  input  f32_t             in_h [LANES],     // AFF: H(c), the column buffer D
   input  logic [LANES-1:0] in_m,             // lane mask (carried)
   input  logic [MW-1:0]    in_meta,
   output logic             hold,             // an entry HA cycles from now would collide
@@ -104,6 +106,7 @@ module otpu_se_comp
       CC_RCP:         return 6;
       CC_RSQ, CC_LOG: return 10;
       CC_TFN:         return 6;
+      CC_AFF:         return 2;
       default:        return 1;
     endcase
   endfunction
@@ -114,6 +117,7 @@ module otpu_se_comp
       CC_RCP:         return 4'((6 + NS - 1) / NS);
       CC_RSQ, CC_LOG: return 4'((10 + NS - 1) / NS);
       CC_TFN:         return 4'((6 + NS - 1) / NS);
+      CC_AFF:         return 4'((2 + NS - 1) / NS);
       default:        return 4'd1;
     endcase
   endfunction
@@ -214,6 +218,12 @@ module otpu_se_comp
         end else if (k == 4) begin                                   // x*g, g + relu(x), g
           u.bs = B_PX; u.cs = C_PR;
         end
+      CC_AFF:                                                         // (x P) G + H: setup's
+        if (k == 0) begin                                            // k1 = P, k2 = G, cf = H
+          u.as = A_X; u.bs = B_K1;                                   // v = x P + -0
+        end else if (k == 1) begin
+          u.bs = B_K2; u.cs = C_T0;                                  // v = v G + H
+        end
       default: ;
     endcase
     return u;
@@ -226,7 +236,7 @@ module otpu_se_comp
     logic [7:0] m;
     uc_t u;
     m = '0;
-    for (int c = 1; c <= 6; c++)
+    for (int c = 1; c <= 7; c++)
       for (int p = 0; p < int'(n_pass(3'(c))); p++) begin
         u = ucode(3'(c), p * NS + s);
         case (w)
@@ -241,7 +251,7 @@ module otpu_se_comp
   // ... and whether one of them writes a constant into v (kv)
   function automatic logic kv_use(input int s);
     uc_t u;
-    for (int c = 1; c <= 6; c++)
+    for (int c = 1; c <= 7; c++)
       for (int p = 0; p < int'(n_pass(3'(c))); p++) begin
         u = ucode(3'(c), p * NS + s);
         if (u.dst != D_V && u.kv != F_ZERO) return 1'b1;
@@ -264,7 +274,7 @@ module otpu_se_comp
   function automatic uc_t uc_rom(input logic [2:0] c, input logic [3:0] p, input int s);
     uc_t u;
     u = ucode(CC_NONE, 0);
-    for (int ci = 1; ci <= 6; ci++)
+    for (int ci = 1; ci <= 7; ci++)
       for (int pi = 0; pi < 16; pi++)
         if (c == 3'(ci) && p == 4'(pi)) u = ucode(3'(ci), pi * NS + s);
     return u;
@@ -302,7 +312,8 @@ module otpu_se_comp
   // exponent field 127) and RSQRT on a scaled x out of range (otpu_fp's rsq_lo, rsq_hi; the
   // seed's constant takes the scaling); both carry the result's exponent adjustment in ii
   // (RECIP's rcp_ek), which finish adds as EXP2's i.
-  function automatic cst_t setup(input logic [2:0] c, input f32_t x, input logic [3:0] tf);
+  function automatic cst_t setup(input logic [2:0] c, input f32_t x, input logic [3:0] tf,
+                                 input f32_t pb, input f32_t g, input f32_t h);
     cst_t t;
     tfn_d_t desc;
     f32_t xz, ax, sd, mg;
@@ -336,6 +347,9 @@ module otpu_se_comp
       default: ;
     endcase
     if (c == CC_TFN) t.k1 = x;                                        // the post step's x
+    if (c == CC_AFF) begin                                            // P, G, H
+      t.k1 = pb; t.k2 = g; t.cf = {64'd0, h};
+    end
     t.tf = tf;
     return t;
   endfunction
@@ -381,6 +395,7 @@ module otpu_se_comp
       CC_RSQ:         return t.f[0] ? F_ZERO : ve;
       CC_LOG:         return t.f[0] ? F_NINF : t.f[2] ? F_NAN : t.f[1] ? F_INF : t.v;
       CC_TFN:         return t.f[0] ? F_NAN : t.f[2] ? fneg(t.v) : t.v;
+      CC_AFF:         return t.v;
       default:        return F_ZERO;
     endcase
   endfunction
@@ -521,7 +536,7 @@ module otpu_se_comp
   assign in_desc = tfn_desc(in_tf);
   for (genvar l = 0; l < LANES; l++) begin : g_lane
     cst_t sti [NS], sto [NS], stp [NS];    // state at each stage's input, output, after it
-    assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l], in_tf);
+    assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l], in_tf, in_b[l], in_g[l], in_h[l]);
 
     for (genvar s = 0; s < NS; s++) begin : g_st
       localparam logic [7:0] AU = st_use(s, 0), BU = st_use(s, 1), CU = st_use(s, 2),

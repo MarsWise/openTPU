@@ -27,11 +27,15 @@ module tb_se_comp;
   logic [MW-1:0] in_meta, out_meta;
   logic [L-1:0]  in_m, out_m;
   f32_t          in_a [L], in_b [L], out_d [L];
+  f32_t          in_z [L];
+  for (genvar l = 0; l < L; l++) begin : g_z
+    assign in_z[l] = '0;
+  end
   logic [NS-1:0] st_sel;
   f32_t          st_a [NS][L], st_b [NS][L], st_c [NS][L], st_e [NS][L], st_y [NS][L];
 
   otpu_se_comp #(.LANES(L), .NS(NS), .MW(MW), .HA(HA), .EXT(EXT)) dut (
-    .clk, .rst, .en, .en_l({L{en}}), .in_v, .in_c, .in_tf, .in_a, .in_b, .in_m, .in_meta, .hold, .hold_n(), .st_sel, .st_a, .st_b,
+    .clk, .rst, .en, .en_l({L{en}}), .in_v, .in_c, .in_tf, .in_a, .in_b, .in_g(in_z), .in_h(in_z), .in_m, .in_meta, .hold, .hold_n(), .st_sel, .st_a, .st_b,
     .st_c, .st_e, .st_y, .out_v, .out_d, .out_m, .out_meta);
 
   if (EXT) begin : g_units

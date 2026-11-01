@@ -205,6 +205,9 @@ module otpu_vpu
       V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND, V_BFLY: return 4'd1;
       V_EXP2, V_EXP2SUB:           return 4'd9;
       V_RECIP:                     return 4'd6;
+      // AFF (C8 only): one pass of the composite loop (25 cycles), between the one-slot
+      // functions and RECIP's two passes (the latency rule orders by slots)
+      V_AFF:                       return 4'd2;
       V_RSQRT, V_LOG2:             return 4'd10;
       // TFN (C8 only): six ops, RECIP's passes (the latency rule orders by slots)
       default:                     return is_tfn(f) ? 4'd6 : 4'd0;
@@ -269,6 +272,7 @@ module otpu_vpu
   f32_t             c_sa [CNS][LANES], c_sb [CNS][LANES], c_sc [CNS][LANES], c_se [CNS][LANES];
   f32_t             c_s0y [LANES], c_uy [LANES], c_qy [LANES];   // the stages' results
   f32_t             c_ia [LANES], c_ib [LANES], c_od [LANES];
+  f32_t             c_ig [LANES], c_ih [LANES];   // AFF: G(c), H(c) (the column buffers)
   logic [LANES-1:0] c_om;
   logic [AW:0]      c_ometa;                   // {waddr, all_last}
   // EXPERIMENTAL (docs/seq_vpu.md), simulation only: a narrower vector path at today's latency.
@@ -556,7 +560,7 @@ module otpu_vpu
     always_ff @(posedge clk) if (en_l[l]) begin
       if (m0.fill) begin
         cbuf[m0.cb] <= xb[l];
-        dbuf[m0.cb] <= od_one_b ? F_ONE : od_sc_b ? xa[0] : xa[l];
+        dbuf[m0.cb] <= od_one_b ? ((func_b == V_AFF) ? F_NZ : F_ONE) : od_sc_b ? xa[0] : xa[l];
       end
       xc[l] <= cbuf[mi2_d.cb];
       xd[l] <= dbuf[mi2_d.cb];
@@ -1028,6 +1032,8 @@ module otpu_vpu
     assign lmv[l] = fp_mm(x, y, m0d.fh[V_MIN]);
     assign c_ia[l] = x;
     assign c_ib[l] = y;
+    assign c_ig[l] = xc[l];
+    assign c_ih[l] = xd[l];
   end
 
   if (C8) begin : g_comp
@@ -1038,7 +1044,7 @@ module otpu_vpu
     otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1)) u_comp (
       .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_tf(m0.func[3:0]),
       .in_a(c_ia),
-      .in_b(c_ib), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),
+      .in_b(c_ib), .in_g(c_ig), .in_h(c_ih), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),
       .hold_n(c_hold_n),
       .st_sel(c_sel), .st_a(c_sa), .st_b(c_sb), .st_c(c_sc), .st_e(c_se), .st_y(sy),
       .out_v(c_ov), .out_d(c_od), .out_m(c_om), .out_meta(c_ometa));
@@ -1644,6 +1650,7 @@ module otpu_vpu
           nslots <= n_slots(hf);
 `ifndef SYNTHESIS
           if (is_tfn(hf) && !C8) $fatal(1, "otpu_vpu: TFN (VOP %0h) needs the stream engine", hf);
+          if (hf == V_AFF && !C8) $fatal(1, "otpu_vpu: AFF needs the stream engine");
 `endif
           c16 = hc.w4[31:16];
 `ifndef SYNTHESIS
@@ -1658,9 +1665,10 @@ module otpu_vpu
           a_row <= AW'(hc.w2); b_row <= AW'(hc.w3); d_row <= AW'(hc.w1);
           // OUTER: A is dst (in place), after a fill of its column buffers; MAC: the fill of
           // its column vector C (the C buffer; no D)
-          filling <= (hf == V_OUTER) || (hf == V_MAC) || (hf == V_SEL);
+          filling <= (hf == V_OUTER) || (hf == V_MAC) || (hf == V_SEL) || (hf == V_AFF);
           nfill <= (nchunks < 16'd2) ? 16'd2 : nchunks;
-          oc_a <= AW'(hc.w7); od_a <= AW'(hc.w2);
+          // AFF: G in the C buffer (w7), H in the D buffer (w7 + cols; -0 with DONE)
+          oc_a <= AW'(hc.w7); od_a <= (hf == V_AFF) ? AW'(hc.w7) + AW'(hc.w4[31:16]) : AW'(hc.w2);
           od_sc <= hc.flags[VF_DSCALAR] && hf == V_OUTER;
           od_one <= hc.flags[VF_DONE] || hf == V_MAC || hf == V_SEL;
           if (hf == V_OUTER) begin
