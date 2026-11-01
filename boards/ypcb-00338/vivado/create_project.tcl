@@ -97,7 +97,7 @@ set rtl [list \
   rtl/mem/otpu_tmem.sv rtl/mem/otpu_actram.sv \
   rtl/seq/otpu_seq.sv rtl/vpu/otpu_vtree.sv rtl/dma/otpu_dma.sv \
   rtl/mxu/otpu_mxu.sv rtl/tech/xilinx7/otpu_tech_dsp.sv rtl/tech/generic/otpu_tech_ram.sv \
-  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
+  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_rand.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
   rtl/top/otpu_slice.sv \
   rtl/shell/otpu_ctrl.sv rtl/shell/otpu_trace.sv \
   rtl/shell/otpu_board.sv rtl/mem/otpu_native_dram.sv \
@@ -137,8 +137,13 @@ set TBIN [expr {[info exists ::env(OTPU_TBIN_GEN)] ? $::env(OTPU_TBIN_GEN) eq "1
 set TBGSC [expr {[info exists ::env(OTPU_TBGSC_GEN)] ? $::env(OTPU_TBGSC_GEN) eq "1" : 0}]
 set VU8 [expr {[info exists ::env(OTPU_VU8_GEN)] ? $::env(OTPU_VU8_GEN) eq "1" : 0}]
 set TGRQ [expr {[info exists ::env(OTPU_TGRQ_GEN)] ? $::env(OTPU_TGRQ_GEN) eq "1" : 0}]
+set VRAND [expr {[info exists ::env(OTPU_VRAND_GEN)] ? $::env(OTPU_VRAND_GEN) eq "1" : 0}]
+set TCQ [expr {[info exists ::env(OTPU_TCQ_GEN)] ? $::env(OTPU_TCQ_GEN) eq "1" : 0}]
+set TATAN [expr {[info exists ::env(OTPU_TATAN_GEN)] ? $::env(OTPU_TATAN_GEN) eq "1" : 0}]
+set QST4 [expr {[info exists ::env(OTPU_QST4_GEN)] ? $::env(OTPU_QST4_GEN) eq "1" : 0}]
+set LDX [expr {[info exists ::env(OTPU_LDX_GEN)] ? $::env(OTPU_LDX_GEN) eq "1" : 0}]
 if {$TBGSC && (!$TBIN || !$TGSC)} { error "TBGSC requires both TBIN and TGSC" }
-set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN TGSC=1'b$TGSC VCMP=1'b$VCMP TBIN=1'b$TBIN TBGSC=1'b$TBGSC VU8=1'b$VU8 TGRQ=1'b$TGRQ MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
+set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN TGSC=1'b$TGSC VCMP=1'b$VCMP TBIN=1'b$TBIN TBGSC=1'b$TBGSC VU8=1'b$VU8 TGRQ=1'b$TGRQ VRAND=1'b$VRAND TCQ=1'b$TCQ TATAN=1'b$TATAN QST4=1'b$QST4 LDX=1'b$LDX MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
 
 # ---- constraints: the board (otpu_top_ld.xdc) and the core's pads, VREF and synchronizers
 # (otpu_litedram.xdc); then, after the IP's constraints, as unmanaged Tcl on the implemented

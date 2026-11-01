@@ -2,7 +2,7 @@
 // "Table functions"). Entry {table, segment}: {c2, c1, c0} fp32; tails {lo, hi}.
 // This file is the definition: the ISA simulator reads these words too.
 package otpu_tfn_rom;
-  localparam logic [95:0] TFN_COEF [2048] = '{
+  localparam logic [95:0] TFN_COEF [2304] = '{
     96'h3080ab2c_32715669_33f1aadc, 96'h3091ccf8_3288bc52_3408ec2b, 96'h30a536bb_329af117_341b274f, 96'h30bb3634_32af926f_342fcfdf,
     96'h30d4237f_32c6f2fa_3447389a, 96'h30f06273_32e1705b_3461bf40, 96'h31083219_32ff74aa_347fce10, 96'h311a5475_3310bc10_3490eeb7,
     96'h312ee0f1_3324017c_34a43ae2, 96'h314629d9_3339d7c8_34ba18d3, 96'h31608c70_3352966b_34d2e020, 96'h317e7263_336ea080_34eef406,
@@ -514,27 +514,92 @@ package otpu_tfn_rom;
     96'h38ea8a93_3cb9c430_bec3ef15, 96'h38dc13d9_3cbb994a_beb8442a, 96'h38cd7b2f_3cbd5176_beac7cd4, 96'h38bec2d6_3cbeec70_bea09ae5,
     96'h38afed12_3cc069f9_be94a031, 96'h38a0fc2d_3cc1c9d6_be888e93, 96'h3891f275_3cc30bd2_be78cfcc, 96'h3882d23c_3cc42fb9_be605c13,
     96'h38673bad_3cc53560_be47c5c2, 96'h3848af39_3cc61c9e_be2f10a2, 96'h382a03d3_3cc6e54f_be164083, 96'h380b3e35_3cc78f54_bdfab273,
-    96'h37d8c63d_3cc81a94_bdc8bd36, 96'h379aeea3_3cc886f8_bd96a905, 96'h3739fe49_3cc8d470_bd48fb30, 96'h36780a77_3cc902ef_bcc90ab0
+    96'h37d8c63d_3cc81a94_bdc8bd36, 96'h379aeea3_3cc886f8_bd96a905, 96'h3739fe49_3cc8d470_bd48fb30, 96'h36780a77_3cc902ef_bcc90ab0,
+    96'hb2ffff40_3b800015_00000000, 96'hb3bffc70_3b7fff2b_3b7fffab, 96'hb41ff808_3b7ffc2b_3bfffeab, 96'hb45fea5a_3b7ff72b_3c3ffdc0,
+    96'hb48fe917_3b7ff02c_3c7ffaab, 96'hb4afd643_3b7fe72d_3c9ffacb, 96'hb4cfbb35_3b7fdc30_3cbff701, 96'hb4ef966f_3b7fcf34_3cdff1b7,
+    96'hb507b33b_3b7fc03a_3cffeaae, 96'hb51794e7_3b7faf44_3d0ff0d3, 96'hb5276f80_3b7f9c51_3d1feb30, 96'hb5374249_3b7f8763_3d2fe44d,
+    96'hb5470c89_3b7f707b_3d3fdc0c, 96'hb556cd86_3b7f5799_3d4fd24d, 96'hb5668486_3b7f3cbf_3d5fc6f0, 96'hb57630d3_3b7f1fef_3d6fb9d5,
+    96'hb582e8db_3b7f0129_3d7faade, 96'hb58ab33d_3b7ee06e_3d87ccf5, 96'hb5927736_3b7ebdc1_3d8fc36e, 96'hb59a346d_3b7e9923_3d97b8ca,
+    96'hb5a1ea89_3b7e7296_3d9facf8, 96'hb5a99933_3b7e4a1c_3da79feb, 96'hb5b14015_3b7e1fb5_3daf9192, 96'hb5b8ded8_3b7df365_3db781df,
+    96'hb5c07529_3b7dc52d_3dbf70c1, 96'hb5c802b2_3b7d9510_3dc75e2a, 96'hb5cf8722_3b7d630f_3dcf4a0b, 96'hb5d70226_3b7d2f2d_3dd73454,
+    96'hb5de736e_3b7cf96c_3ddf1cf6, 96'hb5e5daaa_3b7cc1cf_3de703e3, 96'hb5ed378b_3b7c8858_3deee90c, 96'hb5f489c4_3b7c4d0a_3df6cc61,
+    96'hb5fbd109_3b7c0fe8_3dfeadd5, 96'hb6018687_3b7bd0f3_3e0346ac, 96'hb6051ec5_3b7b9030_3e07356e, 96'hb608b11a_3b7b4da0_3e0b232a,
+    96'hb60c3d63_3b7b0948_3e0f0fd8, 96'hb60fc37c_3b7ac329_3e12fb71, 96'hb6134343_3b7a7b47_3e16e5ee, 96'hb616bc96_3b7a31a5_3e1acf47,
+    96'hb61a2f55_3b79e646_3e1eb777, 96'hb61d9b5f_3b79992e_3e229e76, 96'hb6210095_3b794a61_3e26843d, 96'hb6245ed8_3b78f9e0_3e2a68c6,
+    96'hb627b609_3b78a7b0_3e2e4c09, 96'hb62b060b_3b7853d5_3e322e00, 96'hb62e4ec1_3b77fe52_3e360ea4, 96'hb6319011_3b77a72a_3e39edef,
+    96'hb634c9dd_3b774e62_3e3dcbda, 96'hb637fc0d_3b76f3fd_3e41a85f, 96'hb63b2685_3b7697ff_3e458377, 96'hb63e492e_3b763a6b_3e495d1c,
+    96'hb64163ef_3b75db46_3e4d3547, 96'hb64476b2_3b757a94_3e510bf3, 96'hb647815e_3b751858_3e54e119, 96'hb64a83de_3b74b498_3e58b4b3,
+    96'hb64d7e1e_3b744f55_3e5c86bb, 96'hb650700a_3b73e896_3e60572a, 96'hb653598c_3b73805e_3e6425fc, 96'hb6563a94_3b7316b1_3e67f32a,
+    96'hb659130f_3b72ab93_3e6bbeaf, 96'hb65be2ec_3b723f09_3e6f8884, 96'hb65eaa1a_3b71d118_3e7350a4, 96'hb661688b_3b7161c2_3e77170a,
+    96'hb6641e2f_3b70f10e_3e7adbb0, 96'hb666caf8_3b707efe_3e7e9e90, 96'hb6696eda_3b700b99_3e812fd3, 96'hb66c09c7_3b6f96e1_3e830f75,
+    96'hb66e9bb4_3b6f20dc_3e84ee2d, 96'hb6712496_3b6ea98e_3e86cbf7, 96'hb673a464_3b6e30fb_3e88a8d2, 96'hb6761b13_3b6db729_3e8a84ba,
+    96'hb678889a_3b6d3c1b_3e8c5fad, 96'hb67aecf3_3b6cbfd6_3e8e39a9, 96'hb67d4816_3b6c425f_3e9012ab, 96'hb67f99fd_3b6bc3bb_3e91eab1,
+    96'hb680f151_3b6b43ee_3e93c1b9, 96'hb68210ff_3b6ac2fc_3e9597c0, 96'hb6832c08_3b6a40eb_3e976cc4, 96'hb684426a_3b69bdbe_3e9940c2,
+    96'hb6855423_3b69397c_3e9b13ba, 96'hb6866131_3b68b427_3e9ce5a7, 96'hb6876996_3b682dc6_3e9eb689, 96'hb6886d4f_3b67a65c_3ea0865d,
+    96'hb6896c5d_3b671dee_3ea25522, 96'hb68a66c0_3b669482_3ea422d4, 96'hb68b5c79_3b660a1b_3ea5ef73, 96'hb68c4d89_3b657ebe_3ea7bafc,
+    96'hb68d39f0_3b64f270_3ea9856d, 96'hb68e21b1_3b646536_3eab4ec4, 96'hb68f04cd_3b63d714_3ead1701, 96'hb68fe347_3b63480f_3eaede20,
+    96'hb690bd20_3b62b82b_3eb0a420, 96'hb691925c_3b62276e_3eb26900, 96'hb69262fe_3b6195db_3eb42cbd, 96'hb6932f09_3b610378_3eb5ef56,
+    96'hb693f67f_3b607049_3eb7b0ca, 96'hb694b966_3b5fdc52_3eb97117, 96'hb69577c2_3b5f4798_3ebb303b, 96'hb6963196_3b5eb220_3ebcee34,
+    96'hb696e6e7_3b5e1bee_3ebeab02, 96'hb69797ba_3b5d8507_3ec066a3, 96'hb6984415_3b5ced6f_3ec22116, 96'hb698ebfc_3b5c552b_3ec3da58,
+    96'hb6998f74_3b5bbc3e_3ec5926a, 96'hb69a2e85_3b5b22af_3ec74949, 96'hb69ac933_3b5a8880_3ec8fef4, 96'hb69b5f85_3b59edb6_3ecab36a,
+    96'hb69bf181_3b595257_3ecc66aa, 96'hb69c7f2e_3b58b665_3ece18b3, 96'hb69d0893_3b5819e5_3ecfc983, 96'hb69d8db6_3b577cdd_3ed1791a,
+    96'hb69e0e9e_3b56df4f_3ed32776, 96'hb69e8b54_3b564140_3ed4d497, 96'hb69f03de_3b55a2b4_3ed6807b, 96'hb69f7844_3b5503b0_3ed82b21,
+    96'hb69fe88e_3b546437_3ed9d489, 96'hb6a054c4_3b53c44f_3edb7cb1, 96'hb6a0bced_3b5323fa_3edd239a, 96'hb6a12113_3b52833c_3edec941,
+    96'hb6a1813d_3b51e21b_3ee06da6, 96'hb6a1dd75_3b51409a_3ee210c9, 96'hb6a235c2_3b509ebc_3ee3b2a8, 96'hb6a28a2d_3b4ffc86_3ee55344,
+    96'hb6a2dabf_3b4f59fc_3ee6f29a, 96'hb6a32782_3b4eb721_3ee890ab, 96'hb6a3707e_3b4e13f9_3eea2d76, 96'hb6a3b5bc_3b4d7088_3eebc8fb,
+    96'hb6a3f746_3b4cccd2_3eed6338, 96'hb6a43524_3b4c28db_3eeefc2e, 96'hb6a46f61_3b4b84a5_3ef093db, 96'hb6a4a606_3b4ae036_3ef22a40,
+    96'hb6a4d91d_3b4a3b8f_3ef3bf5c, 96'hb6a508af_3b4996b6_3ef5532e, 96'hb6a534c5_3b48f1ad_3ef6e5b7, 96'hb6a55d6a_3b484c78_3ef876f5,
+    96'hb6a582a7_3b47a71b_3efa06e8, 96'hb6a5a487_3b470198_3efb9591, 96'hb6a5c312_3b465bf3_3efd22ef, 96'hb6a5de54_3b45b630_3efeaf01,
+    96'hb6a5f656_3b451051_3f001ce4, 96'hb6a60b22_3b446a5b_3f00e1a1, 96'hb6a61cc2_3b43c44f_3f01a5b8, 96'hb6a62b40_3b431e32_3f02692a,
+    96'hb6a636a6_3b427807_3f032bf5, 96'hb6a63eff_3b41d1d0_3f03ee1a, 96'hb6a64454_3b412b91_3f04af98, 96'hb6a646b0_3b40854c_3f057071,
+    96'hb6a6461c_3b3fdf06_3f0630a3, 96'hb6a642a3_3b3f38bf_3f06f02f, 96'hb6a63c50_3b3e927c_3f07af14, 96'hb6a6332b_3b3dec40_3f086d54,
+    96'hb6a6273f_3b3d460d_3f092aed, 96'hb6a61897_3b3c9fe5_3f09e7e0, 96'hb6a6073c_3b3bf9cc_3f0aa42d, 96'hb6a5f338_3b3b53c5_3f0b5fd3,
+    96'hb6a5dc96_3b3aadd2_3f0c1ad4, 96'hb6a5c360_3b3a07f5_3f0cd52f, 96'hb6a5a79f_3b396231_3f0d8ee4, 96'hb6a5895d_3b38bc8a_3f0e47f4,
+    96'hb6a568a4_3b381700_3f0f005d, 96'hb6a5457f_3b377197_3f0fb822, 96'hb6a51ff7_3b36cc52_3f106f41, 96'hb6a4f816_3b362732_3f1125ba,
+    96'hb6a4cde5_3b358239_3f11db8f, 96'hb6a4a16f_3b34dd6b_3f1290bf, 96'hb6a472bd_3b3438ca_3f13454a, 96'hb6a441d8_3b339457_3f13f931,
+    96'hb6a40ecb_3b32f015_3f14ac73, 96'hb6a3d99f_3b324c06_3f155f11, 96'hb6a3a25d_3b31a82c_3f16110b, 96'hb6a3690e_3b31048a_3f16c261,
+    96'hb6a32dbd_3b306121_3f177314, 96'hb6a2f072_3b2fbdf3_3f182324, 96'hb6a2b136_3b2f1b02_3f18d290, 96'hb6a27014_3b2e7851_3f19815a,
+    96'hb6a22d13_3b2dd5e1_3f1a2f81, 96'hb6a1e83d_3b2d33b3_3f1add06, 96'hb6a1a19b_3b2c91cb_3f1b89e8, 96'hb6a15936_3b2bf029_3f1c3629,
+    96'hb6a10f16_3b2b4ed0_3f1ce1c9, 96'hb6a0c345_3b2aadc1_3f1d8cc7, 96'hb6a075cb_3b2a0cfd_3f1e3725, 96'hb6a026b0_3b296c88_3f1ee0e1,
+    96'hb69fd5fe_3b28cc61_3f1f89fe, 96'hb69f83bc_3b282c8b_3f20327a, 96'hb69f2ff4_3b278d07_3f20da57, 96'hb69edaad_3b26edd7_3f218194,
+    96'hb69e83f0_3b264efc_3f222833, 96'hb69e2bc4_3b25b078_3f22ce33, 96'hb69dd233_3b25124c_3f237394, 96'hb69d7743_3b24747a_3f241857,
+    96'hb69d1afd_3b23d703_3f24bc7d, 96'hb69cbd69_3b2339e7_3f256006, 96'hb69c5e8e_3b229d2a_3f2602f1, 96'hb69bfe75_3b2200cb_3f26a540,
+    96'hb69b9d24_3b2164cd_3f2746f3, 96'hb69b3aa3_3b20c930_3f27e80a, 96'hb69ad6fa_3b202df5_3f288885, 96'hb69a7230_3b1f931e_3f292866,
+    96'hb69a0c4c_3b1ef8ac_3f29c7ac, 96'hb699a556_3b1e5e9f_3f2a6658, 96'hb6993d54_3b1dc4fa_3f2b0469, 96'hb698d44e_3b1d2bbc_3f2ba1e2,
+    96'hb6986a4b_3b1c92e8_3f2c3ec1, 96'hb697ff50_3b1bfa7e_3f2cdb08, 96'hb6979366_3b1b627e_3f2d76b6, 96'hb6972693_3b1acaeb_3f2e11cd,
+    96'hb696b8dd_3b1a33c4_3f2eac4c, 96'hb6964a4a_3b199d0b_3f2f4635, 96'hb695dae3_3b1906c1_3f2fdf87, 96'hb6956aab_3b1870e6_3f307842,
+    96'hb694f9ab_3b17db7b_3f311069, 96'hb69487e8_3b174682_3f31a7fa, 96'hb6941568_3b16b1fa_3f323ef6, 96'hb693a232_3b161de4_3f32d55e,
+    96'hb6932e4a_3b158a42_3f336b32, 96'hb692b9b8_3b14f714_3f340072, 96'hb6924480_3b14645a_3f349520, 96'hb691cea9_3b13d215_3f35293b,
+    96'hb6915838_3b134047_3f35bcc5, 96'hb690e133_3b12aeee_3f364fbc, 96'hb690699e_3b121e0d_3f36e223, 96'hb68ff180_3b118da4_3f3773f9,
+    96'hb68f78de_3b10fdb2_3f38053e, 96'hb68effbd_3b106e39_3f3895f4, 96'hb68e8622_3b0fdf39_3f39261b, 96'hb68e0c12_3b0f50b3_3f39b5b3,
+    96'hb68d9192_3b0ec2a7_3f3a44bc, 96'hb68d16a7_3b0e3515_3f3ad338, 96'hb68c9b56_3b0da7ff_3f3b6127, 96'hb68c1fa3_3b0d1b63_3f3bee89,
+    96'hb68ba394_3b0c8f44_3f3c7b5e, 96'hb68b272c_3b0c03a0_3f3d07a7, 96'hb68aaa71_3b0b7879_3f3d9365, 96'hb68a2d67_3b0aedcf_3f3e1e99,
+    96'hb689b012_3b0a63a1_3f3ea941, 96'hb6893276_3b09d9f1_3f3f3360, 96'hb688b499_3b0950bf_3f3fbcf5, 96'hb688367d_3b08c80a_3f404602,
+    96'hb687b827_3b083fd3_3f40ce86, 96'hb687399b_3b07b81b_3f415682, 96'hb686badd_3b0730e2_3f41ddf6, 96'hb6863bf1_3b06aa27_3f4264e4,
+    96'hb685bcdb_3b0623eb_3f42eb4b, 96'hb6853d9e_3b059e2e_3f43712c, 96'hb684be3e_3b0518f0_3f43f687, 96'hb6843ebf_3b049432_3f447b5e,
+    96'hb683bf25_3b040ff3_3f44ffb0, 96'hb6833f72_3b038c34_3f45837e, 96'hb682bfaa_3b0308f5_3f4606c9, 96'hb6823fd1_3b028635_3f468990,
+    96'hb681bfea_3b0203f5_3f470bd5, 96'hb6813ff8_3b018235_3f478d98, 96'hb680bffe_3b0100f5_3f480eda, 96'hb6804000_3b008035_3f488f9b
   };
-  localparam logic [31:0] TFN_TAIL [16] = '{32'h00000000, 32'h3f800000, 32'hbf800000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h00000000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h00000000};
+  localparam logic [31:0] TFN_TAIL [18] = '{32'h00000000, 32'h3f800000, 32'hbf800000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h00000000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h3f800000, 32'h00000000, 32'h00000000, 32'h00000000, 32'h3f490fdb};
   // the functions (fn = VOP func - 0x20): table, S, O, post (0 g, 1 x*g, 2 g + relu(x)),
   // periodic, odd
-  localparam int TFN_N = 10;
+  localparam int TFN_N = 11;
   typedef struct packed {
-    logic [2:0] tbl; logic [31:0] s, o; logic [1:0] post; logic per, odd;
+    logic [3:0] tbl; logic [31:0] s, o; logic [1:0] post; logic per, odd;
   } tfn_d_t;
   function automatic tfn_d_t tfn_desc(input logic [3:0] fn);
     case (fn)
-      4'd0: return '{tbl: 3'd0, s: 32'h41000000, o: 32'h43000000, post: 2'd0, per: 1'b0, odd: 1'b0};  // sigmoid
-      4'd1: return '{tbl: 3'd0, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // silu
-      4'd2: return '{tbl: 3'd1, s: 32'h41800000, o: 32'h43000000, post: 2'd0, per: 1'b0, odd: 1'b0};  // tanh
-      4'd3: return '{tbl: 3'd2, s: 32'h41800000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // gelu
-      4'd4: return '{tbl: 3'd3, s: 32'h41800000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // gelu_tanh
-      4'd5: return '{tbl: 3'd4, s: 32'h40800000, o: 32'h43000000, post: 2'd2, per: 1'b0, odd: 1'b0};  // softplus
-      4'd6: return '{tbl: 3'd5, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // mish
-      4'd7: return '{tbl: 3'd6, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // quick_gelu
-      4'd8: return '{tbl: 3'd7, s: 32'h4222f983, o: 32'h00000000, post: 2'd0, per: 1'b1, odd: 1'b1};  // sin
-      4'd9: return '{tbl: 3'd7, s: 32'h4222f983, o: 32'h42800000, post: 2'd0, per: 1'b1, odd: 1'b0};  // cos
+      4'd0: return '{tbl: 4'd0, s: 32'h41000000, o: 32'h43000000, post: 2'd0, per: 1'b0, odd: 1'b0};  // sigmoid
+      4'd1: return '{tbl: 4'd0, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // silu
+      4'd2: return '{tbl: 4'd1, s: 32'h41800000, o: 32'h43000000, post: 2'd0, per: 1'b0, odd: 1'b0};  // tanh
+      4'd3: return '{tbl: 4'd2, s: 32'h41800000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // gelu
+      4'd4: return '{tbl: 4'd3, s: 32'h41800000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // gelu_tanh
+      4'd5: return '{tbl: 4'd4, s: 32'h40800000, o: 32'h43000000, post: 2'd2, per: 1'b0, odd: 1'b0};  // softplus
+      4'd6: return '{tbl: 4'd5, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // mish
+      4'd7: return '{tbl: 4'd6, s: 32'h41000000, o: 32'h43000000, post: 2'd1, per: 1'b0, odd: 1'b0};  // quick_gelu
+      4'd8: return '{tbl: 4'd7, s: 32'h4222f983, o: 32'h00000000, post: 2'd0, per: 1'b1, odd: 1'b1};  // sin
+      4'd9: return '{tbl: 4'd7, s: 32'h4222f983, o: 32'h42800000, post: 2'd0, per: 1'b1, odd: 1'b0};  // cos
+      4'd10: return '{tbl: 4'd8, s: 32'h43800000, o: 32'h00000000, post: 2'd0, per: 1'b0, odd: 1'b0};  // atan
       default: return '0;
     endcase
   endfunction

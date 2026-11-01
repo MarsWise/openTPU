@@ -69,6 +69,11 @@ module otpu_board #(
   parameter bit TBGSC       = 1'b0,    // binary weights and group scales (CAPS2 bit7)
   parameter bit VU8         = 1'b0,    // byte extraction and conversion (CAPS2 bit8)
   parameter bit TGRQ        = 1'b0,    // TMM GSC block-major layout (CAPS2 bit9)
+  parameter bit VRAND       = 1'b0,    // VOP RAND, counter-based uniforms (CAPS2 bit10)
+  parameter bit TCQ         = 1'b0,    // TMM CQ, codebook LUT weights (CAPS2 bit11)
+  parameter bit TATAN       = 1'b0,    // TFN atan on [0, 1] (table 8) (CAPS2 bit12)
+  parameter bit QST4        = 1'b0,    // QST Q4, 4-bit ROW rows (CAPS2 bit13)
+  parameter bit LDX         = 1'b0,    // LDX indexed row gather (CAPS2 bit14)
   parameter bit COLL_GATHER = 1'b1,    // 0 (S = 1 only): the collective unit runs BAR alone, no
                                        // GATHER (otpu_coll_bar; CAPS2 bit0 = 0, docs/infra_hunt.md 5)
   parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait entries (WAITC, docs/seq_vpu.md; CFG_UARCH bit24)
@@ -228,7 +233,7 @@ module otpu_board #(
   otpu_ctrl #(.D(D), .MCOLS(MCOLS), .ACT_ROWS(ACT_ROWS), .LANES(LANES), .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID),
               .DDR_MTS(DDR_MTS), .TRACE_DEPTH(TRACE_DEPTH), .PQ_WIN(PQ_WIN), .HAS_TEMP(1'b1),
               .HAS_I2C(HAS_I2C), .CHASH(CHASH), .DSTEP(DSTEP), .HOSTCAL(HOSTCAL),
-              .COLL_GATHER(COLL_GATHER), .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN && DSTEP), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ),
+              .COLL_GATHER(COLL_GATHER), .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN && DSTEP), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX),
               .LDP(S > 1 ? 2 + 2 * XR : 2),  // LOAD to a slice's busy and back
               // each slice on its two channels' 2 GiB each (otpu_native_dram): 4 GiB
               .S(S), .TMEM_WORDS(TMEM_WORDS), .IMEM_WORDS(IMEM_WORDS), .ACT_BLOCKS(ACT_BLOCKS),

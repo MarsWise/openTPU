@@ -170,6 +170,7 @@ and ST's `n`, QACT's `w2` and `w3`, GATHER's `w3`).
 | 0x10 | LD | DRAM -> TMEM, `n = w3` words: `T[R[rb]+w2+i] = M32[R[ra]+w1+4i]` |
 | 0x11 | ST | TMEM -> DRAM: `M32[R[ra]+w1+4i] = T[R[rb]+w2+i]` for `i < w3` |
 | 0x12 | DSTEP | one Gated DeltaNet head step on a DRAM state, run by the DMA (see below; `Config.DSTEP`, CAPS bit6) |
+| 0x14 | LDX | DMA: the indexed row gather from a DRAM table (see "LDX"; `Config.LDX`, CAPS2 bit14) |
 | 0x20 | MM | see below |
 | 0x21 | QACT | quantize TMEM rows into ACT RAM |
 | 0x22 | QST | quantize TMEM rows into DRAM bytes |
@@ -309,6 +310,35 @@ The byte index is fixed by the function code. `opentpu.kernels.u8_input.program`
 four extraction passes and strided copies to restore byte order; it requires word-aligned,
 nonoverlapping DRAM buffers, padding in the last input word, and TMEM scratch. This primitive
 does not itself perform resize, channel conversion or normalization.
+
+`VOP RAND` (function 28, CAPS2 bit 10 / `Config.VRAND`) draws counter-based uniforms:
+`T[dst + r*drs + j] = (threefry2x32_13({x, 0}, {k, 0x6F70656E})[0] >> 8) * 2^-24` for
+`x` the raw 32 bits of `A(r, j)` (the counter, not flushed: normally an fp32 integer such as a
+position, `opentpu.rand.counters`) and `k = R[rd] + w7` (the key, raw bits: a request's seed).
+Threefry-2x32 is Random123's, 13 rounds (additions, rotations and xors; the known-answer
+vectors are in `tests/test_vrand.py`). The result is an exact fp32 in `[0, 1 - 2^-24]`, a
+function of `(x, k)` only, so draws do not depend on the order or split of runs. RAND reads
+neither B nor the immediate as fp32; it has ADD's latency (one slot: `rtl/vpu/otpu_rand.sv`,
+seven stages beside slot 0) and issues `LANES` columns a cycle. The sampled decode loop draws
+position q's uniform as `uniform(bits(float(q)), seed)` with the seed in state word 7
+(`generate.Sampler.uniform`); `opentpu.kernels.randn` builds normals (Box-Muller with VPU
+operations only).
+
+`TMM CQ` (CAPS2 bit 11 / `Config.TCQ`; word 4 bit 27, GSC only, not GRQ): codebook-quantized
+weights (Cactus CQ1..CQ4, `opentpu/cq.py`). Each code selects an int8 entry of the slice's
+16-entry LUT; the weight is `LUT[code] * Sw[n, k]` with GSC's fp32 scale per (row, D-block), so a
+Cactus matrix `norm[n, g] * codebook[code]` is `LUT = round(codebook / s)`, `Sw = norm * s`,
+`s = max |codebook| / 127`. Codes: with `BIN` (bit 26) 1-bit in BIN's layout (eight blocks a
+chunk); else 2-bit in the ternary layout (four blocks a chunk, every code valid); with bit 29
+(`CQ4`) 4-bit, two blocks a D-byte chunk: block `k` in half `k % 2` (bytes `(k % 2) * D/2 ..`),
+element `i` the low nibble of byte `i/2` for even `i` (CQ3 uses this layout with 8 entries).
+The GSC adapter expands it as GSC (one RSC subcommand a block, ACC in K order); its subcommands
+carry word 4 bit 31 (CQ) and 29 (CQ4), the MXU's weight decode reading the LUT
+(`otpu_tmm_gsc.lut`). `LUTSET` (word 4 bit 30; a GSC TMM with `N = KB = M = 1`, all addresses
+0): eight LUT entries, bytes of `rs` (entries 0..3 of the half) and `srs` (4..7), into half
+`ors[0]` (`isa.tmm_lut`: two LUTSETs). The adapter takes it like a GSC command (after earlier
+legacy commands drain, released in order) and completes it at once; no CQ command is in flight
+then, so a CQ TMM always decodes with the LUT of the LUTSETs before it. The LUT resets to 0.
 
 #### Weight formats
 
@@ -571,6 +601,32 @@ RLD reads its word after every older instruction that writes it (the scoreboard,
 read), and no younger instruction is issued until `R[rd]` holds the value: they may use it. The
 cost is the wait for the writer plus a few cycles; the decode loop (`opentpu/llm/generate.py`)
 uses a handful per token.
+
+### LDX
+
+The indexed row gather (DMA, `Config.LDX`, CAPS2 bit14): rows of a DRAM table, chosen by indices
+the device computed, into TMEM. Fields: `w1` the table (`+ R[ra]`, bytes), `w2` the destination
+(`+ R[rb]`), `w3` the indices (`+ R[rc]`), `w4 = rows | cols << 16`, `w5` the table's row stride
+`srs` (bytes), `w6` the destination row stride `drs` (words), `w7` the table's rows `E`. For each
+`i < rows`:
+
+    v = f2i(T[R[rc] + w3 + i])          (flag bit0 RAW: the word as a signed integer)
+    j = min(max(v, 0), E - 1)           (as signed: NaN, -0.5 .. and negatives give row 0)
+    T[R[rb] + w2 + i*drs + c] = M32[R[ra] + w1 + j*srs + 4c]     for c < cols
+
+The table's rows start on D-byte chunks: `R[ra] + w1` and `srs` are multiples of D, `srs / D`
+below 2^16; `1 <= cols <= 4096`, `1 <= rows < 2^16`, `1 <= E <= 2^24`. The rows written must
+not overlap the indices (the DMA reads the indices ahead of the rows; the ISA simulator stops on
+it). The clamp keeps every read inside the footprint, `E` rows of the table: a sample point off
+the feature map reads a valid row whose bilinear weight the kernel sets to 0.
+
+The DMA reads one index a cycle (through the TMEM read port of ST), converts and clamps it,
+multiplies it by the stride in chunks (a DSP) and queues the row (16 rows ahead); the row's
+`ceil(cols * 4 / D)` chunks are requested as an LD's, and its `ceil(cols / W)` segments
+(`W = min(D/4, LANES)` words) written a cycle each. A row of one chunk (D = 128: 32 fp32 words,
+a deformable attention head's channels) costs `D / (4W)` cycles of the TMEM side, against an
+RLD, an LD and the loop's overhead per row without it. Uses: multi-scale deformable attention
+(PP-DocLayout / RT-DETR in PaddleOCR-VL level 2), embedding rows by token, MoE expert rows.
 
 ### WAITW
 

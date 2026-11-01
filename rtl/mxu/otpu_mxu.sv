@@ -65,9 +65,17 @@ module otpu_tmm_gsc
   output logic rdy, done,
   output logic m_start, m_go,
   output cmd_t m_cmd,
-  input logic m_rdy, m_done
+  input logic m_rdy, m_done,
+  output logic [127:0] lut                  // TMM CQ's codebook LUT: 16 int8 (LUTSET)
 );
-  typedef enum logic [2:0] {IDLE, ARM, ISSUE, RELEASE, RUN} state_t;
+  // TMM CQ (word 4 bit 27, GSC only; bit 29 CQ4: 4-bit codes, two blocks a chunk; with BIN
+  // 1-bit codes): each subcommand's codes are the LUT's int8 entries (the MXU's wsel), its
+  // subcommands marked by word 4 bit 31 (and 29 for CQ4). LUTSET (word 4 bit 30, a GSC TMM of
+  // N = KB = M = 1): eight LUT entries, rs and srs's bytes into half ors[0]. It is taken like a
+  // GSC command (after the legacy commands drain, released in order) and completes at once: no
+  // CQ command is in flight while the LUT changes (a GSC command holds the adapter until its
+  // last group), so the LUT is constant under every CQ subcommand.
+  typedef enum logic [2:0] {IDLE, ARM, ISSUE, RELEASE, RUN, LUT} state_t;
   state_t state;
   cmd_t held;
   logic [7:0] k;
@@ -77,11 +85,12 @@ module otpu_tmm_gsc
   wire gsc = cmd.op == OP_TMM && cmd.flags[5];
   wire last_k = k + 8'd1 == held.w4[23:16];
   wire grq = !held.w4[26] && held.w4[28];
+  wire cq = held.w4[27] && !held.w4[30], cq4 = cq && held.w4[29];
   always_comb begin
     // Unit ready cannot depend on cmd: the sequencer registers cmd after observing ready.
     // Accept GSC into held while a legacy command drains; forward its release/completion.
     rdy = state == IDLE && m_rdy;
-    done = pending != 0 ? m_done : state == RUN && m_done && last_k;
+    done = pending != 0 ? m_done : (state == RUN && m_done && last_k) || state == LUT;
     m_start = state == IDLE ? start && !gsc : state == ISSUE && m_rdy;
     m_go = state == RELEASE || (go && unreleased != 0) ||
            (state == IDLE && go && !(start && gsc));
@@ -91,10 +100,11 @@ module otpu_tmm_gsc
       m_cmd.flags = 8'h80;                     // RSC, scale of this group alone
       m_cmd.flags[1] = held.flags[1] || k != 0; // first term: original ACC, later terms: ACC
       m_cmd.flags[2] = held.flags[2] && last_k;
-      m_cmd.w1 = held.w1 + (32'(held.w4[26] ? (k >> 3) : (k >> 2)) * D);
+      m_cmd.w1 = held.w1 + (32'(held.w4[26] ? (k >> 3) : cq4 ? (k >> 1) : (k >> 2)) * D);
       m_cmd.w2 = held.w2 + (32'(k) << 2);
-      m_cmd.w4 = held.w4[26] ? {4'd0, k[2], 1'b1, k[1:0], 8'd1, held.w4[15:0]} :
-                                {6'd0, k[1:0], 8'd1, held.w4[15:0]};
+      m_cmd.w4 = held.w4[26] ? {cq, 3'd0, k[2], 1'b1, k[1:0], 8'd1, held.w4[15:0]} :
+                 cq4 ? {cq, 1'b0, 1'b1, 4'd0, k[0], 8'd1, held.w4[15:0]} :
+                       {cq, 5'd0, k[1:0], 8'd1, held.w4[15:0]};
       m_cmd.w6[31:24] = held.w6[31:24] + k;
       if (grq) begin
         m_cmd.w1 = wb;
@@ -115,6 +125,7 @@ module otpu_tmm_gsc
       k <= 0;
       wb <= '0;
       sb <= '0;
+      lut <= '0;
     end else begin
       if (state == IDLE || state == ARM) begin
         case ({state == IDLE && start && !gsc, m_done && pending != 0})
@@ -140,7 +151,13 @@ module otpu_tmm_gsc
         end
         ARM: begin
           if (go && unreleased == 0) released <= 1'b1;
-          if (pending == 0 && (released || (go && unreleased == 0))) state <= ISSUE;
+          if (pending == 0 && (released || (go && unreleased == 0)))
+            state <= held.w4[30] ? LUT : ISSUE;
+        end
+        LUT: begin                                   // LUTSET: its half, then done (above)
+          if (held.w6[0]) lut[127:64] <= {held.w7, held.w5};
+          else            lut[63:0]   <= {held.w7, held.w5};
+          state <= IDLE;
         end
         ISSUE: if (m_rdy) state <= RELEASE;
         RELEASE: state <= RUN;
@@ -160,8 +177,13 @@ module otpu_tmm_gsc
 `ifndef SYNTHESIS
   always @(posedge clk) if (!rst) begin
     if (start && !rdy) $fatal(1, "TMM GSC: start without ready");
-    if (start && gsc && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
-        cmd.w4[31:29] != 0 || cmd.w4[27] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
+    if (start && gsc && cmd.w4[30] && (cmd.w4 != 32'h4001_0001 || cmd.w6[31:1] != 31'h0000_8000))
+      $fatal(1, "TMM LUTSET: N = KB = M = 1, half ors[0]");
+    if (start && gsc && !cmd.w4[30] && (cmd.w4[29] && (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) ||
+        cmd.w4[27] && cmd.w4[28]))
+      $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; CQ not with GRQ");
+    if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
+        cmd.w4[31:30] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
         cmd.w4[15:0] == 0 ||
         (cmd.w4[28] ? (cmd.w4[26] || cmd.w4[1:0] != 0 || cmd.w2[3:0] != 0 || cmd.w7[3:0] != 0 ||
                        cmd.w7 < (32'(cmd.w4[15:0]) << 2) || cmd.w5 % D != 0) :
@@ -198,6 +220,7 @@ module otpu_mxu
   input  logic                  go,          // release: the consumer may use it (in order)
   input  cmd_t                  cmd,
   output logic                  rdy,
+  input  logic [127:0]          cq_lut,      // TMM CQ's codebook LUT (otpu_tmm_gsc's LUTSETs)
   output logic                  done,
   output logic                  computing,   // a chunk is consumed this cycle (profiling)
   // profiling: this cycle's stream state (the FIFO level; work but no chunk / chunks but no
@@ -287,6 +310,9 @@ module otpu_mxu
   wire cmd_quad = cmd_ternary && cmd.flags[4];
   // TMM GRQ: the adapter's block-major subcommand (four output rows a chunk, one per group)
   wire cmd_grq = cmd_ternary && !cmd_binary && cmd.w4[28];
+  // TMM CQ (the adapter's subcommands: word 4 bit 31; bit 29 CQ4): codes through the LUT
+  wire cmd_cq = cmd_ternary && cmd.w4[31];
+  wire cmd_cq4 = cmd_cq && !cmd_binary && cmd.w4[29];
   // the weight format of the entry: TMM's is 8-bit's (its field holds QUAD)
   wire [1:0] cmd_wf = cmd_ternary ? 2'd0 : cmd.flags[5:4];
 `ifndef SYNTHESIS
@@ -298,12 +324,15 @@ module otpu_mxu
     if (cmd_quad && 4 * int'(cmd.w6[23:16]) > MCOLS)
       $fatal(1, "otpu_mxu: TMM QUAD needs 4*M <= MCOLS");
     if (cmd_binary && (D % 8 != 0 || cmd.flags[4] || cmd.flags[5] || cmd.flags[6] ||
-                       cmd.w4[31:28] != 0 ||
+                       cmd.w4[30:28] != 0 ||
                        ((cmd.w4[27] || cmd.w4[25:24] != 0) && cmd.w4[23:16] != 1)))
       $fatal(1, "otpu_mxu: invalid BIN format, flags or D alignment");
-    if (cmd_ternary && !cmd_binary && {cmd.w4[31:29], cmd.w4[27:24]} != 0 &&
-        ({cmd.w4[31:29], cmd.w4[27:26]} != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
+    if (cmd_ternary && !cmd_binary && {cmd.w4[30], cmd.w4[27:24]} != 0 &&
+        ({cmd.w4[30], cmd.w4[27:26]} != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
       $fatal(1, "otpu_mxu: quarter select requires one unpaired block");
+    if (cmd_cq && (cmd.w4[23:16] != 1 || cmd_pair || cmd_quad || cmd_grq || !cmd.flags[7] ||
+                   (cmd_cq4 && cmd.w4[25])))
+      $fatal(1, "otpu_mxu: TMM CQ subcommands are RSC, KB 1, unpaired (CQ4: half 0 / 1)");
     if (cmd_grq && (cmd.w4[27:24] != 0 || cmd.w4[23:16] != 1 || !cmd.flags[7] || cmd.flags[0] ||
                     cmd_pair || cmd_quad || int'(cmd.w6[23:16]) > MCOLS || cmd.w7 != 32'd16 ||
                     cmd.w2[3:0] != 0))
@@ -367,6 +396,7 @@ module otpu_mxu
     logic [15:0]      KB, KBa;         // KBa: advances per row
     logic [15:0]      KBm1;            // KBa - 1: the last advance's ck (last_k a compare, no adder)
     logic             pair, ternary, quad, binary;
+    logic             cq, cq4;         // TMM CQ: the LUT's codes (CQ4: 4-bit, the half in quarter)
     logic [MCOLS-1:0] hi;              // PAIR: the columns that take the odd blocks (j >= M)
     logic [MCOLS-1:0][1:0] qs;         // the block each column reads: PAIR {0, hi}; QUAD j / M
     logic [1:0]       kr;              // QUAD: KB mod 4, the last advance's blocks (0: four)
@@ -406,6 +436,8 @@ module otpu_mxu
     cmd_e.pair  = cmd_pair;
     cmd_e.ternary = cmd_ternary;
     cmd_e.binary = cmd_binary;
+    cmd_e.cq    = cmd_cq;
+    cmd_e.cq4   = cmd_cq4;
     cmd_e.quad  = cmd_quad;
     cmd_e.kr    = cmd_KB8[1:0];
     cmd_e.quarter = cmd_binary ? {cmd.w4[27], cmd.w4[25:24]} :
@@ -799,6 +831,7 @@ module otpu_mxu
     logic       o;        // PAIR: the chunk's high block is in the row (not past an odd KB)
     logic [2:0] ts;       // TMM: packed chunk's block (eight for BIN, four for ternary)
     logic       qd;       // TMM QUAD: all four (the low stream carries the raw 2-bit codes)
+    logic       cq, c4;   // TMM CQ: codes through the LUT (c4: 4-bit codes, ts the half)
     logic [3:0] ov;       // QUAD: the quarters in the row (not past a KB of kr mod 4 blocks)
   } cm_t;
 
@@ -838,13 +871,21 @@ module otpu_mxu
   // the weight of position i for a column that takes the high block (PAIR) or the high half
   function automatic logic [7:0] wsel(input logic [D*8-1:0] w, input int i, input logic hb,
                                       input logic [1:0] wf, input logic ternary, input logic binary,
-                                      input logic [2:0] ts);
+                                      input logic [2:0] ts, input logic cq, input logic c4,
+                                      input logic [127:0] lut);
     int symbol;
     logic [1:0] code;
-    if (binary) return w[int'(ts) * D + i] ? 8'd1 : -8'sd1;
+    logic [3:0] c4v;
+    if (binary) return cq ? lut[8 * int'(w[int'(ts) * D + i]) +: 8] :
+                       w[int'(ts) * D + i] ? 8'd1 : -8'sd1;
+    if (ternary && c4) begin                       // TMM CQ4: nibble i of half ts
+      c4v = w[4 * (int'(ts[0]) * D + i) +: 4];
+      return lut[8 * int'(c4v) +: 8];
+    end
     if (ternary) begin
       symbol = int'(ts) * D + i;
       code = w[2 * symbol +: 2];
+      if (cq) return lut[8 * int'(code) +: 8];
       case (code)
         2'b00: return 8'd0;
         2'b01: return 8'd1;
@@ -893,6 +934,8 @@ module otpu_mxu
       m0.ts <= c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
                {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
       m0.qd <= c_quad;
+      m0.cq <= pop_e.cq;
+      m0.c4 <= pop_e.cq4;
       m0.ov <= !(last_k && pop_e.kr != 2'd0) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
     end
@@ -1025,13 +1068,15 @@ module otpu_mxu
   // The decode's controls are copies of m0's (qd, ternary, h, ts) and of wf0 / pr0, loaded with
   // their next values: each reaches the D x 16 weight bits' muxes (m0.qd alone 2104 loads in r5's
   // m8 0f9f9b1d), m0's own fields the rest of S1.
-  (* max_fanout = 64 *) logic wq_qd, wq_tn, wq_bn, wq_h, wq_pr;
+  (* max_fanout = 64 *) logic wq_qd, wq_tn, wq_bn, wq_h, wq_pr, wq_cq, wq_c4;
   (* max_fanout = 64 *) logic [2:0] wq_ts;
   (* max_fanout = 64 *) logic [1:0] wq_wf;
   always_ff @(posedge clk) begin
     wq_qd <= pop && c_quad;
     wq_tn <= pop && c_ternary;
     wq_bn <= pop && c_binary;
+    wq_cq <= pop && pop_e.cq;
+    wq_c4 <= pop && pop_e.cq4;
     wq_h <= pop && c_w4 && !c_pair && ck[0];
     wq_ts <= !pop ? 3'b000 : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
              {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
@@ -1043,8 +1088,8 @@ module otpu_mxu
   initial wq_v = 1'b0;
   always @(posedge clk) wq_v <= 1'b1;
   always @(posedge clk)
-    if (wq_v && {wq_qd, wq_tn, wq_bn, wq_h, wq_ts, wq_wf, wq_pr} !==
-                {m0.qd, m0.ternary, m0.binary, m0.h, m0.ts, wf0, pr0})
+    if (wq_v && {wq_qd, wq_tn, wq_bn, wq_h, wq_ts, wq_wf, wq_pr, wq_cq, wq_c4} !==
+                {m0.qd, m0.ternary, m0.binary, m0.h, m0.ts, wf0, pr0, m0.cq, m0.c4})
       $fatal(1, "otpu_mxu: the weight decode's control copies are not m0's");
 `endif
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
@@ -1052,8 +1097,9 @@ module otpu_mxu
     for (int i = 0; i < D; i++)
       wd[i] <= wq_qd ? {8'd0, w0[2 * (3 * D + i) +: 2], w0[2 * (2 * D + i) +: 2],
                         w0[2 * (D + i) +: 2], w0[2 * i +: 2]} :
-               {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts),
-                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts)};
+               {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts,
+                     wq_cq, wq_c4, cq_lut),
+                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
     otpu_skew #(.W(16), .N(i % CLS)) u_w (.clk, .en(1'b1), .d(wd[i]), .q(wc[0][i]));
@@ -2133,7 +2179,7 @@ module otpu_mxu
         for (int q = 0; q < 4; q++)
           if (m0.ov[q] && w0[2 * (q * D + i) +: 2] == 2'b11)
             $fatal(1, "otpu_mxu: reserved TMM symbol at quarter %0d, element %0d", q, i);
-    if (m0.v && m0.ternary && !m0.qd && !m0.binary)
+    if (m0.v && m0.ternary && !m0.qd && !m0.binary && !m0.cq)
       for (int i = 0; i < D; i++) begin
         int q0;
         q0 = int'(m0.ts);

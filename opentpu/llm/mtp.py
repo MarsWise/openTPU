@@ -514,16 +514,22 @@ class MTPDecoder:
         b0, b1 = (P - lazy) // block + 1, (P + n) // block + 1
         progs = self._gen_programs(b0, b1, st, drafts is not None, samp)
         g = img.lookup["gen"]
+        seed = 0
         if samp is not None:        # u[P + 1 .. P + n], then a stand-in for row 1 of the
             eng._generate_inputs(samp, P, n, context, rng)      # last verify (not emitted)
-            for s_ in range(img.cfg.S):
-                eng.backend.write(s_, g["uni"] + 4 * (P + n + 1), np.full(1, 0.5, np.float32))
+            if G.device_rng(img.cfg):       # (VOP RAND: the device draws them, the seed's)
+                seed = int(rng.integers(0, 1 << 32))
+            else:
+                for s_ in range(img.cfg.S):
+                    eng.backend.write(s_, g["uni"] + 4 * (P + n + 1),
+                                      np.full(1, 0.5, np.float32))
+        self.last_seed = seed
         if drafts is not None:
             dt = np.zeros(img.cap + 2, np.float32)
             dt[:len(drafts)] = np.asarray(drafts, np.float32)[:img.cap + 2]
             eng.backend.write(0, img.lookup["mtpgen"]["dtab"], dt)
             d = int(dt[P + 1])
-        words = G.state_words(spec, a0, P, n, ids, block, samp)
+        words = G.state_words(spec, a0, P, n, ids, block, samp, seed)
         words[S_PAR] = self.slot
         if lazy:                    # the D1 of P - 1's bucket: an E's iteration there (n = 0),
             q = P - 1               # the next position P (tpos block: the next bucket's first)

@@ -118,6 +118,11 @@ module otpu_ctrl #(
   parameter bit TBGSC = 1'b0,            // CAPS2 bit7: binary weights with group scales
   parameter bit VU8 = 1'b0,              // CAPS2 bit8: unsigned byte extraction
   parameter bit TGRQ = 1'b0,             // CAPS2 bit9: TMM GSC block-major layout (GRQ)
+  parameter bit VRAND = 1'b0,        // CAPS2 bit10: VOP RAND, counter-based uniforms
+  parameter bit TCQ = 1'b0,          // CAPS2 bit11: TMM CQ, codebook LUT weights
+  parameter bit TATAN = 1'b0,        // CAPS2 bit12: TFN atan on [0, 1] (table 8)
+  parameter bit QST4 = 1'b0,         // CAPS2 bit13: QST Q4, 4-bit ROW rows
+  parameter bit LDX = 1'b0,          // CAPS2 bit14: LDX indexed row gather
   parameter bit TPAIR = 1'b0,            // CAPS2 bit1: the build is TMM PAIR's (the target's TPAIR;
                                          //   the MXU takes it in every build since)
   parameter int LDP = 2,                 // cycles after LOAD before the loaders' busy shows (>= 2)
@@ -210,7 +215,7 @@ module otpu_ctrl #(
   // holds it, opentpu/target.py arch_hash)
   // bit2 TQUAD: TMM QUAD, the K-split by four (likewise)
   // bit3 TFN: the table functions (likewise)
-  localparam logic [31:0] CAPS2 = {22'd0, TGRQ, VU8, TBGSC, TBIN, VCMP, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
+  localparam logic [31:0] CAPS2 = {17'd0, LDX, QST4, TATAN, TCQ, VRAND, TGRQ, VU8, TBGSC, TBIN, VCMP, TGSC, TFN, TQUAD, TPAIR, COLL_GATHER || S > 1};
 
   logic [63:0] cycles;
   logic [31:0] n_brd, n_bwr, n_ard, n_awr, n_bst, scratch;

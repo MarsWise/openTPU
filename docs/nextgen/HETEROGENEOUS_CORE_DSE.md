@@ -195,12 +195,24 @@ script `wk/prof.py` in the session scratchpad; tree `444c32ad`):
 |---|---|---|---|
 | R2 | TFN: table functions VOP 0x20..0x29 (sigmoid, SiLU, tanh, GELU erf/tanh, softplus, Mish, QuickGELU, sin, cos) on otpu_se_comp, BRAM tables | RTL SIMULATED (this commit) | every family's activations: 1 VOP at 4 col/cycle instead of 5-8 VOPs at ~1 |
 | R2b | conv2d: two output tiles (VPU/store of one overlaps the MXU of the other) | SOFTWARE (this commit) | the VPU's bias fill + activation stop serializing with the MMs |
-| R6 | QST transposed writes (V^T: four rows' bytes a word a cycle) | PLANNED | attention prefill everywhere (ViT/VLM/SD/VLA/LLM prefill): QST 59% of sdpa |
+| R6 | QST transposed writes (V^T: four rows' bytes a word a cycle) | RTL SIMULATED (QST T4, 92fc8feb) | attention prefill everywhere (ViT/VLM/SD/VLA/LLM prefill): QST 59% of sdpa |
 | R3 | fused row/column affine VOP (LayerNorm, RMSNorm, GroupNorm, AdaLN) | PLANNED | 6 passes -> 3 for LN |
-| R4 | MAC VOP (dst += A * C(c)) / depthwise engine | PLANNED | depthwise 2 passes a tap -> 1 (YOLO-nano/v10/v11, MobileNet) |
-| R7 | m8 (8 MX columns) at 133 MHz | PLANNED | 2x MACs; upstream r2.1 does not close timing yet |
+| R4 | MAC VOP (dst += A * C(c)) / depthwise engine | RTL SIMULATED (VOP MAC, 92fc8feb) | depthwise 2 passes a tap -> 1 (YOLO-nano/v10/v11, MobileNet) |
+| R7 | m8 (8 MX columns) at 133 MHz | SYNTHESIS + IMPLEMENTATION (b9fe0ca6 GRQ build, WNS +0.003 ns) | 2x MACs; upstream r2.1 does not close timing yet |
 
 The fused bias + activation in the MXU epilogue (R1 in the first list) is deferred: with TFN at
 4 columns a cycle and double-buffered output tiles the activation overlaps the MXU (the conv's
 MXU produces ~0.25 outputs a cycle), so the epilogue fusion would save little against its cost
 (a pipelined TFN per epilogue lane and an MM encoding change: MM's flags are fully allocated).
+
+## r8 additions (2026-11-01, RTL SIMULATED, not built)
+
+| id | block | status | why |
+|---|---|---|---|
+| A1 | VOP RAND (Threefry-2x32-13 per lane, CAPS2 bit10) | RTL SIMULATED (RTL == ISA) | sampling uniforms and noise on the device (FPGA-only sampling) |
+| A2 | TMM CQ / LUTSET (CQ1..CQ4 codes through a 16-entry int8 LUT, CAPS2 bit11) | RTL SIMULATED | Cactus CQ weights without re-encoding |
+| C1 | QST Q4 (4-bit ROW rows, CAPS2 bit13) | RTL SIMULATED | a 4-bit K cache (with Hadamard rotation); 6-bit V deferred (nibble merge in DRAM) |
+| C8 | TFN atan on [0, 1] (table 8, CAPS2 bit12) | RTL SIMULATED | atan2 for Kokoro / iSTFT phases |
+| C11 | LDX: the DMA's indexed row gather (CAPS2 bit14) | RTL SIMULATED | deformable attention samples (PP-DocLayout / RT-DETR), embedding and expert rows: one row a few cycles instead of RLD + LD + loop per row |
+
+Resources and timing of these blocks: NOT RUN (the r8 build, tools/nextgen/windows/r8_build.cmd).

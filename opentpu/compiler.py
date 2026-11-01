@@ -317,6 +317,8 @@ class QTensor:
     hsigns: Affine | None = None
     hblock: int = 0
     grq: bool = False  # TMM GRQ block-major layout: rs / srs are the K planes' strides
+    cq: int = 0        # TMM CQ (Config.TCQ): codes of `cq` bits through `lut` (opentpu/cq.py)
+    lut: tuple | None = None
 
     @staticmethod
     def weight(data, scale, n: int, k: int, fmt: str, D: int, grq: bool = False,
@@ -385,6 +387,26 @@ class QTensor:
                        (n, k), stride, 0 if scale is None else srs, D,
                        wf=I.W8, rsc=scale is not None and not gsc, ternary=True, binary=True, gsc=gsc)
 
+    @staticmethod
+    def cq_weight(data, scale, n: int, k: int, D: int, bits: int, lut, rs: int | None = None,
+                  srs: int | None = None) -> "QTensor":
+        """Descriptor of an [n, k] TMM CQ matrix (opentpu/cq.py: cq.pack's rows, cq.scales'
+        fp32 scale per (row, D-block) at srs bytes a row, the int8 LUT)."""
+        from . import cq as CQ
+        if bits not in (1, 2, 3, 4) or D != 128 or k % D or n <= 0:
+            raise CompileError("TMM CQ: 1..4-bit codes, D = 128, K a multiple of D")
+        bpc = CQ.blocks_a_chunk(bits)
+        row_bytes = -(-(k // D) // bpc) * D
+        stride = row_bytes if rs is None else rs
+        srs = 4 * (k // D) if srs is None else srs
+        if stride % D or stride < row_bytes or srs % 4 or srs < 4 * (k // D):
+            raise CompileError("TMM CQ: D-aligned rows of the packed codes, a scale a block")
+        q = tuple(int(x) for x in lut)
+        if len(q) > 16 or any(not -128 <= x <= 127 for x in q):
+            raise CompileError("TMM CQ: a LUT of at most 16 int8 entries")
+        return QTensor(Affine.of(data), Affine.of(scale), (n, k), stride, srs, D, wf=I.W8,
+                       ternary=True, binary=bits == 1, gsc=True, cq=bits, lut=q)
+
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
         pad an MM operand to whole D-blocks: the caller weights them 0). In a tiled matrix
@@ -432,7 +454,8 @@ class QTensor:
                            hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
                            hblock=self.hblock)
         if self.ternary:
-            data = self.data + r0 * self.rs + c0.div_exact((8 if self.binary else 4) * self.D) * self.D
+            bpc = 8 if self.binary else 2 if self.cq >= 3 else 4      # blocks a chunk
+            data = self.data + r0 * self.rs + c0.div_exact(bpc * self.D) * self.D
         elif self.wf == I.W8:
             data = self.data + r0 * self.rs + c0
         else:                     # 4-bit rows stream whole D-byte chunks of two D-blocks
@@ -453,7 +476,7 @@ class QTensor:
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
                        rsc=self.rsc, ternary=self.ternary, binary=self.binary, gsc=self.gsc,
                        hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
-                       hblock=self.hblock)
+                       hblock=self.hblock, cq=self.cq, lut=self.lut)
 
 
 VT_TILE = 256          # V^T cache tile (tokens): the attention block (qwen3.ATTN_BLOCK)
@@ -1540,6 +1563,20 @@ class Builder:
         out.fresh = True
         return out
 
+    def rand(self, x, key: int = 0, key_reg: int = 0) -> Tile:
+        """VOP RAND over x's shape (Config.VRAND): uniforms in [0, 1) of x's raw words (the
+        counters) under the key R[key_reg] + key (opentpu/rand.py)."""
+        if not getattr(self.cfg, "VRAND", False):
+            raise CompileError("rand: the target has no VOP RAND (Config.VRAND)")
+        x = self.materialize(x)
+        self.check_live(x)
+        out = self.alloc(x.shape)
+        ars = x.rs if len(x.shape) == 2 else 0
+        drs = out.rs if len(out.shape) == 2 else 0
+        self.emit(I.rand(out.base, x.base, out.rows, out.cols, drs, ars, key, rd=key_reg))
+        out.fresh = True
+        return out
+
     # ---- peephole optimizations on the instruction just emitted
     def _last_vop_writing(self, t: Tile):
         body = self.stack[-1]
@@ -1659,6 +1696,33 @@ class Builder:
             for r in builtins.range(t.shape[0]):
                 ra, imm = self.addr(t.base + r * 4 * t.strides[0])
                 self.emit(I.ld(imm, out.base + r * out.rs, t.shape[1], ra=ra, comment="load row"))
+        return out
+
+    def gather_rows(self, t: Tensor, idx, raw: bool = False) -> Tile:
+        """LDX (Config.LDX): [n, C] rows idx[i] of the 2-D DRAM table t [E, C] (row-major, its
+        rows on D-byte chunks), the indices a 1-D tile of n (fp32 integers, f2i; raw: int32
+        bits), clamped to [0, E - 1] (docs/isa.md "LDX")."""
+        if not getattr(self.cfg, "LDX", False):
+            raise CompileError("gather_rows: the target has no LDX (Config.LDX)")
+        if len(t.shape) != 2 or t.strides[1] != 1:
+            raise CompileError("gather_rows: the table must be a row-major 2-D tensor")
+        E, C = t.shape
+        D = self.cfg.D
+        srs = 4 * t.strides[0]
+        if srs % D or C > I.LDX_MAX_COLS or E > I.LDX_MAX_ROWS_E:
+            raise CompileError(f"gather_rows: rows of {srs} bytes (a multiple of D = {D}), "
+                               f"{C} columns (<= {I.LDX_MAX_COLS}), {E} rows (<= 2^24)")
+        idx = self.materialize(idx)
+        self.check_live(idx)
+        if len(idx.shape) != 1:
+            raise CompileError(f"gather_rows: the indices {idx} must be a 1-D tile")
+        n = idx.cols
+        out = self.alloc((n, C))
+        ra, imm = self.addr(t.base)
+        if imm % D:
+            raise CompileError(f"gather_rows: the table at {imm} is not on a D-byte chunk")
+        self.emit(I.ldx(imm, out.base, idx.base, n, C, srs, out.rs, E, raw=raw, ra=ra, D=D,
+                        comment=f"gather {n}x{C}"))
         return out
 
     def store(self, t: Tensor, x) -> None:
@@ -2080,6 +2144,11 @@ class Builder:
             raise CompileError("dot: binary weights require Config.TBIN / new firmware")
         if w.binary and w.gsc and not self.cfg.TBGSC:
             raise CompileError("dot: binary group scales require Config.TBGSC / new firmware")
+        if w.cq and not getattr(self.cfg, "TCQ", False):
+            raise CompileError("dot: TMM CQ weights require Config.TCQ / new firmware")
+        if w.cq:                                # the LUT the TMM CQs below decode with
+            for ins in I.tmm_lut(w.lut):
+                self.emit(ins)
         if w.ternary and (w.D != self.cfg.D or (not unit and not (w.rsc or w.gsc))):
             raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows
@@ -2099,7 +2168,7 @@ class Builder:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
-            chunk_blocks = 8 if w.binary else 1 if w.grq else 4
+            chunk_blocks = 8 if w.binary else 1 if w.grq else 2 if w.cq >= 3 else 4
             if w.ternary and k0 % chunk_blocks:
                 raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ranges "
                                    f"must start on a {chunk_blocks}-block boundary")
@@ -2124,7 +2193,7 @@ class Builder:
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
-                                comment=f"tmm {M}x{K} . {N}x{K}^T"
+                                comment=f"tmm {M}x{K} . {N}x{K}^T" + (f" cq{w.cq}" if w.cq else "")
                                 + (" grq" if w.grq else "") + (" pair" if tpair else "") + (" quad" if tquad else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")
@@ -2140,6 +2209,8 @@ class Builder:
                                + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                + (" pair" if ppair else "") + (" +rowmax" if rowmax and last else "")
                                + (" acc*=scale" if acc_scale is not None and first else ""))
+                if w.cq:                        # TMM CQ: the codes' width (word 4)
+                    ins.w[3] |= I.TMM_CQ | (I.TMM_CQ4 if w.cq >= 3 else 0)
                 self.emit(ins)
                 m0 += mc
         self.bump_version(out.buf)

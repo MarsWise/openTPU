@@ -18,7 +18,9 @@ MODELS = {"qwen3": "Qwen3-0.6B", "lfm2": "LFM2.5-230M", "qwen35": "Qwen3.5-0.8B"
           "qwen35-35b": "Qwen3.5-35B-A3B", "gemma4-26b": "gemma-4-26B-A4B-it",
           "minicpmv-35b": "MiniCPM-V-4.7-35B-A3B",
           "bonsai4b": "Ternary-Bonsai-2-4B-mlx-2bit",
-          "bonsai2-4b": "Ternary-Bonsai-2-4B-mlx-2bit"}
+          "bonsai2-4b": "Ternary-Bonsai-2-4B-mlx-2bit",
+          # AMD ReasonLite (amd/ReasonLite-0.6B, -Turbo): Qwen3-0.6B distilled, the Qwen3 engine
+          "reasonlite": "ReasonLite-0.6B", "reasonlite-turbo": "ReasonLite-0.6B-Turbo"}
 
 
 def model_dir(name) -> Path:

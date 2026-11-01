@@ -354,8 +354,14 @@ def _sinks(b, m, spec, x, rows, kinds, pick, area) -> None:
             consts[kind] = G.Sampler.constants(b, g0, samp)
         st = ol.load(Tensor(area["st"][slot], (G.STATE_WORDS,), (1,)))
         g = SimpleNamespace(addr={"lg": area["lg"][slot], "pa": area["pa"][slot],
-                                  "pb": area["pb"][slot]}, uni=uni, iota=g0.iota)
-        sinks.append(wrap(G.Sampler(b, m, g, samp, st, None, consts[kind], u_at=r)))
+                                  "pb": area["pb"][slot]}, uni=uni, iota=g0.iota,
+                            uctr=getattr(g0, "uctr", None))
+        # the row's uniform: the host's (uni[r]), or with VOP RAND the device's of the position
+        # its pick lands at, under the slot's seed (generate.Sampler.uniform: the decode loop's
+        # draw for that position, so a request samples alike in both)
+        p = rows[r][1]
+        u_at = ((p.pos if hasattr(p, "pos") else p) + 1) if G.device_rng(b.cfg) else r
+        sinks.append(wrap(G.Sampler(b, m, g, samp, st, None, consts[kind], u_at=u_at)))
         sts.append(st)
     _head(x, m, spec, sinks, chunk)
     if len(pick) < len(rows):
@@ -444,11 +450,12 @@ class Steps:
         self.lp_n: dict = {}              # slot -> its logprobs (top n) when it has them
         self.lp: dict = {}                # slot -> its last pick's (logprob, rank, [(id, lp)])
 
-    def set_sampling(self, slot: int, samp, context=(), logprobs=None) -> None:
+    def set_sampling(self, slot: int, samp, context=(), logprobs=None, seed: int = 0) -> None:
         """Slot `slot` picks greedily (samp None) or with samp (generate.Sampling): its state
         words, and with a penalty its factors over `context` (the ids so far, the token it
         feeds next among them). logprobs (0 .. LP_MAX): each pick's raw logprobs on the device
-        too (_LogProbs; self.lp[slot] after each step)."""
+        too (_LogProbs; self.lp[slot] after each step). seed: the device RNG's key (VOP RAND,
+        generate.device_rng: the rows draw their own uniforms; run's uniforms are ignored)."""
         eng, a = self.eng, self.a
         self.kinds[slot] = kind_of(samp, logprobs)
         if logprobs is not None:
@@ -457,18 +464,13 @@ class Steps:
             self.lp_n.pop(slot, None)
         if samp is None:
             return
-        st = G.state_words(eng.spec, 0, 0, 0, [], eng.block, samp)
+        st = G.state_words(eng.spec, 0, 0, 0, [], eng.block, samp, seed)
         for s in range(eng.cfg.S):
             eng.backend.write(s, a["st"][slot], st)
-        if samp.pen:
-            V = a["V"]
-            pa, pb = np.ones(V, np.float32), np.ones(V, np.float32)
-            ix = np.unique(np.asarray(list(context), np.int64))
-            pa[ix] = np.float32(1.0) / np.float32(samp.penalty)
-            pb[ix] = samp.penalty
-            for s in range(eng.cfg.S):
-                eng.backend.write(s, a["pa"][slot], pa)
-                eng.backend.write(s, a["pb"][slot], pb)
+        if samp.pen:                # the penalty's tables, built on the device
+            eng.penalty_init(samp, context, a["st"][slot], a["pa"][slot], a["pb"][slot])
+            for s in range(eng.cfg.S):          # (the slot's state again: the seed's too)
+                eng.backend.write(s, a["st"][slot], st)
 
     # ---- programs
     def span(self, rows) -> int:
@@ -752,7 +754,7 @@ class Steps:
         c0 = time.perf_counter()
         io = np.zeros(2 * Rm + 2, np.float32)
         io[:len(grp)] = toks
-        if uni is not None:
+        if uni is not None and not G.device_rng(eng.cfg):   # (VOP RAND: the device's own)
             io[Rm:Rm + len(grp)] = np.minimum(np.asarray(uni, np.float32),
                                               np.float32(1 - 2.0 ** -24))
         io[2 * Rm], io[2 * Rm + 1] = t if isinstance(t, tuple) else (t, 0)

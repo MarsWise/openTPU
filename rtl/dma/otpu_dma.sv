@@ -35,6 +35,14 @@
 //       Past w6 cycles (w6 != 0; ww_late) it stops with `err` (the slice's error, seen by the
 //       host) between two reads: a read in flight at the timeout still ends the WAITW if its
 //       word holds, so the WAITW either completes (word written) or times out (nothing written).
+//   LDX  the indexed row gather (docs/isa.md "LDX"): an LD whose chunks come row by row from a
+//       table in DRAM. The indices are read from TMEM through lane 0, one a cycle, ahead of the
+//       rows (gx_rd), converted (f2i or raw), clamped to [0, E-1] and multiplied by the row
+//       stride (a pipeline, gx_v*) into the row queue (gx_q, GQD rows: a row's queue entry is
+//       reserved by its index read, so the pipeline never stalls). The chunk requests take a
+//       row from the queue (gx_cr: its chunks left, ic its next chunk); the delivery writes a
+//       row's ceil(cols / W) segments from the TMEM row address gx_ta, drs apart, the last one
+//       ending its chunk. Rows start on chunks, so the segments need no shift.
 // The DRAM port may refuse a request (b_gnt low) and read data may take any time to return (in
 // order). An ST or a DSTEP completes once the DRAM has acknowledged all its writes (wr_idle).
 module otpu_dma
@@ -111,6 +119,17 @@ module otpu_dma
   // sleft != 0 and sleft == 1, registered with sleft (as cl_nz / cl_one): an ST's TMEM read runs
   // from them into the TMEM arbiter and, through QUANT's grant, into otpu_native_dram's SW port
   logic         sl_nz, sl_one;
+  // ---- LDX (the setup gx_su; the table: word base, stride in chunks, E - 1; the rows: words,
+  // chunks, segments; TMEM row stride; the delivery: segment in the row, its last, row address)
+  localparam int GQD = 16;                             // the row queue's depth
+  logic         is_gx, gx_su, gx_raw;
+  logic [31:0]  gx_base, gx_drs, gx_ta;
+  logic [15:0]  gx_srs, gx_rows;
+  logic [23:0]  gx_emax;
+  logic [12:0]  gx_cols;
+  logic [7:0]   gx_nck;                                // chunks per row (cols <= 4096)
+  logic [9:0]   gx_nsr, gx_s;                          // segments per row; the one at sw
+  logic         gx_sl;                                 // ... is the row's last
 
   function automatic logic in_rng(input logic [31:0] a);
     return (a >= dw) && (a < de);
@@ -118,7 +137,8 @@ module otpu_dma
   function automatic int pos_of(input logic [31:0] a);     // segment index within its chunk
     return int'((a % CW) / W);
   endfunction
-  wire seg_end = (pos_of(sw) == SPC - 1) || sl_one;        // the segment at sw ends its chunk
+  wire seg_end = (pos_of(sw) == SPC - 1) || sl_one ||      // the segment at sw ends its chunk
+                  (is_gx && gx_sl);
 
   // ---- LD: chunk requests (address ic, cleft left), the chunk buffer, segment delivery
   logic [31:0]   ic, cleft;
@@ -164,7 +184,20 @@ module otpu_dma
     if (!rst && busy && (sl_nz != (sleft != 0) || sl_one != (sleft == 1)))
       $fatal(1, "otpu_dma: sl_nz %0d sl_one %0d but sleft %0d", sl_nz, sl_one, sleft);
 `endif
-  wire ld_req = ld_act && cl_nz && oc_nf && (!is_ds || ds_rr || (!ds_wreq && oc_lr));
+  // LDX: the row requested (gx_cr: valid; gx_cj: its chunks left less one), the index reads
+  // (gx_xa, gx_xl left; gx_res: queue entries reserved) and the row queue
+  logic         gx_cr;
+  logic [7:0]   gx_cj;
+  logic [31:0]  gx_xa;
+  logic [15:0]  gx_xl;
+  logic [$clog2(GQD):0] gx_res, gx_qn;
+  logic [$clog2(GQD)-1:0] gx_qw, gx_qr;
+  (* ram_style = "distributed" *) logic [31:0] gx_q [GQD];
+  wire gx_rd  = busy && is_gx && !gx_su && gx_xl != 0 && gx_res != ($clog2(GQD)+1)'(GQD);
+  wire gx_pop = busy && is_gx && gx_qn != 0 &&
+                (!gx_cr || (ld_iss && gx_cj == 0));   // the next row's first chunk is up
+  wire ld_req = ld_act && cl_nz && oc_nf && (!is_ds || ds_rr || (!ds_wreq && oc_lr)) &&
+                (!is_gx || gx_cr);
   wire ld_iss = ld_req && b_gnt && !ds_wreq;
   wire ld_dv  = ld_act && sl_nz && (cnt != 0);              // deliver the segment at sw
   wire ld_eat = (ld_dv && seg_end) || ds_eat;               // ... which frees its chunk's slot
@@ -674,6 +707,10 @@ module otpu_dma
         t_ren_c[l] = 1'b1;
         t_raddr_c[l] = 32'(sc.w1[15:0]) + 32'(l);
       end
+    if (gx_rd) begin                      // LDX: the next index, through lane 0
+      t_ren_c[0] = 1'b1;
+      t_raddr_c[0] = gx_xa;
+    end
     if (busy && is_st && !ackw) begin
       b_addr = ic;
       if (st_wq) begin
@@ -734,10 +771,41 @@ module otpu_dma
       ds_fx <= 1'b0; ds_dw <= 1'b0;
       ss_req <= 1'b0;
       is_ww <= 1'b0; ww_c1 <= 1'b0; ww_c2 <= 1'b0; ww_sl <= 1'b0; ww_late <= 1'b0; err <= 1'b0;
+      is_gx <= 1'b0; gx_su <= 1'b0;
+    end else if (start && cmd.op == OP_LDX) begin
+      // LDX: the counts from the factors at the setup (gx_su, the next cycle); nothing moves
+      // before it (cl_nz, sl_nz low)
+      logic [12:0] c;
+      c = 13'(cmd.w4[31:16]);
+      is_gx <= 1'b1; is_st <= 1'b0; is_ds <= 1'b0; is_ww <= 1'b0;
+      gx_su <= 1'b1;
+      gx_raw <= cmd.flags[RF_RAW];
+      gx_base <= cmd.w1 >> 2;
+      gx_srs <= 16'(cmd.w5 >> $clog2(D));
+      gx_emax <= 24'(cmd.w7 - 1);
+      gx_drs <= cmd.w6;
+      gx_rows <= cmd.w4[15:0];
+      gx_cols <= c;
+      gx_nck <= 8'((32'(c) + (CW - 1)) >> CWL);
+      gx_nsr <= 10'((32'(c) + (W - 1)) >> SWL);
+      gx_cr <= 1'b0; gx_cj <= '0;
+      sw <= '0; so <= cmd.w2; gx_ta <= cmd.w2; gx_s <= '0;
+      for (int l = 0; l < W; l++) sm[l] <= 32'(l) < 32'(c);
+      sleft <= '0; sl_nz <= 1'b0; sl_one <= 1'b0;
+      cleft <= '0; cl_nz <= 1'b0; cl_one <= 1'b0;
+      occ <= '0; {oc_nf, oc_lr} <= oc_of('0); cnt <= '0; wp <= '0; rp <= '0;
+      st_pend <= 1'b0; pa <= 1'b0; pa0 <= 1'b0;
+      st_wq <= 1'b0;
+      ackw <= 1'b0;
+      if (cmd.w4[15:0] == 0 || c == 0) begin
+        done <= 1'b1;
+        is_gx <= 1'b0; gx_su <= 1'b0;
+      end else busy <= 1'b1;
     end else if (start && (cmd.op == OP_DSTEP || cmd.op == OP_STREAM)) begin
       // the reads start at the setup: a DSTEP's next cycle, a STREAM's once its descriptor is in
       sc <= cmd;
       is_ds <= 1'b1; is_st <= 1'b0; is_ww <= 1'b0; ds_zero <= cmd.flags[DF_ZERO];
+      is_gx <= 1'b0;
       sleft <= '0; sl_nz <= 1'b0; sl_one <= 1'b0;   // no LD delivery into TMEM
       cleft <= '0; cl_nz <= 1'b0; cl_one <= 1'b0;
       occ <= '0; {oc_nf, oc_lr} <= oc_of('0); cnt <= '0; wp <= '0; rp <= '0;
@@ -760,6 +828,7 @@ module otpu_dma
       is_st <= (cmd.op == OP_ST);
       is_ds <= 1'b0;
       is_ww <= (cmd.op == OP_WAITW);
+      is_gx <= 1'b0;
       ww_a <= a; ww_t <= cmd.w2; ww_ref <= cmd.w3; ww_mask <= cmd.w4; ww_iv <= cmd.w5;
       ww_to <= cmd.w6; ww_cmp <= cmd.flags[1:0]; ww_tc <= '0;
       ww_c1 <= 1'b0; ww_c2 <= 1'b0; ww_sl <= 1'b0; ww_late <= 1'b0;
@@ -898,6 +967,41 @@ module otpu_dma
         if (b_rvalid) wp <= wp + 1'b1;
         if (ld_eat) rp <= rp + 1'b1;
         if (ld_dv && sl_one) ld_last <= 1'b1;
+        if (is_gx) begin
+          // the setup: rows * chunks and rows * segments (sl_one / cl_one from the factors)
+          if (gx_su) begin
+            gx_su <= 1'b0;
+            cleft <= 32'(gx_rows) * 32'(gx_nck);
+            cl_nz <= 1'b1; cl_one <= gx_rows == 16'd1 && gx_nck == 8'd1;
+            sleft <= 32'(gx_rows) * 32'(gx_nsr);
+            sl_nz <= 1'b1; sl_one <= gx_rows == 16'd1 && gx_nsr == 10'd1;
+            gx_sl <= gx_nsr == 10'd1;
+          end
+          // the requests: a row from the queue, then its chunks (ic overrides the LD's step)
+          if (gx_pop) begin
+            ic <= gx_q[gx_qr];
+            gx_cj <= gx_nck - 1'b1;
+            gx_cr <= 1'b1;
+          end else if (ld_iss) begin
+            if (gx_cj == 0) gx_cr <= 1'b0;
+            else gx_cj <= gx_cj - 1'b1;
+          end
+          // the delivery: the row's segments, then the next row drs on
+          if (ld_dv) begin
+            if (gx_sl) begin
+              sw <= '0;
+              so <= gx_ta + gx_drs;
+              gx_ta <= gx_ta + gx_drs;
+              gx_s <= '0;
+              gx_sl <= gx_nsr == 10'd1;
+              for (int l = 0; l < W; l++) sm[l] <= 13'(l) < gx_cols;
+            end else begin
+              gx_s <= gx_s + 1'b1;
+              gx_sl <= gx_s + 10'd2 == gx_nsr;
+              for (int l = 0; l < W; l++) sm[l] <= 13'(sw) + 13'(W + l) < gx_cols;
+            end
+          end
+        end
         if (ld_last && !is_ww) begin
           busy <= 1'b0;
           ld_fin <= 1'b1;
@@ -982,4 +1086,37 @@ module otpu_dma
       end
     end
   end
+
+  // ---- LDX: the index pipeline. gx_v[0] the read (request register), gx_v[1] its data in
+  // t_rdata[0] (captured: gx_w), gx_v[2] the integer (f2i or raw), gx_v[3] clamped to [0, E-1],
+  // gx_v[4] times the stride in chunks (one DSP), then the row's first chunk into the queue.
+  // The reservation (gx_res, at the read) bounds what is in flight and queued by GQD
+  logic [4:0]  gx_v;
+  logic        gx_q_push;
+  logic [31:0] gx_w, gx_i, gx_p;
+  logic [23:0] gx_j;
+  always_ff @(posedge clk) begin
+    gx_v <= rst ? '0 : {gx_v[3:0], gx_rd};
+    if (gx_v[1]) gx_w <= t_rdata[0];
+    if (gx_v[2]) gx_i <= gx_raw ? gx_w : rld_f2i(gx_w);
+    if (gx_v[3]) gx_j <= gx_i[31] ? 24'd0 : (gx_i > 32'(gx_emax)) ? gx_emax : gx_i[23:0];
+    if (gx_v[4]) gx_p <= gx_j * gx_srs;
+    if (rst || (start && cmd.op == OP_LDX)) begin
+      gx_qw <= '0; gx_qr <= '0; gx_qn <= '0; gx_res <= '0;
+      gx_xa <= cmd.w3; gx_xl <= rst ? '0 : cmd.w4[15:0];
+    end else begin
+      if (gx_rd) begin gx_xa <= gx_xa + 1'b1; gx_xl <= gx_xl - 1'b1; end
+      gx_res <= gx_res + ($clog2(GQD)+1)'(gx_rd) - ($clog2(GQD)+1)'(gx_pop);
+      gx_qn <= gx_qn + ($clog2(GQD)+1)'(gx_q_push) - ($clog2(GQD)+1)'(gx_pop);
+      if (gx_q_push) gx_qw <= gx_qw + 1'b1;
+      if (gx_pop) gx_qr <= gx_qr + 1'b1;
+    end
+  end
+  always_ff @(posedge clk) gx_q_push <= !rst && gx_v[4] && !(start && cmd.op == OP_LDX);
+  always_ff @(posedge clk) if (gx_q_push) gx_q[gx_qw] <= gx_base + (gx_p << CWL);
+`ifndef SYNTHESIS
+  always_ff @(posedge clk)
+    if (!rst && busy && is_gx && gx_q_push && gx_qn == ($clog2(GQD)+1)'(GQD))
+      $fatal(1, "otpu_dma: LDX row queue overflow");
+`endif
 endmodule

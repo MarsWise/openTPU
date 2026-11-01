@@ -78,7 +78,12 @@ module otpu_fpga_top_ld #(
   parameter bit TBIN  = 1'b0,               // packed binary weights (CAPS2 bit6)
   parameter bit TBGSC = 1'b0,               // binary group scales (CAPS2 bit7)
   parameter bit VU8   = 1'b0,               // packed unsigned byte conversion (CAPS2 bit8)
-  parameter bit TGRQ  = 1'b0                // TMM GSC block-major layout (CAPS2 bit9)
+  parameter bit TGRQ  = 1'b0,                // TMM GSC block-major layout (CAPS2 bit9)
+  parameter bit VRAND = 1'b0,               // VOP RAND, counter-based uniforms (CAPS2 bit10)
+  parameter bit TCQ   = 1'b0,                // TMM CQ, codebook LUT weights (CAPS2 bit11)
+  parameter bit TATAN = 1'b0,                // TFN atan on [0, 1] (table 8) (CAPS2 bit12)
+  parameter bit QST4 = 1'b0,                // QST Q4, 4-bit ROW rows (CAPS2 bit13)
+  parameter bit LDX = 1'b0                // LDX indexed row gather (CAPS2 bit14)
 ) (
   // board
   input  logic        SYS_CLK,              // 50 MHz, AA28
@@ -303,7 +308,7 @@ module otpu_fpga_top_ld #(
                     .DSTEP(DSTEP), .HOSTCAL(1'b1), .XREG(PCIE_GEN == 2),
                     .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
                     .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
-                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ)) u_sys (
+                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX)) u_sys (
     .clk(core_clk), .clk_f, .rst(core_rst), .ctl_mrst(lrs2), .xclk(xdma_aclk), .xrst,
     .calib, .ded, .temp(device_temp), .led(board_led), .i2c_lo, .i2c_pin({lm73_alert_n, i2c_lvl}),
     .s_ctl_awaddr(ctl_awaddr[11:0]), .s_ctl_awvalid(ctl_awvalid), .s_ctl_awready(ctl_awready),

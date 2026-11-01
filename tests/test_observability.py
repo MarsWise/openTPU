@@ -110,7 +110,7 @@ def test_cfg_registers(have_verilator):
     # build, rtlsim.BOARD_UARCH COLL_GATHER 0)
     assert info["regmap"] == 5 and info["caps2"] == {"gather": rtlsim.gathers(1), "tpair": False,
                                                        "tquad": False, "tfn": False, "tgsc": False,
-                                                       "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False}
+                                                       "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False}
     assert t.gather == rtlsim.gathers(1)
     assert (c["S"], c["TMEM_WORDS"], c["IMEM_WORDS"], c["ACT_BLOCKS"]) == (1, 1 << 16, 1 << 15, 128)
     assert (c["DRAM_BYTES"], c["channels"], c["channel_bytes"]) == (1 << 32, 2, 1 << 31)

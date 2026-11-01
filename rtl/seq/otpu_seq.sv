@@ -182,6 +182,9 @@ module otpu_seq
       OP_LD: begin
         s.d[0] = r32(f.rd[0]); t0 = f.wr[0]; w0 = 1'b1;
       end
+      OP_LDX: begin
+        s.d[0] = r32(f.rd[0]); t0 = f.wr[0]; w0 = 1'b1; t1 = f.rd[1];
+      end
       OP_ST: begin
         s.dw = 1'b1; s.d[0] = r32(f.wr[0]); t0 = f.rd[0];
       end
@@ -1236,7 +1239,7 @@ module otpu_seq
 
   function automatic int hz_cls(input logic [7:0] op, input logic [7:0] f);
     case (op)
-      OP_LD: return 0;
+      OP_LD, OP_LDX: return 0;
       OP_ST: return 1;
       OP_DSTEP, OP_STREAM: return 2;
       OP_WAITW: return 3;

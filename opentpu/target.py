@@ -72,7 +72,7 @@ SIM_LANES_MAX = 16
 CORE = ["vpu/otpu_fp.sv", "vpu/otpu_fpipe.sv", "top/otpu_pkg.sv", "mem/otpu_tmem.sv",
         "mem/otpu_actram.sv", "seq/otpu_seq.sv", "vpu/otpu_vtree.sv", "dma/otpu_dma.sv",
         "mxu/otpu_mxu.sv", "vpu/otpu_quant.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
-        "vpu/otpu_vpu.sv", "top/otpu_coll.sv", "top/otpu_slice.sv"]
+        "vpu/otpu_rand.sv", "vpu/otpu_vpu.sv", "top/otpu_coll.sv", "top/otpu_slice.sv"]
 TECH = {"generic": ["tech/generic/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv"],
         "xilinx7": ["tech/xilinx7/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv"],
         "xilinxus": ["tech/xilinxus/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv"],
@@ -246,7 +246,7 @@ def arch_hash(cfg) -> int:
     QUAD) and TFN (the table functions) likewise: in it only when on, so the bitstreams built
     before them keep their hashes."""
     d = dict(dataclasses.asdict(cfg), NUMERICS=NUMERICS)
-    for k in ("SEQ_WC", "TPAIR", "TQUAD", "TFN", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ"):
+    for k in ("SEQ_WC", "TPAIR", "TQUAD", "TFN", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ", "VRAND", "TCQ", "TATAN", "QST4", "LDX"):
         if not d.get(k):
             d.pop(k, None)
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
@@ -296,6 +296,11 @@ def rtl_params(t: Target | str | None = None) -> dict:
         "TBGSC": int(a.get("TBGSC", False)),
         "VU8": int(a.get("VU8", False)),
         "TGRQ": int(a.get("TGRQ", False)),
+        "VRAND": int(a.get("VRAND", False)),
+        "TCQ": int(a.get("TCQ", False)),
+        "TATAN": int(a.get("TATAN", False)),
+        "QST4": int(a.get("QST4", False)),
+        "LDX": int(a.get("LDX", False)),
         "DDR_MTS": int(p.get("mem_mts", 0)),
         "NCH": p["channels_per_slice"],
         "CH_LOG2": (p["channel_bytes"] - 1).bit_length(),
@@ -350,6 +355,16 @@ def build_config(t: Target | str | None = None, **knobs):
         a["VU8"] = bool(int(knobs["VU8"]))
     if knobs.get("TGRQ") is not None:
         a["TGRQ"] = bool(int(knobs["TGRQ"]))
+    if knobs.get("VRAND") is not None:
+        a["VRAND"] = bool(int(knobs["VRAND"]))
+    if knobs.get("TCQ") is not None:
+        a["TCQ"] = bool(int(knobs["TCQ"]))
+    if knobs.get("TATAN") is not None:
+        a["TATAN"] = bool(int(knobs["TATAN"]))
+    if knobs.get("QST4") is not None:
+        a["QST4"] = bool(int(knobs["QST4"]))
+    if knobs.get("LDX") is not None:
+        a["LDX"] = bool(int(knobs["LDX"]))
     if not a["DSTEP"]:
         a["TFN"] = False                       # TFN runs on the stream engine
     return config(t, **a)

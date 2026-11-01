@@ -202,7 +202,7 @@ module otpu_vpu
 
   function automatic logic [3:0] n_slots(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC: return 4'd1;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND: return 4'd1;
       V_EXP2, V_EXP2SUB:           return 4'd9;
       V_RECIP:                     return 4'd6;
       V_RSQRT, V_LOG2:             return 4'd10;
@@ -220,7 +220,7 @@ module otpu_vpu
                          C_LOG = 3'd5;
   function automatic logic [2:0] f_cls(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC: return C_ONE;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND: return C_ONE;
       V_EXP2, V_EXP2SUB:           return C_EXP;
       V_RECIP:                     return C_RCP;
       V_RSQRT:                     return C_RSQ;
@@ -489,7 +489,7 @@ module otpu_vpu
   // compares of m0.func (133.33 MHz, the 100 MHz fused placement: m0.func (fo 119) -> short lane
   // rc / rb, 13.6 / 13.8 levels, -1.2 ns; the tap-0 hit and the composite test fan out to every
   // lane's result and operand muxes)
-  localparam int NVF = 28;                    // includes CMP, SEL and byte extraction
+  localparam int NVF = 29;                    // includes CMP, SEL, byte extraction and RAND
   // Every unsigned byte is exactly representable in binary32. The input is raw TMEM bits:
   // it must not pass through ftz, since arbitrary packed pixels may resemble fp32 NaNs.
   function automatic f32_t u8_to_f32(input logic [7:0] b);
@@ -925,9 +925,15 @@ module otpu_vpu
     assign rc_r = tc.f[0] ? F_ZERO : tc.f[1] ? {tc.f[2], 31'd0} : (tc.f[2] ? fneg(rc_y) : rc_y);
     assign rs_r = ts.f[0] ? F_ZERO : rs_y;
     assign lg_r = ts.f[0] ? F_NINF : ts.f[2] ? F_NAN : ts.f[1] ? F_INF : ts.v;
+    // RAND (C_ONE, one slot): its generator beside slot 0, the same SL stages (otpu_rand);
+    // the flag rides beside it, so it is set exactly when that entry is at tap T_EW
+    f32_t ru;
+    logic rf;
+    otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
+    otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
     assign lres[l] = hit[T_EX] ? ex_r : hit[T_RC] ? rc_r :
                      hit[T_RS] ? ((mtap[T_RS].cls == C_LOG) ? lg_r : rs_r) :
-                     hit[0] ? st[0].v : st[T_EW].v;
+                     hit[0] ? st[0].v : rf ? ru : st[T_EW].v;
     assign lmm[l] = 1'b0;
     assign lmv[l] = '0;
   end
@@ -987,7 +993,12 @@ module otpu_vpu
 
     // the result of the entry that ends at tap 0 or 1 this cycle (other taps: masked here), or
     // (C8) a composite's
-    assign lres[l] = (C8 && c_ov) ? c_od[l] : hit[0] ? st[0] : st[1];
+    // RAND: its generator beside slot 0 (see g_lane)
+    f32_t ru;
+    logic rf;
+    otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
+    otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
+    assign lres[l] = (C8 && c_ov) ? c_od[l] : hit[0] ? st[0] : rf ? ru : st[1];
     assign lmm[l] = !(C8 && c_ov) && hit[0] && (m0d.fh[V_MAX] || m0d.fh[V_MIN]);
     assign lmv[l] = fp_mm(x, y, m0d.fh[V_MIN]);
     assign c_ia[l] = x;

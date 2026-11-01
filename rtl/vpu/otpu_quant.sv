@@ -64,6 +64,7 @@ module otpu_qscale
   input  logic          clk,
   input  logic          rst,
   input  logic          en,
+  input  logic          q4,          // QST Q4: inv = 7 * recip(amax), S = amax * f32(1/7)
   input  logic          iv,
   input  logic [TW-1:0] itag,
   input  f32_t          amax,        // >= 0 (an absolute value)
@@ -123,8 +124,9 @@ module otpu_qscale
   logic zd, bd, zd2, bd2;
   logic [8:0] ekd, ek2, fe;
   otpu_qdly #(.W(11), .N(LAT - LM)) u_f (.clk, .rst, .en, .d({zero, big, ek}), .q({zd, bd, ekd}));
-  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(F_127), .b(y[3]), .y(invm));
-  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(F_INV127), .y(scm));
+  // (Q4: 7 * y in [3.5, 7], normal too: the same exponent handling)
+  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(q4 ? F_7 : F_127), .b(y[3]), .y(invm));
+  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(q4 ? F_INV7 : F_INV127), .y(scm));
   otpu_delay #(.W(32), .N(LAT - LM)) u_scd (.clk, .en, .d(scm), .q(scd));
   otpu_delay #(.W(11), .N(LM)) u_z2 (.clk, .en, .d({zd, bd, ekd}), .q({zd2, bd2, ek2}));
   otpu_delay #(.W(1 + TW), .N(LAT + 1)) u_v (.clk, .en, .d({iv_q, itag_q}), .q({ov, otag}));
@@ -238,12 +240,13 @@ module otpu_quant
                                              // at (r, e) / at e = 0
   logic        pass;
   logic        wide;                         // QST pass 1: four contiguous bytes (a word) a cycle
+  logic        q4;                           // QST Q4: eight elements a word (two a byte)
   logic        rd_wait;                      // waiting for the row's scale (and scale row)
   logic        rd_done;
   logic        sw_ph;                        // QST: the scale row's writes
   logic [15:0] sw_i;                         // ... its word
   // elements per read: QST pass 1 one byte (or one word) a cycle, everything else LANES
-  wire [31:0] ew = (is_st && pass && !t4) ? (wide ? 32'd4 : 32'd1) : 32'(LANES);
+  wire [31:0] ew = (is_st && pass && !t4) ? (wide ? (q4 ? 32'd8 : 32'd4) : 32'd1) : 32'(LANES);
   wire [31:0] bstep = wide ? 32'd4 : es;     // QST pass 1: badr per read
   wire [31:0] Gr = pass ? GW : G;            // the elements of this pass
   wire rlast = (e + ew >= Gr);
@@ -460,7 +463,7 @@ module otpu_quant
   f32_t        sq_amax, sq_sc, sq_inv;
   assign sq_iv   = mc.v && mc.last && !mc.pass;
   assign sq_amax = nmax;
-  otpu_qscale #(.LM(LM), .LA(LA), .TW(2)) u_sc (.clk, .rst, .en, .iv(sq_iv), .itag(mc.row[1:0]),
+  otpu_qscale #(.LM(LM), .LA(LA), .TW(2)) u_sc (.clk, .rst, .en, .q4, .iv(sq_iv), .itag(mc.row[1:0]),
     .amax(sq_amax), .ov(sq_ov), .otag(sq_ot), .sc(sq_sc), .inv(sq_inv));
   // the rows' S, inv and amax by bank (row r in r % NB: written at its scale's input / output,
   // read through its pass 1); sv: the bank's scale is out and its pass 1 not yet started
@@ -745,7 +748,10 @@ module otpu_quant
         a_req = 1'b1;
         a_we = 1'b1;
         a_addr = wqd.baddr >> 2;
-        if (wqd.mask[1]) begin                    // a word (wide: the row is word aligned)
+        if (q4) begin                             // Q4: eight nibbles, element 2j low in byte j
+          for (int l = 0; l < 8; l++) a_wdata[4 * l +: 4] = qb[l][3:0];
+          a_be = 4'hF;
+        end else if (wqd.mask[1]) begin           // a word (wide: the row is word aligned)
           a_wdata = {qb[3], qb[2], qb[1], qb[0]};
           a_be = 4'hF;
         end else begin
@@ -842,6 +848,7 @@ module otpu_quant
       kb = qst ? cmd.w4[31:16] : cmd.w2[31:16];
       nw = (32'(kb) + 32'd3) >> 2;                // d words of a scale row
       is_st <= qst;
+      q4    <= qst && cmd.flags[2];
       rowm  <= cmd.flags[0];
       csf   <= !qst && cmd.flags[1];
       csb   <= cmd.w4;
@@ -874,7 +881,7 @@ module otpu_quant
       m0a <= '0;
       st_frz <= '0;
       bm <= XD > 0 && !qst && 32'(kb) * D <= 32'(XD) * LANES;
-      t4 <= TB > 0 && qst && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
+      t4 <= TB > 0 && qst && !cmd.flags[2] && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
             cmd.w2[1:0] == 2'd0 && 32'(kb) * D <= 32'(TB);
       t4_busy <= '0; t4_fin <= 1'b0; dv <= 1'b0; tq[0] <= '0; tq[1] <= '0;
       de <= '0; dh <= 1'b0;

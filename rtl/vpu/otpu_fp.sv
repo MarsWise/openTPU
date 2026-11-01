@@ -19,6 +19,8 @@ package otpu_fp;
   localparam f32_t F_M1    = 32'hBF80_0000;   // -1.0
   localparam f32_t F_NAN   = 32'h7FC0_0000;
   localparam f32_t F_INV127 = 32'h3C01_0204;  // f32(1/127)
+  localparam f32_t F_7     = 32'h40E0_0000;
+  localparam f32_t F_INV7  = 32'h3E12_4925;  // f32(1/7)
 
   // 2^f ~ C0 + f*(C1 + ... + f*C7) on [0, 1]: minimax (relative error, degree 7, C0 = 1), fp32
   // (same as opentpu/fp32.py).

@@ -66,7 +66,7 @@ KMAX = WIN - 1                    # ranks a count names; older producers have co
 VMAX = 31                         # VPU instructions the mask names (the sequencer's hold)
 VMASK = (1 << VMAX) - 1           # the VPU mask: the last 31 VPU instructions
 DEFAULT = 0x0111_0111 | (VMASK << 32)  # a pc never reached: every unit's last, the VPU's 31
-UNIT = {I.LD: U_DMA, I.ST: U_DMA, I.DSTEP: U_DMA, I.STREAM: U_DMA, I.WAITW: U_DMA,
+UNIT = {I.LD: U_DMA, I.LDX: U_DMA, I.ST: U_DMA, I.DSTEP: U_DMA, I.STREAM: U_DMA, I.WAITW: U_DMA,
         I.MM: U_MXU, I.TMM: U_MXU, I.QACT: U_Q, I.QST: U_Q, I.VOP: U_VPU,
         I.BAR: U_COLL, I.GATHER: U_COLL, I.RLD: U_COLL}
 WUNIT = (U_DMA, U_MXU, U_Q, U_VPU, U_COLL, U_DMA, U_Q)
@@ -168,6 +168,12 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
     rd, wr = [], []
     if op == I.LD:
         rd.append(_mk(SP_DRAM, w[0], c[2] << 2)); wr.append(_mk(SP_TMEM, w[1], c[2]))
+    elif op == I.LDX:
+        rows, cols = c[3] & 0xFFFF, c[3] >> 16
+        if rows and cols and c[6]:
+            rd.append(_mk(SP_DRAM, w[0], _p(c[6] - 1, c[4]) + (cols << 2)))
+            rd.append(_mk(SP_TMEM, w[2], rows))
+            wr.append(_mk(SP_TMEM, w[1], _p(rows - 1, c[5]) + cols))
     elif op == I.ST:
         rd.append(_mk(SP_TMEM, w[1], c[2])); wr.append(_mk(SP_DRAM, w[0], c[2] << 2))
     elif op == I.STREAM:

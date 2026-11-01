@@ -85,6 +85,16 @@ vu8="${VU8:-${T_VU8:-0}}"
 [[ "$vu8" == true ]] && vu8=1; [[ "$vu8" == false ]] && vu8=0
 tgrq="${TGRQ:-${T_TGRQ:-0}}"
 [[ "$tgrq" == true ]] && tgrq=1; [[ "$tgrq" == false ]] && tgrq=0
+vrand="${VRAND:-${T_VRAND:-0}}"
+[[ "$vrand" == true ]] && vrand=1; [[ "$vrand" == false ]] && vrand=0
+tcq="${TCQ:-${T_TCQ:-0}}"
+[[ "$tcq" == true ]] && tcq=1; [[ "$tcq" == false ]] && tcq=0
+tatan="${TATAN:-${T_TATAN:-0}}"
+[[ "$tatan" == true ]] && tatan=1; [[ "$tatan" == false ]] && tatan=0
+qst4="${QST4:-${T_QST4:-0}}"
+[[ "$qst4" == true ]] && qst4=1; [[ "$qst4" == false ]] && qst4=0
+ldx="${LDX:-${T_LDX:-0}}"
+[[ "$ldx" == true ]] && ldx=1; [[ "$ldx" == false ]] && ldx=0
 if [[ "$tbgsc" == 1 && ( "$tbin" != 1 || "$tgsc" != 1 ) ]]; then
   echo "TBGSC requires both TBIN and TGSC" >&2
   exit 1
@@ -111,7 +121,7 @@ export TMEM_WORDS="${TMEM_WORDS:-${T_TMEM_WORDS:-65536}}"
 # CFG_HASH: the arch hash of what this build is (the knobs applied to the target's arch)
 arch_hash="$(PYTHONPATH="$root" python3 -m opentpu.target hash "$target" MCOLS="$mcols" \
   LANES="$lanes" ACT_ROWS="$act_rows" TMEM_WORDS="$TMEM_WORDS" DSTEP="$dstep" SEQ_WC="$seq_wc" \
-  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" 2>/dev/null || echo 0)"
+  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" VRAND="$vrand" TCQ="$tcq" TATAN="$tatan" QST4="$qst4" LDX="$ldx" 2>/dev/null || echo 0)"
 # BUILD_ID register: the git commit's first 8 hex digits, taken here (Vivado may run in Docker)
 build_id="${BUILD_ID:-$(git -C "$root" rev-parse HEAD 2>/dev/null | cut -c1-8)}"
 build_id="${build_id:-0}"
@@ -161,6 +171,11 @@ export OTPU_TBIN_GEN="$tbin"
 export OTPU_TBGSC_GEN="$tbgsc"
 export OTPU_VU8_GEN="$vu8"
 export OTPU_TGRQ_GEN="$tgrq"
+export OTPU_VRAND_GEN="$vrand"
+export OTPU_TCQ_GEN="$tcq"
+export OTPU_TATAN_GEN="$tatan"
+export OTPU_QST4_GEN="$qst4"
+export OTPU_LDX_GEN="$ldx"
 export PCIE_GEN="${PCIE_GEN:-2}"    # read by vivado/bd_native.tcl and userclk1_reroute.tcl
 export TRACE_DEPTH="${TRACE_DEPTH:-${T_TRACE_DEPTH:-16384}}"   # read by vivado/create_project.tcl
 export COLL_GATHER="${COLL_GATHER:-0}"                          # read by vivado/create_project.tcl

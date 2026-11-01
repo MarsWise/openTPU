@@ -13,6 +13,7 @@ import numpy as np
 from . import fp32 as F
 from . import isa as I
 from . import quant as Q
+from . import rand as RN
 from . import tfn
 
 
@@ -36,6 +37,11 @@ class Config:
     TBIN: bool = False       # TMM packed +/-1 weights (CAPS2 bit6)
     TBGSC: bool = False      # BIN combined with per-block scales (CAPS2 bit7)
     VU8: bool = False        # convert packed unsigned bytes to fp32 (CAPS2 bit8)
+    VRAND: bool = False      # VOP RAND, the counter-based uniforms (opentpu/rand.py; CAPS2 bit10)
+    TCQ: bool = False        # TMM CQ: codebook codes through a 16-entry int8 LUT (CAPS2 bit11)
+    TATAN: bool = False      # TFN atan on [0, 1] (VOP 0x2A, table 8; CAPS2 bit12)
+    QST4: bool = False       # QST Q4: 4-bit ROW rows (a 4-bit K cache; CAPS2 bit13)
+    LDX: bool = False        # LDX, the DMA's indexed row gather from DRAM (CAPS2 bit14)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
@@ -91,6 +97,11 @@ def board_config(**kw) -> Config:
                 TBIN=bool(int(env.get("OTPU_TBIN", 0))),
                 TBGSC=bool(int(env.get("OTPU_TBGSC", 0))),
                 VU8=bool(int(env.get("OTPU_VU8", 0))),
+                VRAND=bool(int(env.get("OTPU_VRAND", 0))),
+                TCQ=bool(int(env.get("OTPU_TCQ", 0))),
+                TATAN=bool(int(env.get("OTPU_TATAN", 0))),
+                QST4=bool(int(env.get("OTPU_QST4", 0))),
+                LDX=bool(int(env.get("OTPU_LDX", 0))),
                 TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
@@ -116,6 +127,7 @@ class Slice:
         # the scale record of each (row, block): the row's Sa and the sub-blocks' offsets da
         self.ascale = np.zeros((cfg.act_rows, cfg.ACT_BLOCKS), dtype=np.float32)
         self.adoff = np.zeros((cfg.act_rows, cfg.ACT_BLOCKS, Q.NSUB), dtype=np.uint8)
+        self.cq_lut = np.zeros(16, dtype=np.int8)      # TMM CQ's codebook LUT (LUTSET)
         self.R = [0] * 16
         self.pc = 0
         self.stack: list[list[int]] = []
@@ -251,6 +263,8 @@ class Slice:
             wi = self._widx(d + 4 * np.arange(n))
             self.tmem[self._tidx(t + np.arange(n))] = self.m32[wi]
             return
+        if op == I.LDX:
+            return self._ldx(ins)
         if op == I.ST:
             d = (self.reg(ins.ra) + w[0]) & 0xFFFFFFFF
             t = (self.reg(ins.rb) + w[1]) & 0xFFFFFFFF
@@ -273,6 +287,31 @@ class Slice:
         if op == I.VOP:
             return self._vop(ins)
         raise SimError(f"slice {self.sid}: bad opcode {op:#x} at pc {self.pc}")
+
+    def _ldx(self, ins: I.Instr) -> None:
+        """LDX: every index is read before any row is written (the DMA reads them ahead)."""
+        w, D = ins.w, self.cfg.D
+        if not self.cfg.LDX:
+            raise SimError("LDX: needs Config.LDX")
+        d = (self.reg(ins.ra) + w[0]) & 0xFFFFFFFF
+        t = (self.reg(ins.rb) + w[1]) & 0xFFFFFFFF
+        x = (self.reg(ins.rc) + w[2]) & 0xFFFFFFFF
+        rows, cols, srs, drs, E = w[3] & 0xFFFF, w[3] >> 16, w[4], w[5], w[6]
+        if not (0 < rows and 0 < cols <= I.LDX_MAX_COLS and 0 < E <= I.LDX_MAX_ROWS_E) or \
+                d % D or srs % D or srs // D >= 65536:
+            raise SimError(f"LDX: rows {rows}, cols {cols}, table rows {E}, base {d}, stride "
+                           f"{srs} (base and stride multiples of D, the stride below 2^16 chunks)")
+        xs = x + np.arange(rows)
+        dst = t + np.arange(rows)[:, None] * drs + np.arange(cols)[None, :]
+        if np.intersect1d(xs, dst.ravel()).size:
+            raise SimError("LDX: the rows written overlap the indices")
+        raw = self.tmem[self._tidx(xs)]
+        v = raw.view(np.int32).astype(np.int64) if ins.flags & I.F_RAW else \
+            np.array([I.f2i(int(b)) for b in raw], np.int64)
+        v = np.where(v >= 1 << 31, v - (1 << 32), v)            # f2i's word as signed
+        j = np.clip(v, 0, E - 1)
+        wi = self._widx(d + j[:, None] * srs + 4 * np.arange(cols)[None, :])
+        self.tmem[self._tidx(dst.ravel())] = self.m32[wi.ravel()]
 
     def _dstep(self, ins: I.Instr) -> None:
         """DSTEP: every input (q, k, v, e, beta and each state row) is read before the row's
@@ -582,12 +621,24 @@ class Slice:
         gsc = bool(ins.flags & I.F_GSC)
         binary = bool(w[3] & I.TMM_BIN)
         grq = bool(w[3] & I.TMM_GRQ)
-        quarter = (w[3] >> 24) & 3 if binary else (w[3] >> 24) & ~(I.TMM_GRQ >> 24)
+        cq, cq4 = bool(w[3] & I.TMM_CQ), bool(w[3] & I.TMM_CQ4)
+        if w[3] & I.TMM_LUT:                       # LUTSET: eight LUT entries, no data moves
+            if not cfg.TCQ or not gsc or w[3] != (1 | (1 << 16) | I.TMM_LUT) or \
+                    (w[5] & 0xFFFF) > 1 or (w[5] >> 16) != 1:
+                raise SimError("TMM LUTSET: needs Config.TCQ, GSC, N = KB = M = 1, half 0 / 1")
+            h = w[5] & 1
+            raw = np.array([w[4], w[6]], np.uint32).view(np.int8)
+            self.cq_lut[8 * h:8 * h + 8] = raw
+            return
+        if (cq or cq4) and (not cfg.TCQ or not gsc or grq or (cq4 and (binary or not cq))):
+            raise SimError("TMM CQ: needs Config.TCQ and GSC (not GRQ); CQ4 not with BIN")
+        w3 = w[3] & ~(I.TMM_CQ | I.TMM_CQ4)
+        quarter = (w3 >> 24) & 3 if binary else (w3 >> 24) & ~(I.TMM_GRQ >> 24)
         if grq and (not cfg.TGRQ or not gsc or binary or quarter or N % 4 or M > cfg.MCOLS or
-                    w[3] & 0xe0000000 or ssa % 16 or srs % 16 or srs < 4 * N):
+                    w3 & 0xe0000000 or ssa % 16 or srs % 16 or srs < 4 * N):
             raise SimError("TMM GRQ: needs Config.TGRQ, ternary GSC, N % 4 == 0, M <= MCOLS "
                            "and 16-byte scale planes of N words")
-        if binary and (not cfg.TBIN or pair or quad or quarter or w[3] & 0xf8000000):
+        if binary and (not cfg.TBIN or pair or quad or quarter or w3 & 0xf8000000):
             raise SimError("TMM BIN: needs Config.TBIN, without PAIR/QUAD/quarter")
         if binary and gsc and not cfg.TBGSC:
             raise SimError("TMM BIN GSC: needs Config.TBGSC")
@@ -611,7 +662,8 @@ class Slice:
             raise SimError("TMM: select exactly one of UNIT or RSC")
         if ins.flags & I.F_ASCALE and not (unit and accf):
             raise SimError("TMM: ASCALE needs UNIT and ACC")
-        row_bytes = ((KB + (7 if binary else 3)) // (8 if binary else 4)) * D
+        bpc = 8 if binary else 2 if cq4 else 4      # blocks a D-byte chunk
+        row_bytes = ((KB + bpc - 1) // bpc) * D
         if grq:                                    # KB planes of N/4 chunks, of N scale words
             if sa % D or rs % D or rs < N // 4 * D or \
                     sa + (KB - 1) * rs + N // 4 * D > cfg.DRAM_BYTES:
@@ -662,7 +714,12 @@ class Slice:
             if gsc:
                 acc.fill(0)
             codes = np.empty((N, D), dtype=np.uint8)
-            for lane in range(D):
+            if cq4:                                # 4-bit codes, chunk k // 2, half k % 2
+                lanes = np.arange(D)
+                byte = self.dram[sa + np.arange(N)[:, None] * rs + (k // 2) * D +
+                                 (k % 2) * (D // 2) + lanes[None, :] // 2]
+                codes[:] = (byte >> (4 * (lanes % 2))[None, :]) & 15
+            for lane in range(D if not cq4 else 0):
                 wk = k + quarter
                 per_byte, blocks = (8, 8) if binary else (4, 4)
                 symbol = lane + (wk % blocks) * D
@@ -673,10 +730,13 @@ class Slice:
                     continue
                 byte = self.dram[sa + np.arange(N) * rs + (wk // blocks) * D + symbol // per_byte]
                 codes[:, lane] = (byte >> ((symbol % per_byte) * (1 if binary else 2))) & (1 if binary else 3)
-            if not binary and np.any(codes == 0b11):
+            if not binary and not cq and np.any(codes == 0b11):
                 raise SimError("TMM: reserved ternary code 11")
-            weights = (np.where(codes == 1, 1, -1) if binary else
-                       np.where(codes == 1, 1, np.where(codes == 2, -1, 0))).astype(np.int64)
+            if cq:                                 # the codebook LUT's int8 entries
+                weights = self.cq_lut[codes].astype(np.int64)
+            else:
+                weights = (np.where(codes == 1, 1, -1) if binary else
+                           np.where(codes == 1, 1, np.where(codes == 2, -1, 0))).astype(np.int64)
             for g in range(4):
                 lo, hi = g * group, (g + 1) * group
                 # QACT has one offset per D/4 group; hardware's two adjacent D/8
@@ -748,6 +808,24 @@ class Slice:
         half = bool(ins.flags & I.F_HALF)
         if half and not row_mode:
             raise SimError("QST: HALF needs ROW mode")
+        if ins.flags & I.F_Q4:                     # 4-bit rows: two elements a byte
+            if not cfg.QST4 or not row_mode or half or es != 1 or dst % 4 or drs % 4 or \
+                    cfg.LANES < 8:
+                raise SimError("QST Q4: needs Config.QST4, ROW mode, es 1, not HALF, word-aligned "
+                               "rows (dst, drs), LANES >= 8")
+            x = self.tget(src + np.arange(rows)[:, None] * srs + np.arange(KB * cfg.D)[None, :])
+            q, s = F.quantize_q4(x)
+            nb = KB * cfg.D // 2
+            baddr = dst + np.arange(rows)[:, None] * drs + np.arange(nb)[None, :]
+            sa = sdst + np.arange(rows)[:, None] * 4 + np.arange(4)[None, :]
+            if np.any(baddr >= cfg.DRAM_BYTES) or sdst % 4 or np.any(sa >= cfg.DRAM_BYTES):
+                raise SimError("QST Q4: address out of range")
+            if _overlap(baddr, sa.reshape(-1)):
+                raise SimError("QST: the data and scale ranges overlap")
+            u = (q.astype(np.int16) & 15).astype(np.uint8)
+            self.dram[baddr] = u[:, 0::2] | (u[:, 1::2] << 4)
+            self.dram[sa] = s[:, None].view(np.uint8)
+            return
         q, s, d = self._quant_rows(src, rows, KB, srs, cfg.D, row_mode)
         ne = KB * cfg.D // 2 if half else KB * cfg.D   # HALF: the row's first half only
         baddr = dst + np.arange(rows)[:, None] * drs + np.arange(ne)[None, :] * es
@@ -787,6 +865,8 @@ class Slice:
             raise SimError("VOP CMP/SEL: needs Config.VCMP")
         if func in I.V_U8 and not self.cfg.VU8:
             raise SimError("VOP U8: needs Config.VU8")
+        if func == I.V_RAND and not self.cfg.VRAND:
+            raise SimError("VOP RAND: needs Config.VRAND")
         if func in (I.V_MAC, I.V_SEL) and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
             raise SimError("VOP MAC/SEL: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
@@ -840,6 +920,9 @@ class Slice:
         if func in I.V_U8:
             # Raw TMEM bits, including bit patterns that would be NaNs as fp32.
             ops[func] = lambda: ((A.view(np.uint32) >> (8 * (func - I.V_U8_0))) & 255).astype(np.float32)
+        if func == I.V_RAND:
+            # the counter is A's raw word, the key imm's bits (opentpu/rand.py)
+            ops[func] = lambda: RN.uniform(A.view(np.uint32), np.uint32(w7))
         if func == I.V_MAC:
             # the column vector is read before anything is written (the VPU's buffers)
             Cv = self.tget(np.broadcast_to(w7 + c, (1, cols)))
@@ -856,6 +939,8 @@ class Slice:
         if func in I.TFN_FUNCS:
             if not getattr(self.cfg, "TFN", False):
                 raise SimError(f"VOP: table function {func:#x} needs Config.TFN")
+            if func == I.V_ATAN and not getattr(self.cfg, "TATAN", False):
+                raise SimError("VOP: the table function atan (0x2a) needs Config.TATAN")
             ops[func] = lambda: tfn.tfn(func - I.V_SIGMOID, A)
         if func not in ops:
             raise SimError(f"VOP: bad func {func}")

@@ -94,7 +94,7 @@ def run_front(streams, vops, rels, tm0, rng, tmp_path, wbuf):
                                      R / "top/otpu_pkg.sv", R / "vpu/otpu_vtree.sv",
                                      R / "tech/generic/otpu_tech_ram.sv",
                                      R / "vpu/otpu_tfn_rom.sv", R / "vpu/otpu_se_comp.sv", R / "vpu/otpu_se_tail.sv",
-                                     R / "vpu/otpu_vpu.sv", rtlsim.TB / "tb_se_vpu.sv"],
+                                     R / "vpu/otpu_rand.sv", R / "vpu/otpu_vpu.sv", rtlsim.TB / "tb_se_vpu.sv"],
                         {"WBUF": int(wbuf)})
     r = rtlsim.run_sim([exe, f"+in={fin}", f"+out={fout}", f"+tmem={ftm}", f"+dump={fdump}"],
                        timeout=900)

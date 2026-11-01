@@ -307,7 +307,10 @@ class OpenTPUWorker(WorkerBase):
         s = self.free.pop()
         self.eng.reset(seq=s)
         if self.steps is not None and ds.ok:
-            self.steps.set_sampling(s, ds.samp, context=tokens, logprobs=ds.lp)
+            from opentpu.llm import generate as G
+            key = int(rng.integers(0, 1 << 32)) if ds.samp is not None and \
+                G.device_rng(self.eng.cfg) else 0      # (VOP RAND: the device's uniforms)
+            self.steps.set_sampling(s, ds.samp, context=tokens, logprobs=ds.lp, seed=key)
             if ds.capped:
                 self.stats["topk_capped"] = self.stats.get("topk_capped", 0) + 1
         r = _Req(rid, s, list(tokens), params, rng)
@@ -386,7 +389,9 @@ class OpenTPUWorker(WorkerBase):
         decode = [r for r in decode if r not in dev]
         if dev:
             n0 = self.steps.runs
-            uni = [float(r.rng.random()) for r in dev]  # each request's seeded uniform
+            # each request's seeded uniform (VOP RAND: none, the device draws them)
+            from opentpu.llm import generate as G
+            uni = None if G.device_rng(eng.cfg) else [float(r.rng.random()) for r in dev]
             picks = self.steps.run([(r.slot, eng.poss[r.slot]) for r in dev],
                                    [r.tokens[-1] for r in dev], uni)
             for r, t in zip(dev, picks):

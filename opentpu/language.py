@@ -84,6 +84,18 @@ def load(desc: Tensor, out: Tile | None = None) -> Tile:
     return current().load(desc, out)
 
 
+def has_ldx() -> bool:
+    """The target gathers rows by device indices (Config.LDX: the DMA's LDX)."""
+    return bool(getattr(current().cfg, "LDX", False))
+
+
+def gather_rows(table: Tensor, idx, raw: bool = False) -> Tile:
+    """Rows idx[i] of the 2-D DRAM table (its rows on D-byte chunks), one LDX: a 1-D tile of
+    fp32 integer indices (raw: int32 bits), clamped to [0, E - 1]; [len(idx), C] out. Deformable
+    attention's sample points, embedding rows by token, MoE expert rows. Needs Config.LDX."""
+    return current().gather_rows(table, idx, raw)
+
+
 def store(desc: Tensor, value) -> None:
     current().store(desc, value)
 
@@ -221,12 +233,27 @@ def has_tfn() -> bool:
 
 def tfn(name: str, x) -> Tile:
     """A table function of x in one VOP (opentpu/tfn.py: sigmoid, silu, tanh, gelu, gelu_tanh,
-    softplus, mish, quick_gelu, sin, cos; ~1e-6 absolute against float64). Needs Config.TFN
+    softplus, mish, quick_gelu, sin, cos; atan on [0, 1] with Config.TATAN; ~1e-6 absolute
+    against float64). Needs Config.TFN
     (has_tfn): kernels/lib.py's activations take it when the target has it."""
     from . import tfn as T
     if not has_tfn():
         raise CompileError(f"tfn({name!r}): the target has no table functions (Config.TFN)")
+    if name == "atan" and not getattr(current().cfg, "TATAN", False):
+        raise CompileError("tfn('atan'): the target has no atan table (Config.TATAN)")
     return current().unop(T.func_code(name), x)
+
+
+def has_rand() -> bool:
+    """The target draws random numbers (Config.VRAND: VOP RAND, opentpu/rand.py)."""
+    return bool(getattr(current().cfg, "VRAND", False))
+
+
+def rand(counters, key: int = 0, key_reg: int = 0) -> Tile:
+    """Uniforms in [0, 1 - 2^-24] (VOP RAND): one per word of `counters` (rand.counters: fp32 integers), a function of that
+    word's raw bits and the key R[key_reg] + key only (opentpu/rand.py: Threefry-2x32-13).
+    Needs Config.VRAND (has_rand)."""
+    return current().rand(counters, key, key_reg)
 
 
 def mac(x, c, y, out=None) -> Tile:

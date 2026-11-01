@@ -37,7 +37,7 @@ from . import isa as I
 from . import rtlsim
 
 UNITS = ["DMA", "MXU", "QUANT", "VPU", "COLL"]
-OPNAMES = {I.LD: "LD", I.ST: "ST", I.DSTEP: "DSTEP", I.STREAM: "STREAM", I.MM: "MM",
+OPNAMES = {I.LD: "LD", I.LDX: "LDX", I.ST: "ST", I.DSTEP: "DSTEP", I.STREAM: "STREAM", I.MM: "MM",
            I.TMM: "TMM",
            I.QACT: "QACT", I.QST: "QST", I.VOP: "VOP", I.GATHER: "GATHER", I.BAR: "BAR",
            I.RLD: "RLD", I.WAITW: "WAITW"}
@@ -111,6 +111,10 @@ def _describe(ins: I.Instr, cfg) -> tuple[str, str, int, int, int]:
         # one TMEM segment per cycle; each D-byte chunk once on port B (chunk-aligned count)
         n = w[2]
         return OPNAMES[op], f"{n} words", -(-n // burst), -(-n // (D // 4)), 0
+    if op == I.LDX:
+        # a row's ceil(cols / W) segments a cycle on the TMEM side; its chunks on port B
+        rows, cols = w[3] & 0xFFFF, w[3] >> 16
+        return ("LDX", f"{rows}x{cols}", rows * -(-cols // burst), rows * -(-cols // (D // 4)), 0)
     if op == I.DSTEP:
         # DSTEP_LANES state words per cycle; every state chunk read (unless zero) and written
         rows, cols = w[3] & 0xFFFF, w[3] >> 16
@@ -336,7 +340,7 @@ def parse(trace: str, cfg, programs, name: str = "") -> Profile:
             slot, pc, op = int(kv["s"]), int(kv["pc"]), int(kv["op"], 16)
             ins = programs[s][pc]
             nm, det, work, pb, pa = _describe(ins, cfg)
-            unit = {I.LD: 0, I.ST: 0, I.DSTEP: 0, I.STREAM: 0, I.WAITW: 0, I.MM: 1, I.QACT: 2,
+            unit = {I.LD: 0, I.LDX: 0, I.ST: 0, I.DSTEP: 0, I.STREAM: 0, I.WAITW: 0, I.MM: 1, I.QACT: 2,
                     I.TMM: 1, I.QST: 2, I.VOP: 3}.get(op, 4)
             r = Rec(s, counts[s], pc, op, unit, c, name=nm, detail=det, comment=ins.comment,
                     work=work, portb=pb, porta=pa)

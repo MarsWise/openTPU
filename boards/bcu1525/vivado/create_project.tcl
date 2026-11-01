@@ -67,7 +67,7 @@ set rtl [list \
   rtl/mem/otpu_tmem.sv rtl/mem/otpu_actram.sv \
   rtl/seq/otpu_seq.sv rtl/vpu/otpu_vtree.sv rtl/dma/otpu_dma.sv \
   rtl/mxu/otpu_mxu.sv rtl/tech/xilinxus/otpu_tech_dsp.sv rtl/tech/generic/otpu_tech_ram.sv \
-  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv \
+  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_rand.sv rtl/vpu/otpu_vpu.sv \
   rtl/top/otpu_coll.sv rtl/top/otpu_slice.sv \
   rtl/shell/otpu_ctrl.sv rtl/shell/otpu_trace.sv \
   rtl/shell/otpu_board.sv rtl/mem/otpu_native_dram.sv \

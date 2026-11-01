@@ -14,7 +14,7 @@ from opentpu.runtime import Input, Output, compile_kernel, run
 from conftest import assert_same_state
 
 RANGE = {"sigmoid": 20, "silu": 20, "tanh": 10, "gelu": 10, "gelu_tanh": 10, "softplus": 40,
-         "mish": 20, "quick_gelu": 12, "sin": 60, "cos": 60}
+         "mish": 20, "quick_gelu": 12, "sin": 60, "cos": 60, "atan": 2}
 # absolute error bound over RANGE (the fitted tables give ~1e-6; the bound leaves room)
 TOL = {"softplus": 2e-5, "sin": 1e-5, "cos": 1e-5}
 
@@ -76,7 +76,7 @@ def test_tfn_isa_vop(func):
     x = (rng.standard_normal(n) * 6).astype(np.float32)
     dram = np.zeros(1 << 16, np.uint8)
     dram[:4 * n] = x.view(np.uint8)
-    m = Machine(Config(TFN=True), [_vop_prog(func, n)], [dram]).run()
+    m = Machine(Config(TFN=True, TATAN=True), [_vop_prog(func, n)], [dram]).run()
     got = m.slices[0].dram[4 * n:8 * n].view(np.float32)
     assert np.array_equal(F.bits(got), F.bits(T.tfn(func - I.V_SIGMOID, x)))
 
@@ -87,7 +87,7 @@ def act_k(x, y, M: int, N: int, kind: str):
     f = {"sigmoid": sigmoid, "silu": silu, "tanh": tanh, "gelu": gelu, "gelu_tanh": gelu_tanh,
          "softplus": softplus, "mish": lambda v: ol.tfn("mish", v),
          "quick_gelu": lambda v: ol.tfn("quick_gelu", v), "sin": lambda v: ol.tfn("sin", v),
-         "cos": lambda v: ol.tfn("cos", v)}[kind]
+         "cos": lambda v: ol.tfn("cos", v), "atan": lambda v: ol.tfn("atan", v)}[kind]
     ol.store(y, f(t))
 
 
@@ -118,7 +118,7 @@ def test_tfn_rtl(have_verilator, kind):
     the RTL's DRAM and TMEM equal the ISA simulator's; the result against float64."""
     rng = np.random.default_rng(len(kind))
     x, args = _act_args(rng, kind)
-    comp, imgs = compile_kernel(act_k, Config(TFN=True), **args)
+    comp, imgs = compile_kernel(act_k, Config(TFN=True, TATAN=kind == "atan"), **args)
     ri = run(comp, [i.copy() for i in imgs], "isa")
     rr = run(comp, [i.copy() for i in imgs], "rtl")
     assert_same_state(ri, rr)

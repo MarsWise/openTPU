@@ -3314,19 +3314,41 @@ class Engine:
         host's generator), and, with the repetition penalty, its factors for the context's ids
         (the device adds the tokens it generates)."""
         g = self.image.lookup["gen"]
-        u = np.minimum(rng.random(nb).astype(np.float32), np.float32(1 - 2.0 ** -24))
-        pa = pb = None
-        if samp.pen:
-            V = G._vpad(self.spec)
-            pa, pb = np.ones(V, np.float32), np.ones(V, np.float32)
-            ix = np.unique(np.asarray(list(context), np.int64))
-            pa[ix] = np.float32(1.0) / np.float32(samp.penalty)
-            pb[ix] = samp.penalty
+        u = None if G.device_rng(self.cfg) else \
+            np.minimum(rng.random(nb).astype(np.float32), np.float32(1 - 2.0 ** -24))
         for s in range(self.cfg.S):
-            self.backend.write(s, g["uni"] + 4 * (p + 1), u)
-            if pa is not None:
-                self.backend.write(s, g["pa"], pa)
-                self.backend.write(s, g["pb"], pb)
+            if u is not None:                   # (the device's RNG: no uniforms to write)
+                self.backend.write(s, g["uni"] + 4 * (p + 1), u)
+        if samp.pen:                            # the penalty's tables, built on the device
+            self._penalty_init(samp, context, p)
+
+    def penalty_init(self, samp, context, state: int, pa: int, pb: int) -> None:
+        """The repetition penalty's tables pa / pb over `context` on the device
+        (kernels/penalty.py): the host writes the ids (input data), their count and R, 1 / R
+        in the state block at `state` (the sampler's, the generate loop's or a batch slot's);
+        one run fills the tables with 1 and stores R, 1 / R at each id. No host arithmetic."""
+        from ..kernels import penalty as PEN
+        g, n = self.image.lookup["gen"], self.cap + 2
+        ids = np.zeros(n, np.float32)           # the ids as they are (repeats store again)
+        c = list(context)[-n:]
+        ids[:len(c)] = c
+        progs = getattr(self, "_pen_progs", None)
+        if progs is None:
+            progs = self._pen_progs = {}
+        k = (state, pa, pb)
+        if k not in progs:
+            progs[k] = PEN.program(self.cfg, ids=g["pids"], count=g["pcnt"], state=state,
+                                   pa=pa, pb=pb, V=G._vpad(self.spec), nmax=n, tmem=0)
+        st = G.state_words(self.spec, 0, 0, 0, [], self.block, samp)
+        for s in range(self.cfg.S):
+            self.backend.write(s, g["pids"], ids)
+            self.backend.write(s, g["pcnt"], np.full(1, len(c), np.float32))
+            self.backend.write(s, state, st)
+        self.backend.run([progs[k]] * self.cfg.S)
+
+    def _penalty_init(self, samp, context, p: int) -> None:
+        g = self.image.lookup["gen"]
+        self.penalty_init(samp, context, g["state"], g["pa"], g["pb"])
 
     def generate_card(self, tok: int, n: int, stop_ids=None, on_token=None,
                       stop=None, sampling=None, context=(), rng=None) -> list:
@@ -3345,7 +3367,12 @@ class Engine:
                                "the generate loop")
         samp = sampling
         if samp is not None and rng is None:
-            raise ValueError("a sampled generate_card needs rng (the uniforms)")
+            raise ValueError("a sampled generate_card needs rng (the uniforms, or the device "
+                             "RNG's seed)")
+        # a device with VOP RAND draws the uniforms itself: the host writes a seed only
+        seed = int(rng.integers(0, 1 << 32)) if samp is not None and G.device_rng(self.cfg) \
+            else 0
+        self.last_seed = seed
         ids = list(self.spec.eos if stop_ids is None else stop_ids)
         n = min(n, self.cap - self.pos)
         out, g, ctx = [], self.image.lookup["gen"], list(context)
@@ -3353,8 +3380,10 @@ class Engine:
             p = self.pos
             if p < self._conv_lo:             # before the first run-time position
                 lg = self.step(tok)
+                u = (float(G.uniform_at(p + 1, seed)) if G.device_rng(self.cfg)
+                     else rng.random()) if samp is not None else 0.0
                 got = [int(np.argmax(lg)) if samp is None else
-                       G.reference_pick(lg, samp, ctx, rng.random(), self.cfg.S,
+                       G.reference_pick(lg, samp, ctx, u, self.cfg.S,
                                         getattr(self.spec, "softcap", None))]
                 if on_token is not None:
                     on_token(got[0])
@@ -3373,7 +3402,7 @@ class Engine:
                 self._write_host_rows([tok])        # the first token's rows (then the loop's
                 for s in range(self.cfg.S):         # requests, served while it runs)
                     self.backend.write(s, g["state"], G.state_words(self.spec, tok, p, n, ids,
-                                                                    self.block, samp))
+                                                                    self.block, samp, seed))
                     self.backend.write(s, g["out"] + 4 * (p + 1),
                                        np.full(nb, G.OUT_MARK, np.uint32))
                 runner = getattr(self.backend, "run_generate", None)

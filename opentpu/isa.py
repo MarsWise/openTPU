@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 NOP, HALT, LI, ADDI, LOOP, BAR, RLD, WAITW = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
-LD, ST, DSTEP, STREAM = 0x10, 0x11, 0x12, 0x13
+LD, ST, DSTEP, STREAM, LDX = 0x10, 0x11, 0x12, 0x13, 0x14
 MM, QACT, QST, TMM = 0x20, 0x21, 0x22, 0x23
 VOP = 0x30
 GATHER = 0x40
 
 OPNAMES = {NOP: "NOP", HALT: "HALT", LI: "LI", ADDI: "ADDI", LOOP: "LOOP", BAR: "BAR", RLD: "RLD",
            WAITW: "WAITW",
-           LD: "LD", ST: "ST", DSTEP: "DSTEP", STREAM: "STREAM", MM: "MM", QACT: "QACT",
+           LD: "LD", ST: "ST", LDX: "LDX", DSTEP: "DSTEP", STREAM: "STREAM", MM: "MM", QACT: "QACT",
            QST: "QST", TMM: "TMM", VOP: "VOP", GATHER: "GATHER"}
 
 # MM / QACT / QST flags
@@ -36,7 +36,12 @@ F_QUAD = 0x10                   # TMM (its weight-format field's bit4; Config.TQ
 F_GSC = 0x20                    # TMM: fp32 scale per row and D-element K block (Config.TGSC)
 TMM_BIN = 1 << 26               # TMM word 4: 8 binary weights per byte (Config.TBIN)
 TMM_GRQ = 1 << 28               # TMM word 4, GSC: block-major packed layout (Config.TGRQ)
+TMM_CQ = 1 << 27                # TMM word 4, GSC: codebook codes, each the LUT's int8 (Config.TCQ):
+#                                 2-bit (the ternary layout), with BIN 1-bit, with CQ4 4-bit
+TMM_CQ4 = 1 << 29               # TMM word 4, CQ: 4-bit codes, two D-element blocks a D-byte chunk
+TMM_LUT = 1 << 30               # TMM word 4: LUTSET, eight of the codebook LUT's 16 int8 entries
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
+F_Q4 = 0x4                      # QST, ROW mode, es 1: 4-bit rows (int4, S = amax/7; Config.QST4)
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
 F_BOUND = 0x4                   # RLD: w3 <= the value <= w4 (the waits pass's; the hardware ignores it)
@@ -51,19 +56,22 @@ V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX = 16, 17, 18, 19, 20
 V_CMP_GT, V_CMP_EQ, V_SEL = 21, 22, 23
 V_U8_0, V_U8_1, V_U8_2, V_U8_3 = 24, 25, 26, 27
 V_U8 = (V_U8_0, V_U8_1, V_U8_2, V_U8_3)
+V_RAND = 28               # uniforms in [0, 1): Threefry-2x32-13 of A's raw word under the key
+#                           imm = R[rd] + w7 (raw bits; opentpu/rand.py; Config.VRAND)
 VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max",
           V_MIN: "min", V_OUTER: "outer", V_MAC: "mac", V_COPY: "copy", V_EXP2: "exp2", V_RECIP: "recip",
           V_RSQRT: "rsqrt", V_ABS: "abs", V_FILL: "fill", V_EXP2SUB: "exp2sub",
           V_LOG2: "log2", V_RSUM: "rsum", V_RMAX: "rmax", V_RSSQ: "rssq", V_RDOT: "rdot",
           V_ARGMAX: "argmax", V_CMP_GT: "cmp_gt", V_CMP_EQ: "cmp_eq", V_SEL: "sel"}
 VFUNCS.update({f: f"u8_{i}" for i, f in enumerate(V_U8)})
+VFUNCS[V_RAND] = "rand"
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
-V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS = \
-    range(0x20, 0x2A)
+V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS, \
+    V_ATAN = range(0x20, 0x2B)          # V_ATAN: atan on [0, 1] (Config.TATAN, CAPS2 bit12)
 VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "gelu",
                V_GELU_TANH: "gelu_tanh", V_SOFTPLUS: "softplus", V_MISH: "mish",
-               V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos"})
-TFN_FUNCS = set(range(0x20, 0x2A))
+               V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos", V_ATAN: "atan"})
+TFN_FUNCS = set(range(0x20, 0x2B))
 BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC,
           V_CMP_GT, V_CMP_EQ, V_SEL}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
@@ -209,6 +217,27 @@ def f2i(bits: int) -> int:
 
 def ld(dram, tmem, nwords, ra=0, rb=0, comment=""):
     return Instr(LD, ra=ra, rb=rb, w=_w(dram, tmem, nwords), comment=comment)
+
+
+LDX_MAX_COLS = 4096                  # LDX: words per row
+LDX_MAX_ROWS_E = 1 << 24             # LDX: table rows E
+
+
+def ldx(dram, tmem, idx, rows, cols, srs, drs, nrows, raw=False, ra=0, rb=0, rc=0, D=128,
+        comment=""):
+    """LDX (DMA, Config.LDX, CAPS2 bit14): the indexed row gather from DRAM (docs/isa.md "LDX").
+    For i < rows: j = clamp(f2i(T[R[rc] + idx + i]), 0, nrows - 1) (raw: the word as a signed
+    integer), T[R[rb] + tmem + i*drs + c] = M32[R[ra] + dram + j*srs + 4c] for c < cols. The
+    table's rows start on D-byte chunks: dram (with R[ra]) and srs multiples of D. Deformable
+    attention's samples, embedding rows, MoE expert rows."""
+    _check(0 < rows < 65536 and 0 < cols <= LDX_MAX_COLS,
+           f"LDX: rows {rows} (1..65535), cols {cols} (1..{LDX_MAX_COLS})")
+    _check(0 < nrows <= LDX_MAX_ROWS_E, f"LDX: table rows {nrows} (1..2^24)")
+    _check(srs % D == 0 and 0 <= srs // D < 65536 and dram % D == 0,
+           f"LDX: the table base {dram} and row stride {srs} must be multiples of D = {D} "
+           "(the stride below 65536 chunks)")
+    return Instr(LDX, ra=ra, rb=rb, rc=rc, flags=F_RAW if raw else 0,
+                 w=_w(dram, tmem, idx, rows | (cols << 16), srs, drs, nrows), comment=comment)
 
 
 def st(dram, tmem, nwords, ra=0, rb=0, comment=""):
@@ -486,6 +515,39 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
                       ors | (m << 16) | (ab << 24), srs), comment=comment)
 
 
+def tmm_cq(sa, ssa, out, n, kb, rs, ors, m, ab, srs, bits: int, acc=False, rmax=False,
+           ra=0, rb=0, rc=0, comment="tmm cq"):
+    """TMM CQ (Config.TCQ): GSC's per-(row, D-element block) fp32 scales with codebook weights:
+    each code (bits 1: the BIN layout, eight blocks a chunk; 2: the ternary layout, four; 3 or
+    4: 4-bit codes, two blocks a chunk, block 2c + h in half h, element i at nibble i of the
+    half: byte i/2's low nibble for even i) selects the int8 LUT entry the last LUTSETs loaded
+    (tmm_lut). The value of a weight is LUT[code] * Sw[n, k], as a ternary GSC weight's
+    code * Sw[n, k]: Cactus CQ's norm[n, g] * codebook[code] with the codebook's int8 scale in
+    Sw (opentpu/cq.py)."""
+    _check(bits in (1, 2, 3, 4), f"TMM CQ: {bits}-bit codes")
+    ins = tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, acc=acc, rmax=rmax, ra=ra, rb=rb, rc=rc,
+              comment=comment, gsc=True, binary=bits == 1)
+    ins.w[3] |= TMM_CQ | (TMM_CQ4 if bits >= 3 else 0)
+    return ins
+
+
+def tmm_lut(lut, comment="lutset") -> list:
+    """LUTSET: two TMMs loading the codebook LUT (16 int8 entries; fewer: zero-padded) that
+    the next TMM CQs decode with. Each carries eight entries in its rs and srs words (entry i
+    in byte i % 4 of rs for i < 4, of srs after), ors the half; N, KB, M 1, addresses 0. The
+    MXU takes it in order, after every earlier TMM GSC (the LUT never changes under one)."""
+    v = [int(x) for x in lut]
+    _check(len(v) <= 16 and all(-128 <= x <= 127 for x in v), f"LUT {v}")
+    b = bytes((x & 0xFF) for x in v + [0] * (16 - len(v)))
+    out = []
+    for h in range(2):
+        w0 = int.from_bytes(b[8 * h:8 * h + 4], "little")
+        w1 = int.from_bytes(b[8 * h + 4:8 * h + 8], "little")
+        out.append(Instr(TMM, flags=F_GSC, w=_w(0, 0, 0, 1 | (1 << 16) | TMM_LUT, w0,
+                                                h | (1 << 16), w1), comment=f"{comment} {h}"))
+    return out
+
+
 def qact(src, rows, ab, kb, srs, row=False, cscale=None, rscale=None, dup=False, dup4=False,
          ra=0, comment=""):
     """QACT. `cscale`/`rscale`: TMEM addresses of a per-column / per-row factor applied before
@@ -503,11 +565,16 @@ def qact(src, rows, ab, kb, srs, row=False, cscale=None, rscale=None, dup=False,
                  comment=comment)
 
 
-def qst(src, dst, sdst, rows, kb, srs, drs, es, row=False, half=False, ra=0, rb=0, rc=0,
-        comment=""):
+def qst(src, dst, sdst, rows, kb, srs, drs, es, row=False, half=False, q4=False, ra=0, rb=0,
+        rc=0, comment=""):
+    """QST; q4 (Config.QST4): ROW mode, es 1, every row's elements as int4 nibbles, two a byte
+    (element c in byte dst + r*drs + c/2, the low nibble for even c), S = amax * f32(1/7) and
+    q = clamp(rne(x * (7 * recip(amax))), -7, 7): an int4 MM operand with RSC (a K cache)."""
     _check(0 < rows < 65536 and 0 < kb < 65536, f"QST: rows {rows}, kb {kb}")
     _check(row or not half, "QST: HALF needs ROW mode")
-    return Instr(QST, ra=ra, rb=rb, rc=rc, flags=(F_ROW if row else 0) | (F_HALF if half else 0),
+    _check(not q4 or (row and es == 1 and not half), "QST Q4: ROW mode, es 1, not HALF")
+    return Instr(QST, ra=ra, rb=rb, rc=rc, flags=(F_ROW if row else 0) | (F_HALF if half else 0)
+                 | (F_Q4 if q4 else 0),
                  w=_w(src, dst, sdst, rows | (kb << 16), srs, drs, es), comment=comment)
 
 
@@ -517,11 +584,19 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL) else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
                  comment=comment)
+
+
+def rand(dst, a, rows, cols, drs, ars, key=0, ra=0, rb=0, rd=0, comment="rand"):
+    """VOP RAND (Config.VRAND): T[dst + r*drs + j] = uniform(bits(T[a + r*ars + j]), key + R[rd])
+    for the counter-based generator of opentpu/rand.py: an fp32 in [0, 1 - 2^-24], a function of
+    the counter word (A's raw bits, e.g. an iota table's) and the key (raw u32) only."""
+    return vop(V_RAND, dst, a, 0, rows, cols, drs, ars, 0, B_FULL, key & 0xFFFFFFFF,
+               ra=ra, rb=rb, rd=rd, comment=comment)
 
 
 def argmax(dst, a, rows, cols, drs=2, ars=0, base=0, ra=0, rb=0, rd=0, comment="argmax"):

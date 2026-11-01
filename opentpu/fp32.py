@@ -294,6 +294,24 @@ def mx_offset(a, amax):
     return np.where(ab == 0, 0, np.clip(d, 0, MX_DMAX)).astype(np.uint8)
 
 
+INV7 = np.float32(1.0 / 7.0)
+
+
+def quantize_q4(x):
+    """QST Q4 of the rows of x [rows, n]: S = amax * f32(1/7), inv = 7 * recip(amax), q =
+    clamp(rne(x * inv), -7, 7) (NaN -> 0). Returns (int8 q [rows, n], fp32 S [rows])."""
+    x = ftz(x)
+    ax = bits(fabs(x))
+    amax = from_bits(np.max(ax, axis=1))
+    zero = amax == 0
+    s = np.where(zero, F32(0), mul(amax, INV7)).astype(np.float32)
+    inv = np.where(zero, F32(0), mul(F32(7), recip(amax))).astype(np.float32)
+    y = mul(x, inv[:, None])
+    with np.errstate(invalid="ignore"):
+        q = np.clip(np.rint(np.nan_to_num(y, nan=0.0)), -7, 7).astype(np.int8)
+    return q, s
+
+
 def quantize_mx(x, g: int, row_mode: bool = False):
     """docs/isa.md "Quantization" of the rows of x [rows, n] with groups of g elements (QACT:
     D/4, QST: D): the row's S = amax * inv127, inv = 127 * recip(amax), each group's offset d

@@ -277,14 +277,16 @@ class BatchWorker(SC.Worker):
     def _set_sampling(self, dec) -> None:
         for r in dec:
             if not r._bset:
-                self.steps.set_sampling(r.slot, self._samp(r), list(r.fed) + [r.next])
+                seed = int(self._sampler(r).rng.integers(0, 1 << 32)) \
+                    if self._samp(r) is not None and G.device_rng(self.eng.cfg) else 0
+                self.steps.set_sampling(r.slot, self._samp(r), list(r.fed) + [r.next], seed=seed)
                 r._bset = True
 
     def _inputs(self, dec):
         """The step's rows, tokens and uniforms (each slot's sampling set on its first)."""
         self._set_sampling(dec)
         uni = None
-        if any(self._samp(r) is not None for r in dec):
+        if any(self._samp(r) is not None for r in dec) and not G.device_rng(self.eng.cfg):
             uni = [float(self._sampler(r).rng.random()) if self._samp(r) is not None else 0.0
                    for r in dec]
         return [(r.slot, len(r.fed)) for r in dec], [r.next for r in dec], uni

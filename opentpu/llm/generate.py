@@ -41,6 +41,8 @@ from ..compiler import CompileError, Tensor, current, trace_fit
 STATE_WORDS = 64
 S_TOK, S_TPOS, S_RING, S_LEFT = 0, 1, 2, 3       # the run-time variables, the tokens left
 S_K, S_ITEMP, S_TOPP = 4, 5, 6                    # sampling: top-k, log2(e) / T, top-p
+S_SEED = 7                                        # sampling: the device RNG's key (raw u32 bits;
+#                                                   Config.VRAND: VOP RAND, opentpu/rand.py)
 S_STOP = 8                                        # 8 stop ids (-1: none)
 N_STOP = 8
 S_HALT = 16                                       # the host's stop word (1.0: stop)
@@ -90,6 +92,8 @@ def alloc(b, spec, cap: int, block: int, imem_words: int = 1 << 15, waitc: bool 
             "slot": slot,
             "lg": b.alloc(4 * V), "pa": b.alloc(4 * V), "pb": b.alloc(4 * V),
             "uni": b.alloc(4 * (cap + 1)), "iota": b.alloc(4 * BLK), "nb": nb,
+            "uctr": b.alloc(4 * (cap + 1)),
+            "pids": b.alloc(4 * (cap + 2)), "pcnt": b.alloc(4),
             "ptab2": b.alloc(16 * (nb + 2) * MODES), "xs": b.alloc(4 * spec.hidden)}
 
 
@@ -125,6 +129,7 @@ def build(put, s: int, S: int, spec, cap: int, g: dict) -> None:
     put(s, g["pa"], np.ones(V, np.float32))
     put(s, g["pb"], np.ones(V, np.float32))
     put(s, g["iota"], np.arange(BLK, dtype=np.float32))
+    put(s, g["uctr"], np.arange(cap + 1, dtype=np.float32))     # RAND's counters: float(q)
 
 
 def desc(g: dict, spec, cap: int) -> SimpleNamespace:
@@ -133,6 +138,7 @@ def desc(g: dict, spec, cap: int) -> SimpleNamespace:
                            xs=Tensor(g["xs"], (1, spec.hidden), (spec.hidden, 1)),
                            out=Tensor(g["out"], (cap + 1,), (1,)),
                            uni=Tensor(g["uni"], (cap + 1,), (1,)),
+                           uctr=Tensor(g["uctr"], (cap + 1,), (1,)),
                            lg=Tensor(g["lg"], (V,), (1,)), pa=Tensor(g["pa"], (V,), (1,)),
                            pb=Tensor(g["pb"], (V,), (1,)), iota=Tensor(g["iota"], (BLK,), (1,)),
                            addr=g)
@@ -173,8 +179,10 @@ def check_args(run_args, spec, block: int) -> None:
 
 
 def state_words(spec, tok: int, p: int, n: int, stop_ids, block: int,
-                samp: "Sampling | None" = None) -> np.ndarray:
-    """The state block for generating up to n tokens after token `tok` at position p."""
+                samp: "Sampling | None" = None, seed: int = 0) -> np.ndarray:
+    """The state block for generating up to n tokens after token `tok` at position p; seed:
+    the device RNG's key (a device with VOP RAND draws position q's uniform as
+    rand.uniform(q, seed): the host writes no random numbers)."""
     st = np.zeros(STATE_WORDS, np.float32)
     ids = list(stop_ids)[:N_STOP]
     if len(stop_ids) > N_STOP:
@@ -187,7 +195,21 @@ def state_words(spec, tok: int, p: int, n: int, stop_ids, block: int,
     if samp is not None:
         st[S_K], st[S_ITEMP], st[S_TOPP] = samp.k, samp.itemp, samp.top_p
         st[S_PEN], st[S_PENINV] = samp.penalty, np.float32(1.0) / np.float32(samp.penalty)
+    st[S_SEED:S_SEED + 1] = np.array([seed & 0xFFFFFFFF], np.uint32).view(np.float32)
     return st
+
+
+def device_rng(cfg) -> bool:
+    """The sampled loops draw their uniforms on the device (VOP RAND: Config.VRAND), the
+    host only writing the seed; else the host writes them (uni[], the earlier path)."""
+    return bool(getattr(cfg, "VRAND", False))
+
+
+def uniform_at(q, seed: int) -> np.ndarray:
+    """The device's uniform of position q (an array of positions too) under seed: what the
+    sampled loop's VOP RAND draws for the token at q (rand.uniform, counter q)."""
+    from .. import rand as RN
+    return RN.uniform(RN.bits(np.asarray(q, np.float32)), np.uint32(seed & 0xFFFFFFFF))
 
 
 class Sampling:
@@ -436,11 +458,25 @@ class Sampler:
         pz = cumx[km:km + 1] * st[S_TOPP:S_TOPP + 1]
         kept = _step(pz - prev)
         zk = ol.max(cum * kept)
-        u = ol.load(g.uni[self.u_at:self.u_at + 1])
+        u = self.uniform()
         t = u * zk
         le = ol.sum(_step(cum - t)) * -1.0 + float(km)
         pick = ol.minimum(le, ol.sum(kept) - 1.0)
         return _pick(b, pick, 1, sid.base, "the sampled id")
+
+    def uniform(self):
+        """The uniform of the token's position (u_at): with VOP RAND (device_rng) drawn here,
+        rand.uniform(bits(float(u_at)), the state's seed): its counter from uctr, its key
+        the seed's bits in a register (RLD raw); else the host's, from uni[]."""
+        b, g, st = self.b, self.g, self.st
+        if not device_rng(b.cfg):
+            return ol.load(g.uni[self.u_at:self.u_at + 1])
+        ctr = ol.load(g.uctr[self.u_at:self.u_at + 1])
+        r = b.scratch()
+        b.rld(r, st[S_SEED:S_SEED + 1], raw=True, comment="the RNG's key: the seed")
+        u = ol.rand(ctr, 0, r)                  # the position's uniform
+        b.unscratch(r)
+        return u
 
     def after(self, tok) -> None:
         """The penalty's context gets tok: pa[tok] = 1 / R, pb[tok] = R."""

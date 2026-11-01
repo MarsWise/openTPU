@@ -84,18 +84,28 @@ CAP2_TBIN = 64          # packed binary weights, eight signs per byte
 CAP2_TBGSC = 128        # binary weights with fp32 group scales
 CAP2_VU8 = 256          # packed unsigned byte extraction
 CAP2_TGRQ = 512         # TMM GSC block-major layout (every packed chunk read once)
+CAP2_VRAND = 1024     # VOP RAND, counter-based uniforms
+CAP2_TCQ = 2048     # TMM CQ, codebook LUT weights
+CAP2_TATAN = 4096     # TFN atan on [0, 1] (table 8)
+CAP2_QST4 = 8192     # QST Q4, 4-bit ROW rows
+CAP2_LDX = 16384    # LDX indexed row gather
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
         return {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False,
-                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False}
+                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False}
     return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR),
             "tquad": bool(v & CAP2_TQUAD), "tfn": bool(v & CAP2_TFN),
             "tgsc": bool(v & CAP2_TGSC), "vcmp": bool(v & CAP2_VCMP),
             "tbin": bool(v & CAP2_TBIN), "tbgsc": bool(v & CAP2_TBGSC), "vu8": bool(v & CAP2_VU8),
-            "tgrq": bool(v & CAP2_TGRQ)}
+            "tgrq": bool(v & CAP2_TGRQ),
+            "vrand": bool(v & CAP2_VRAND),
+            "tcq": bool(v & CAP2_TCQ),
+            "tatan": bool(v & CAP2_TATAN),
+            "qst4": bool(v & CAP2_QST4),
+            "ldx": bool(v & CAP2_LDX)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

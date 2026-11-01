@@ -51,7 +51,9 @@ FUNCS = [
     Desc("quick_gelu", 6, 8.0, 128.0, POST_MUL),      # x sigmoid(1.702 x)
     Desc("sin", 7, SIN_S, 0.0, POST_NONE, periodic=True, odd=True),
     Desc("cos", 7, SIN_S, 64.0, POST_NONE, periodic=True),
+    Desc("atan", 8, 256.0, 0.0, POST_NONE),          # atan on [0, 1] (tails 0, pi/4): atan2's core
 ]
+NTAB = 9                         # tables (TFN_COEF holds NTAB * NSEG entries)
 BY_NAME = {d.name: i for i, d in enumerate(FUNCS)}
 NFUNC = len(FUNCS)
 
@@ -88,9 +90,10 @@ TABLES = [
     ("mish_g", lambda x: np.tanh(_softplus(x)), 0.0, 1.0),
     ("quick_gelu_g", lambda x: _sig(1.702 * x), 0.0, 1.0),
     ("sin", lambda x: np.sin(x), 0.0, 0.0),
+    ("atan01", np.arctan, 0.0, float(np.float32(np.pi / 4))),
 ]
 _TABLE_DESC = {0: FUNCS[0], 1: FUNCS[2], 2: FUNCS[3], 3: FUNCS[4], 4: FUNCS[5], 5: FUNCS[6],
-               6: FUNCS[7], 7: FUNCS[8]}
+               6: FUNCS[7], 7: FUNCS[8], 8: FUNCS[10]}
 
 
 def truth(name: str, x):
@@ -116,6 +119,8 @@ def truth(name: str, x):
         return np.sin(x)
     if name == "cos":
         return np.cos(x)
+    if name == "atan":
+        return np.where(x < 0, 0.0, np.where(x >= 1, np.pi / 4, np.arctan(x)))
     raise KeyError(name)
 
 
@@ -125,8 +130,8 @@ def fit_tables():
     sin(0) = 0 exactly) and tails: (coef uint32 [8, 256, 3] as c2, c1, c0; tails uint32 [8, 2])."""
     t = np.array([0.0, 0.5, 1.0])                                       # nodes in [0, 1]
     V = np.stack([t ** 2, t, np.ones(3)], axis=1)
-    coef = np.zeros((8, NSEG, 3), np.uint32)
-    tails = np.zeros((8, 2), np.uint32)
+    coef = np.zeros((NTAB, NSEG, 3), np.uint32)
+    tails = np.zeros((NTAB, 2), np.uint32)
     for k, (_, fn, lo, hi) in enumerate(TABLES):
         d = _TABLE_DESC[k]
         s = np.arange(NSEG)[:, None] + t[None, :]                        # u
@@ -145,7 +150,7 @@ _tabs = None
 
 
 def tables():
-    """(coef uint32 [8, 256, 3], tails uint32 [8, 2]) as the RTL's ROM holds them."""
+    """(coef uint32 [NTAB, 256, 3], tails uint32 [NTAB, 2]) as the RTL's ROM holds them."""
     global _tabs
     if _tabs is None:
         try:
@@ -155,13 +160,14 @@ def tables():
             return _tabs
         words = [int(w, 16) for w in re.findall(r"96'h([0-9a-fA-F_]+)", src)
                  for w in [w.replace("_", "")]]
-        tline = re.search(r"TFN_TAIL \[16\] = (.*);", src).group(1)
+        tline = re.search(r"TFN_TAIL \[\d+\] = (.*);", src).group(1)
         tl = [int(w, 16) for w in re.findall(r"32'h([0-9a-fA-F]{8})", tline)]
-        coef = np.zeros((8, NSEG, 3), np.uint32)
+        nt = len(words) // NSEG
+        coef = np.zeros((nt, NSEG, 3), np.uint32)
         for i, w in enumerate(words):
             coef[i // NSEG, i % NSEG] = [(w >> 64) & 0xFFFFFFFF, (w >> 32) & 0xFFFFFFFF,
                                          w & 0xFFFFFFFF]
-        _tabs = (coef, np.array(tl, np.uint32).reshape(8, 2))
+        _tabs = (coef, np.array(tl, np.uint32).reshape(nt, 2))
     return _tabs
 
 
@@ -170,9 +176,9 @@ def rom_sv(coef, tails) -> str:
              "// \"Table functions\"). Entry {table, segment}: {c2, c1, c0} fp32; tails {lo, hi}.",
              "// This file is the definition: the ISA simulator reads these words too.",
              "package otpu_tfn_rom;",
-             f"  localparam logic [95:0] TFN_COEF [{8 * NSEG}] = '{{"]
+             f"  localparam logic [95:0] TFN_COEF [{len(coef) * NSEG}] = '{{"]
     ent = []
-    for k in range(8):
+    for k in range(len(coef)):
         for s in range(NSEG):
             c2, c1, c0 = (int(v) for v in coef[k, s])
             ent.append(f"96'h{c2:08x}_{c1:08x}_{c0:08x}")
@@ -180,18 +186,18 @@ def rom_sv(coef, tails) -> str:
         lines.append("    " + ", ".join(ent[i:i + 4]) + ("," if i + 4 < len(ent) else ""))
     lines.append("  };")
     tl = ", ".join(f"32'h{int(v):08x}" for v in tails.reshape(-1))
-    lines.append(f"  localparam logic [31:0] TFN_TAIL [16] = '{{{tl}}};")
+    lines.append(f"  localparam logic [31:0] TFN_TAIL [{2 * len(coef)}] = '{{{tl}}};")
     lines.append("  // the functions (fn = VOP func - 0x20): table, S, O, post (0 g, 1 x*g, 2 g + relu(x)),")
     lines.append("  // periodic, odd")
     lines.append(f"  localparam int TFN_N = {NFUNC};")
     lines.append("  typedef struct packed {")
-    lines.append("    logic [2:0] tbl; logic [31:0] s, o; logic [1:0] post; logic per, odd;")
+    lines.append("    logic [3:0] tbl; logic [31:0] s, o; logic [1:0] post; logic per, odd;")
     lines.append("  } tfn_d_t;")
     lines.append("  function automatic tfn_d_t tfn_desc(input logic [3:0] fn);")
     lines.append("    case (fn)")
     for i, d in enumerate(FUNCS):
         sb = int(np.float32(d.S).view(np.uint32)); ob = int(np.float32(d.O).view(np.uint32))
-        lines.append(f"      4'd{i}: return '{{tbl: 3'd{d.table}, s: 32'h{sb:08x}, o: 32'h{ob:08x}, "
+        lines.append(f"      4'd{i}: return '{{tbl: 4'd{d.table}, s: 32'h{sb:08x}, o: 32'h{ob:08x}, "
                      f"post: 2'd{d.post}, per: 1'b{int(d.periodic)}, odd: 1'b{int(d.odd)}}};"
                      f"  // {d.name}")
     lines.append("      default: return '0;")
