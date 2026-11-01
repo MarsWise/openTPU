@@ -299,12 +299,12 @@ class GGUFWeights(Mapping):
         nk, nv = kv["qwen35.ssm.group_count"], kv["qwen35.ssm.time_step_rank"]
         if nv % nk:
             raise ValueError(f"DeltaNet {nv} value heads over {nk} key heads")
-        if nv != nk and self.prism and not allow_unverified:
-            # Bonsai 2 4B / 9B (32 value heads over 16, gdn_v_grouped): the fp32 reference gives
-            # no sensible next token with the grouped, the tiled or a mixed head order yet
-            # (tools/bonsai2_gguf_check.py); 2B (16 over 16) is checked
-            raise ValueError(f"Bonsai 2 GGUF with {nv} DeltaNet value heads over {nk} key heads: "
-                             "its head order is not verified yet (only the 2B is)")
+        if nv != nk and self.prism and not allow_unverified \
+                and kv.get("prism.hadamard.gdn_v_grouped") is not True:
+            # 32 value heads over 16 with the out projection rotated in grouped order is the
+            # checked contract (load_gguf converts it); without the flag the order is unknown
+            raise ValueError(f"Bonsai 2 GGUF with {nv} DeltaNet value heads over {nk} key heads "
+                             "and no gdn_v_grouped: its head order is not verified")
         widths = kv.get("prism.hadamard.sign_widths", [])
         vals = kv.get("prism.hadamard.sign_values", [])
         if sum(widths) != len(vals) or not set(vals) <= {-1, 1}:
@@ -473,3 +473,20 @@ def spec_from_gguf(path_or_weights):
                 eos=(kv.get("tokenizer.ggml.eos_token_id", 248046), 248044),
                 lin_kheads=kv["qwen35.ssm.group_count"], embed="f32", mix="", pair_loop=True,
                 native_bonsai=w.prism, lin_tiled=nv != kv["qwen35.ssm.group_count"])
+
+
+def load_gguf(path):
+    """(weights, qwen35 Spec) of a Bonsai 2 GGUF (or a plain llama.cpp qwen35 GGUF), ready for
+    qwen3.Engine / the qwen35 Image. A DeltaNet with more value than key heads is stored in
+    llama.cpp's tiled order with the out projection rotated in grouped order
+    (prism.hadamard.gdn_v_grouped; the PrismML loader's contract): its value-head rows (QKV's
+    V, z, a, b, conv, A, dt) are reordered to grouped at load time (gdn_head_order, exact, no
+    requantization), so the device runs the grouped DeltaNet of the MLX pack, out projection
+    unchanged. A plain llama.cpp GGUF (no rotation) keeps the tiled order (Spec.lin_tiled)."""
+    w = GGUFWeights(path)
+    spec = spec_from_gguf(w)
+    if spec.lin_tiled and w.prism:
+        from .gdn_head_order import GroupedGDNWeights
+        g = GroupedGDNWeights(w, spec)
+        return g, g.spec
+    return w, spec

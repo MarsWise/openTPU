@@ -55,6 +55,36 @@ def _tiny_model(nk: int, nv: int = 8, init: float = 0.02):
     return m, W, Spec(256, KINDS, 8, 2, 256, 64, nv, 128, 128, 512, 1000, lin_kheads=nk)
 
 
+def test_grouped_gdn_wrapper_preserves_multilayer_reference():
+    """A tiled source returns exactly to the grouped reference without touching out_proj."""
+    from types import SimpleNamespace
+    from opentpu.llm.gdn_head_order import GroupedGDNWeights, grouped_indices
+    _, original, spec = _tiny_model(4)
+    nk, nv, dk, dv = spec.lin_nk, spec.lin_heads, spec.lin_dk, spec.lin_dv
+    inverse = np.argsort(grouped_indices(nk, nv))
+    class Source(dict):
+        g = SimpleNamespace(kv={"prism.hadamard.gdn_v_grouped": True})
+    tiled = Source(original)
+    for key, value in original.items():
+        if key.endswith(("linear_attn.in_proj_qkv.weight", "linear_attn.conv1d.weight")):
+            prefix, width = 2 * nk * dk, dv
+        elif key.endswith("linear_attn.in_proj_z.weight"):
+            prefix, width = 0, dv
+        elif key.endswith(("linear_attn.in_proj_a.weight", "linear_attn.in_proj_b.weight",
+                           "linear_attn.A_log", "linear_attn.dt_bias")):
+            prefix, width = 0, 1
+        else:
+            continue
+        tail = value[prefix:].reshape(nv, width, *value.shape[1:])[inverse].reshape(value[prefix:].shape)
+        tiled[key] = np.concatenate([value[:prefix], tail]) if prefix else tail
+    wrapped = GroupedGDNWeights(tiled, dataclasses.replace(spec, lin_tiled=True))
+    for key in original:
+        np.testing.assert_array_equal(wrapped[key], original[key])
+    tokens = [12, 85, 17, 26]
+    np.testing.assert_array_equal(reference_logits(wrapped.spec, wrapped, tokens),
+                                  reference_logits(spec, original, tokens))
+
+
 @pytest.fixture(scope="module", params=[8, 4], ids=["kh8", "kh4"])
 def tiny(request):
     """8 DeltaNet heads (two pairs per slice at S=2, four at S=1: the head loop runs), and a

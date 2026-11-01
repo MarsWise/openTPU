@@ -84,7 +84,8 @@ def test_vpu_hadamard_kernel(inverse):
 
 @pytest.mark.parametrize("grq", [False, True])
 @pytest.mark.parametrize("dstep", [False, True])
-def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq):
+def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq,
+                                                                 grouped_source=False):
     """Both layer kinds and the tied head; the reference unfolds weights, the device rotates x."""
     from dataclasses import replace
     from opentpu.isasim import Config
@@ -143,6 +144,27 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
                 matrix_(a+key+'.weight', n, k)
             aux(a+'q_norm.weight', np.zeros(256))
             aux(a+'k_norm.weight', np.zeros(256))
+    if grouped_source:
+        from types import SimpleNamespace
+        from opentpu.llm.gdn_head_order import GroupedGDNWeights, grouped_indices
+        tw = W(w)
+        tw.g = SimpleNamespace(kv={'prism.hadamard.gdn_v_grouped': True})
+        nk, nv, dk, dv = spec.lin_nk, spec.lin_heads, spec.lin_dk, spec.lin_dv
+        inverse = np.argsort(grouped_indices(nk, nv))
+        for name, value in w.items():
+            if name.endswith(('linear_attn.in_proj_qkv.weight', 'linear_attn.conv1d.weight')):
+                prefix, width = 2 * nk * dk, dv
+            elif name.endswith('linear_attn.in_proj_z.weight'):
+                prefix, width = 0, dv
+            elif name.endswith(('linear_attn.in_proj_a.weight', 'linear_attn.in_proj_b.weight',
+                                'linear_attn.A_log', 'linear_attn.dt_bias')):
+                prefix, width = 0, 1
+            else:
+                continue
+            tail = value[prefix:].reshape(nv, width, *value.shape[1:])[inverse].reshape(value[prefix:].shape)
+            tw[name] = np.concatenate((value[:prefix], tail)) if prefix else tail
+        w = GroupedGDNWeights(tw, replace(spec, lin_tiled=True))
+        spec = w.spec
     cfg = Config(D=128, MCOLS=4, ACT_ROWS=8, TGSC=True, DRAM_BYTES=32 << 20,
                  DSTEP=dstep, STREAM=dstep, TFN=dstep, PAIR=True, TQUAD=True, TPAIR=True,
                  TGRQ=grq)
@@ -162,6 +184,13 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
         row = Engine(spec, w, cap=128, cfg=replace(cfg, TGRQ=False), resident=True,
                      pipeline=False, rows=1, wformat='ternary_gsc')
         np.testing.assert_array_equal(actual, np.stack([row.step(t) for t in tokens]))
+
+
+@pytest.mark.parametrize('dstep', [False, True])
+@pytest.mark.parametrize('grq', [False, True])
+def test_grouped_gguf_wrapper_runs_native_hybrid_on_isa(monkeypatch, dstep, grq):
+    test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=dstep, grq=grq,
+                                                               grouped_source=True)
 
 
 def test_native_hadamard_gsc_linear_rtl(have_verilator):
@@ -192,3 +221,28 @@ def test_native_hadamard_gsc_linear_rtl(have_verilator):
     drams, tmems, _ = rtlsim.run(cfg, compiled.programs, images, axi=True, stall=35, seed=891)
     np.testing.assert_array_equal(drams[0], ref.drams[0])
     np.testing.assert_array_equal(tmems[0], ref.tmems[0])
+
+
+def test_load_gguf_converts_tiled_heads(monkeypatch):
+    """load_gguf: a Prism GGUF with more value than key heads and gdn_v_grouped is converted
+    to the grouped order (GroupedGDNWeights, Spec.lin_tiled False); without the flag it is
+    refused; equal heads pass through."""
+    from types import SimpleNamespace
+    from opentpu.llm import bonsai2 as B
+    from opentpu.llm.gdn_head_order import GroupedGDNWeights
+    from opentpu.llm.qwen35 import Spec
+
+    def fake(nk, nv, flag):
+        kv = {"prism.hadamard.gdn_v_grouped": True} if flag else {}
+        w = SimpleNamespace(g=SimpleNamespace(kv=kv), prism=True)
+        spec = Spec(512, ("linear",), 4, 2, 256, 64, nv, 128, 128, 1024, 512,
+                    lin_kheads=nk, native_bonsai=True, lin_tiled=nv != nk)
+        return w, spec
+
+    for nk, nv, flag, grouped in ((4, 8, True, True), (4, 4, False, False)):
+        w, spec = fake(nk, nv, flag)
+        monkeypatch.setattr(B, "GGUFWeights", lambda p, w=w: w)
+        monkeypatch.setattr(B, "spec_from_gguf", lambda _, spec=spec: spec)
+        out, s2 = B.load_gguf("x.gguf")
+        assert isinstance(out, GroupedGDNWeights) == grouped
+        assert not s2.lin_tiled
