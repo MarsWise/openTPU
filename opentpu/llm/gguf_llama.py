@@ -33,7 +33,12 @@ def unpermute(w: np.ndarray, heads: int) -> np.ndarray:
 
 
 class GGUFLlama(Mapping):
-    def __init__(self, path):
+    """qk_permuted: the file's q / k rows are llama.cpp-permuted (undone here). Not every
+    converter permutes them, and the GGUF does not say: MiniCPM5-2B-Q4_K_M's are not (its
+    reference answers ' Paris' unpermuted; tools/gguf_llama_check.py --qk-permuted)."""
+
+    def __init__(self, path, qk_permuted: bool = False):
+        self.qk_permuted = qk_permuted
         self.g = g = GG.GGUF(path)
         self.arch = a = g.kv.get("general.architecture")
         if a not in ("llama", "granite"):
@@ -79,9 +84,9 @@ class GGUFLlama(Mapping):
         gname = self._where[name]
         ti = self.g.tensors[gname]
         v = GG.dequant(self.g.raw(gname), ti.type).reshape(ti.shape[::-1])
-        if name.endswith("q_proj.weight"):
+        if self.qk_permuted and name.endswith("q_proj.weight"):
             v = unpermute(v, self.nq)
-        elif name.endswith("k_proj.weight"):
+        elif self.qk_permuted and name.endswith("k_proj.weight"):
             v = unpermute(v, self.nkv)
         return np.ascontiguousarray(v, np.float32)
 
