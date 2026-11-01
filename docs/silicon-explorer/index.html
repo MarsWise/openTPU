@@ -1009,7 +1009,8 @@ window.__openTPUAtlasChecks={
  goto:id=>navigate(id),
  playFlow:key=>{const i=FLOWS.findIndex(f=>f.key===key);if(i<0)throw Error("Unknown flow");startFlow(i)},
  status:()=>({node:view,stage:step,flow:FLOWS[flow].name,steps:FLOWS[flow].steps.length}),
- getNode:id=>{const n=DATA.get(id);return n?{id:n.id,name:n.name,parent:n.parent,children:n.children.length,source:n.src}:null}
+ getNode:id=>{const n=DATA.get(id);return n?{id:n.id,name:n.name,parent:n.parent,children:n.children.length,source:n.src}:null},
+ testProfile:p=>loadProfile(p),profileState:()=>({loaded:!!PROFILE.data,count:PROFILE.items.length,index:PROFILE.index})
 };
 })();
 
