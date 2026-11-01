@@ -33,6 +33,7 @@ TATAN = false                     # TFN atan on [0, 1] (table 8) (CAPS2 bit12)
 QST4 = false                      # QST Q4, 4-bit ROW rows (CAPS2 bit13)
 LDX = false                       # LDX indexed row gather (CAPS2 bit14)
 TD5 = false                       # TMM T5 dense trits (CAPS2 bit15)
+VBFLY = false                     # VOP BFLY, the Hadamard butterfly stage (CAPS2 bit16)
 DSTEP = false
 STREAM = false
 SEQ_WC = false                  # the sequencer's wait entries (WAITC, EXPERIMENTAL: docs/seq_vpu.md):

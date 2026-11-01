@@ -202,7 +202,7 @@ module otpu_vpu
 
   function automatic logic [3:0] n_slots(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND: return 4'd1;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND, V_BFLY: return 4'd1;
       V_EXP2, V_EXP2SUB:           return 4'd9;
       V_RECIP:                     return 4'd6;
       V_RSQRT, V_LOG2:             return 4'd10;
@@ -220,7 +220,7 @@ module otpu_vpu
                          C_LOG = 3'd5;
   function automatic logic [2:0] f_cls(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND: return C_ONE;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC, V_RAND, V_BFLY: return C_ONE;
       V_EXP2, V_EXP2SUB:           return C_EXP;
       V_RECIP:                     return C_RCP;
       V_RSQRT:                     return C_RSQ;
@@ -391,6 +391,11 @@ module otpu_vpu
     end
   logic [LANES-1:0] imask;
   logic             irow_last, iall_last;
+  // BFLY (the Hadamard butterfly, docs/isa.md): B is A's tile at column c ^ s. For s >= LANES the
+  // partner of a chunk is the chunk at ic ^ s (consecutive addresses: the banks' rotation holds);
+  // below, the partner is in the chunk itself and the lanes swap A's words (bx = 0)
+  logic [15:0] bx;
+  assign bx = (func == V_BFLY) ? (imm[15:0] & ~16'(LANES - 1)) : 16'd0;
   always_comb begin
     ta_en_c = '0; tb_en_c = '0;
     imask = '0;
@@ -403,7 +408,7 @@ module otpu_vpu
       end else begin
         ta_addr_c[l] = tm_addr(a_row, ic, l);
         tb_addr_c[l] = (bmode == B_COL) ? tm_addr(b, ic, l) :
-                     (bmode == B_ROW && l == 0) ? 32'(b_row) : tm_addr(b_row, ic, l);
+                     (bmode == B_ROW && l == 0) ? 32'(b_row) : tm_addr(b_row, ic ^ bx, l);
       end
     end
     if (issuing && filling) begin
@@ -433,7 +438,7 @@ module otpu_vpu
         logic [31:0] ra, rb;
         ra = filling ? (od_sc ? 32'(od_a) : tm_addr(od_a, ic, l)) : tm_addr(a_row, ic, l);
         rb = filling ? tm_addr(oc_a, ic, l) :
-             (bmode == B_FULL) ? tm_addr(b_row, ic, l) :
+             (bmode == B_FULL) ? tm_addr(b_row, ic ^ bx, l) :
              (bmode == B_COL) ? tm_addr(b, ic, l) : 32'(b_row);
         if ((ta_en_c[l] && ta_addr_c[l] != ra) || (tb_en_c[l] && tb_addr_c[l] != rb))
           $fatal(1, "otpu_vpu: lane %0d's read address is not its mode's", l);
@@ -489,7 +494,7 @@ module otpu_vpu
   // compares of m0.func (133.33 MHz, the 100 MHz fused placement: m0.func (fo 119) -> short lane
   // rc / rb, 13.6 / 13.8 levels, -1.2 ns; the tap-0 hit and the composite test fan out to every
   // lane's result and operand muxes)
-  localparam int NVF = 29;                    // includes CMP, SEL, byte extraction and RAND
+  localparam int NVF = 30;                    // includes CMP, SEL, byte extraction, RAND, BFLY
   // Every unsigned byte is exactly representable in binary32. The input is raw TMEM bits:
   // it must not pass through ftz, since arbitrary packed pixels may resemble fp32 NaNs.
   function automatic f32_t u8_to_f32(input logic [7:0] b);
@@ -684,6 +689,22 @@ module otpu_vpu
                            all_last: c_ometa[0]};
   end
 
+  // BFLY's operands: the partner word (A's word at column c ^ s: in the chunk itself for s <
+  // LANES, the lanes swapped; else the chunk port B read at ic ^ s) and whether the lane's column
+  // is the pair's upper one (c & s; the chunk's first column m0.col for s >= LANES)
+  f32_t             bf_p [LANES];
+  logic [LANES-1:0] bf_hi;
+  logic             bf_sm;
+  assign bf_sm = (m0.imm[15:0] & 16'(LANES - 1)) != 16'd0;
+  for (genvar l = 0; l < LANES; l++) begin : g_bf
+    always_comb begin
+      logic [LW-1:0] k;
+      k = LW'(l) ^ m0.imm[LW-1:0];
+      bf_p[l]  = bf_sm ? xa[k] : xb[l];
+      bf_hi[l] = bf_sm ? ((LW'(l) & m0.imm[LW-1:0]) != '0) : ((m0.col & m0.imm[15:0]) != 16'd0);
+    end
+  end
+
   // long lanes: all functions
   for (genvar l = 0; l < NLL; l++) begin : g_lane
     localparam int NS = NSLOT;                     // slots of this lane
@@ -792,6 +813,9 @@ module otpu_vpu
           sf[V_ADD]:  if (s == 0) begin ia = x; ic_ = y; dest = 2'd1; end
           sf[V_SUB]:  if (s == 0) begin ia = x; ic_ = fneg(y); dest = 2'd1; end
           sf[V_RSUB]: if (s == 0) begin ia = y; ic_ = fneg(x); dest = 2'd1; end
+          sf[V_BFLY]: if (s == 0) begin
+            ia = bf_hi[l] ? bf_p[l] : x; ic_ = bf_hi[l] ? fneg(x) : bf_p[l]; dest = 2'd1;
+          end
           sf[V_RSUM], sf[V_RSSQ], sf[V_RDOT]:
             if (s == 0 && RMA) begin ia = rsa[l]; ib = rsb[l]; ic_ = rfb[l]; end
           sf[V_EXP2], sf[V_EXP2SUB]: begin
@@ -973,6 +997,7 @@ module otpu_vpu
         m0d.fh[V_ADD]:  begin ia = x; ic_ = y; end
         m0d.fh[V_SUB]:  begin ia = x; ic_ = fneg(y); end
         m0d.fh[V_RSUB]: begin ia = y; ic_ = fneg(x); end
+        m0d.fh[V_BFLY]: begin ia = bf_hi[l] ? bf_p[l] : x; ic_ = bf_hi[l] ? fneg(x) : bf_p[l]; end
         m0d.fh[V_RSUM], m0d.fh[V_RSSQ], m0d.fh[V_RDOT]:
           if (RMA) begin ia = rsa[l]; ib = rsb[l]; ic_ = rfb[l]; end
         default: ;

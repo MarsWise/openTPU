@@ -288,35 +288,38 @@ class GGUFWeights(Mapping):
         kv = g.kv
         if kv.get("general.architecture") != "qwen35":
             raise ValueError(f"{path}: architecture {kv.get('general.architecture')}, not qwen35")
-        if (kv.get("prism.hadamard.version") != 2
+        self.prism = "prism.hadamard.version" in kv
+        if self.prism and (kv.get("prism.hadamard.version") != 2
                 or kv.get("prism.hadamard.transform") != "normalized-sylvester-walsh-hadamard"
                 or kv.get("prism.hadamard.axis") != "input-last-dimension"
                 or kv.get("prism.hadamard.sign_mode") != "explicit"
                 or kv.get("prism.hadamard.tied_output") is not True):
             raise ValueError("unsupported Prism Hadamard contract in the GGUF")
-        self.block = int(kv["prism.hadamard.block_size"])
+        self.block = int(kv.get("prism.hadamard.block_size", 0))
         nk, nv = kv["qwen35.ssm.group_count"], kv["qwen35.ssm.time_step_rank"]
         if nv % nk:
             raise ValueError(f"DeltaNet {nv} value heads over {nk} key heads")
-        if nv != nk and not allow_unverified:
+        if nv != nk and self.prism and not allow_unverified:
             # Bonsai 2 4B / 9B (32 value heads over 16, gdn_v_grouped): the fp32 reference gives
             # no sensible next token with the grouped, the tiled or a mixed head order yet
             # (tools/bonsai2_gguf_check.py); 2B (16 over 16) is checked
             raise ValueError(f"Bonsai 2 GGUF with {nv} DeltaNet value heads over {nk} key heads: "
                              "its head order is not verified yet (only the 2B is)")
-        widths, vals = kv["prism.hadamard.sign_widths"], kv["prism.hadamard.sign_values"]
+        widths = kv.get("prism.hadamard.sign_widths", [])
+        vals = kv.get("prism.hadamard.sign_values", [])
         if sum(widths) != len(vals) or not set(vals) <= {-1, 1}:
             raise ValueError("Hadamard signs: widths and values disagree")
         self._signs, o = {}, 0
         for w in widths:
             self._signs[w] = np.asarray(vals[o:o + w], np.float32)
             o += w
-        self.rotated = set(kv["prism.hadamard.weight_names"])
-        self.inverse = set(kv["prism.hadamard.inverse_weight_names"])
-        if self.inverse != {"token_embd.weight"} or "output.weight" in g.tensors:
+        self.rotated = set(kv.get("prism.hadamard.weight_names", []))
+        self.inverse = set(kv.get("prism.hadamard.inverse_weight_names", []))
+        if self.prism and (self.inverse != {"token_embd.weight"} or "output.weight" in g.tensors):
             raise ValueError("only the tied head with an inverse-rotated embedding is supported")
+        self.tied = "output.weight" not in g.tensors
         self._where = {"model.embed_tokens.weight": "token_embd.weight",
-                       "lm_head.weight": "token_embd.weight",
+                       "lm_head.weight": "token_embd.weight" if self.tied else "output.weight",
                        "model.norm.weight": "output_norm.weight"}
         self._how = {"model.norm.weight": "norm"}
         for n in g.tensors:
@@ -328,12 +331,13 @@ class GGUFWeights(Mapping):
             hf, how = _GG[rest]
             self._where[f"model.layers.{i}.{hf}"] = n
             self._how[f"model.layers.{i}.{hf}"] = how
-        for n in self.rotated:
+        for n in self.rotated:              # (a plain llama.cpp GGUF has none)
             ti = g.tensors[n]
             if ti.type not in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) or ti.shape[0] not in self._signs:
                 raise ValueError(f"rotated {n}: type {ti.type}, input width {ti.shape[0]}")
         for n, ti in g.tensors.items():
-            if ti.type in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) and n not in self.rotated | self.inverse:
+            if self.prism and ti.type in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) \
+                    and n not in self.rotated | self.inverse:
                 raise ValueError(f"ternary {n} outside the Hadamard manifest")
         self._small, self._big = {}, None
 
@@ -367,13 +371,7 @@ class GGUFWeights(Mapping):
             t, s = self.ternary(gname)
             n, k = t.shape
             return (t.reshape(n, -1, 128) * s[..., None]).reshape(n, k).astype(np.float32)
-        if ti.type == GG.F32:
-            v = np.frombuffer(bytes(self.g.raw(gname)), np.float32).reshape(ti.shape[::-1])
-        elif ti.type == GG.F16:
-            v = np.frombuffer(bytes(self.g.raw(gname)), np.float16).reshape(ti.shape[::-1])
-        else:
-            raise ValueError(f"{gname}: GGUF type {ti.type}")
-        v = np.array(v, np.float32)
+        v = GG.dequant(self.g.raw(gname), ti.type).reshape(ti.shape[::-1])
         if not np.isfinite(v).all():
             raise ValueError(f"nonfinite {gname}")
         how = self._how.get(name)
@@ -399,11 +397,29 @@ class GGUFWeights(Mapping):
             self._big = (name, v)
         return v
 
+    def rows(self, gname, ids):
+        """Rows of a [n, k] GGUF matrix, dequantized (no basis change)."""
+        from .. import gguf as GG
+        ti = self.g.tensors[gname]
+        k = ti.shape[0]
+        be, bb = GG.BLOCK[ti.type]
+        ids = np.asarray(ids, np.int64)
+        raw = self.g.raw(gname).reshape(-1, k // be * bb)[ids].reshape(-1)
+        return GG.dequant(raw, ti.type).reshape(len(ids), k)
+
+    def head_rows(self, ids):
+        """Rows of the LM head in the model's basis (the tied embedding's, or output.weight)."""
+        if self.tied:
+            return self.embedding_rows(ids)
+        return self.rows("output.weight", ids)
+
     def embedding_rows(self, ids):
         """Embedding rows in the model's basis (the inverse Hadamard of the stored rows)."""
         from .. import gguf as GG
         from . import ptq1 as P
         ti = self.g.tensors["token_embd.weight"]
+        if ti.type not in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0):
+            return self.rows("token_embd.weight", ids)
         k = ti.shape[0]
         ids = np.asarray(ids, np.int64)
         nb, bb = k // 128, GG.BLOCK[ti.type][1]
@@ -453,7 +469,7 @@ def spec_from_gguf(path_or_weights):
                 ffn=kv["qwen35.feed_forward_length"], vocab=t["token_embd.weight"].shape[1],
                 conv_k=kv["qwen35.ssm.conv_kernel"],
                 eps=kv["qwen35.attention.layer_norm_rms_epsilon"],
-                theta=kv["qwen35.rope.freq_base"], tied=True,
+                theta=kv["qwen35.rope.freq_base"], tied=w.tied,
                 eos=(kv.get("tokenizer.ggml.eos_token_id", 248046), 248044),
                 lin_kheads=kv["qwen35.ssm.group_count"], embed="f32", mix="", pair_loop=True,
-                native_bonsai=True, lin_tiled=nv != kv["qwen35.ssm.group_count"])
+                native_bonsai=w.prism, lin_tiled=nv != kv["qwen35.ssm.group_count"])

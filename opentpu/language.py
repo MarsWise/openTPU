@@ -256,6 +256,17 @@ def rand(counters, key: int = 0, key_reg: int = 0) -> Tile:
     return current().rand(counters, key, key_reg)
 
 
+def has_bfly() -> bool:
+    """The target has VOP BFLY, the Hadamard butterfly stage (Config.VBFLY)."""
+    return bool(getattr(current().cfg, "VBFLY", False))
+
+
+def bfly(x, s: int) -> Tile:
+    """One butterfly stage of the Hadamard transform along x's rows at stride s (VOP BFLY):
+    out[c] = x[c] + x[c ^ s] where c & s == 0, else x[c ^ s] - x[c]. Needs Config.VBFLY."""
+    return current().bfly(x, s)
+
+
 def mac(x, c, y, out=None) -> Tile:
     """x * c[None, :] + y in one VOP (MAC: c a [cols] column vector; y a tile, or a row or column
     broadcast). out: write there, e.g. in place into the accumulator y."""

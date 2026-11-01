@@ -12,6 +12,11 @@ def hadamard(x, signs, block=512, inverse=False):
     y = ol.empty(x.shape, dense=True)
     y.set(x if inverse else x * signs[None, :])
     shape = x.shape
+    if ol.has_bfly():           # one VOP a stage over the whole tile (Config.VBFLY): the same
+        for log_stride in range(block.bit_length() - 1):     # adds, bit for bit
+            y = ol.bfly(y, 1 << log_stride)
+        y = y * (1 / math.sqrt(block))
+        return y * signs[None, :] if inverse else y
     for log_stride in range(block.bit_length() - 1):
         stride = 1 << log_stride
         a = y.reshape(y.rows * y.cols // (2 * stride), 2 * stride)

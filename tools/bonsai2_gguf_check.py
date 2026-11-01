@@ -28,10 +28,11 @@ class _Head:
         return self
 
     def __rmatmul__(self, x):
-        n = self.w.g.tensors["token_embd.weight"].shape[1]
+        g = "token_embd.weight" if self.w.tied else "output.weight"
+        n = self.w.g.tensors[g].shape[1]
         out = np.empty((x.shape[0], n), np.float32)
         for r in range(0, n, 8192):
-            out[:, r:r + 8192] = x @ self.w.embedding_rows(np.arange(r, min(n, r + 8192))).T
+            out[:, r:r + 8192] = x @ self.w.head_rows(np.arange(r, min(n, r + 8192))).T
         return out
 
 
@@ -43,7 +44,9 @@ class _Effective(dict):
         self.w = w
 
     def __getitem__(self, name):
-        if name in ("model.embed_tokens.weight", "lm_head.weight"):
+        if name == "model.embed_tokens.weight" or (name == "lm_head.weight" and self.w.tied):
+            return _Head(self.w)
+        if name == "lm_head.weight":
             return _Head(self.w)
         v = self.w[name]
         if self.w._where[name] in self.w.rotated:

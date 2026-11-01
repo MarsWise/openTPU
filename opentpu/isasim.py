@@ -43,6 +43,7 @@ class Config:
     QST4: bool = False       # QST Q4: 4-bit ROW rows (a 4-bit K cache; CAPS2 bit13)
     LDX: bool = False        # LDX, the DMA's indexed row gather from DRAM (CAPS2 bit14)
     TD5: bool = False        # TMM T5: dense trits, five a byte (opentpu/trits.py; CAPS2 bit15)
+    VBFLY: bool = False      # VOP BFLY, the Hadamard butterfly stage (kernels/hadamard.py; CAPS2 bit16)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
@@ -104,6 +105,7 @@ def board_config(**kw) -> Config:
                 QST4=bool(int(env.get("OTPU_QST4", 0))),
                 LDX=bool(int(env.get("OTPU_LDX", 0))),
                 TD5=bool(int(env.get("OTPU_TD5", 0))),
+                VBFLY=bool(int(env.get("OTPU_VBFLY", 0))),
                 TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
@@ -881,13 +883,23 @@ class Slice:
             raise SimError("VOP U8: needs Config.VU8")
         if func == I.V_RAND and not self.cfg.VRAND:
             raise SimError("VOP RAND: needs Config.VRAND")
+        if func == I.V_BFLY:
+            if not getattr(self.cfg, "VBFLY", False):
+                raise SimError("VOP BFLY: needs Config.VBFLY")
+            s = w7
+            if (s == 0 or s & (s - 1) or cols % (2 * s) or bmode != I.B_FULL or b != a
+                    or brs != ars):
+                raise SimError(f"VOP BFLY: stride {s} (a power of two, cols % 2s == 0), "
+                               "B FULL on A's tile (b = a, brs = ars)")
         if func in (I.V_MAC, I.V_SEL) and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
             raise SimError("VOP MAC/SEL: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
         A = self.tget(aidx) if func != I.V_FILL else None
         bidx = None
         if func in I.READS_B:
-            if bmode == I.B_FULL:
+            if func == I.V_BFLY:
+                bidx = b + r * brs + (c ^ w7)
+            elif bmode == I.B_FULL:
                 bidx = b + r * brs + c
             elif bmode == I.B_ROW:
                 bidx = np.broadcast_to(b + r * brs, (rows, cols))
@@ -934,6 +946,9 @@ class Slice:
         if func in I.V_U8:
             # Raw TMEM bits, including bit patterns that would be NaNs as fp32.
             ops[func] = lambda: ((A.view(np.uint32) >> (8 * (func - I.V_U8_0))) & 255).astype(np.float32)
+        if func == I.V_BFLY:
+            hi = (c & w7) != 0
+            ops[func] = lambda: np.where(hi, F.sub(B, A), F.add(A, B))
         if func == I.V_RAND:
             # the counter is A's raw word, the key imm's bits (opentpu/rand.py)
             ops[func] = lambda: RN.uniform(A.view(np.uint32), np.uint32(w7))

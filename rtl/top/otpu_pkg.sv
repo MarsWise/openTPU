@@ -16,7 +16,7 @@ package otpu_pkg;
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20,
                          V_CMP_GT = 21, V_CMP_EQ = 22, V_SEL = 23,
                          V_U8_0 = 24, V_U8_1 = 25, V_U8_2 = 26, V_U8_3 = 27,
-                         V_RAND = 28;
+                         V_RAND = 28, V_BFLY = 29;
   // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
   // otpu_se_comp only (the stream engine's composites)
   localparam logic [7:0] V_TFN0 = 8'h20;
@@ -171,7 +171,7 @@ package otpu_pkg;
   function automatic logic is_binary(input logic [7:0] f);
     return f == V_ADD || f == V_SUB || f == V_RSUB || f == V_MUL || f == V_MAX || f == V_MIN ||
            f == V_FILL || f == V_EXP2SUB || f == V_MAC || f == V_CMP_GT ||
-           f == V_CMP_EQ || f == V_SEL;
+           f == V_CMP_EQ || f == V_SEL || f == V_BFLY;
   endfunction
 
   // the functions that read operand B in its bmode (OUTER's is always B_ROW)

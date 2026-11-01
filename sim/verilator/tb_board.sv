@@ -54,6 +54,7 @@ module tb_board;
   parameter bit QST4      = 1'b0;
   parameter bit LDX       = 1'b0;
   parameter bit TD5       = 1'b0;
+  parameter bit VBFLY     = 1'b0;
   parameter int MEM_NATIVE = 2;            // the channels: 2 otpu_chmem (otpu_mem_ch and a LiteDRAM
                                            // model), 1 otpu_native_mem
   parameter bit HOSTCAL    = 1'b0;         // CAPS bit27 (the host calibrates the controllers)
@@ -119,7 +120,7 @@ module tb_board;
                .IMEM_WORDS(IMEM_WORDS), .LANES(LANES), .VPU_CL(VPU_CL), .MXU_IMPL(MXU_IMPL), .MXU_E(MXU_E), .ULANES(ULANES), .WIN(WIN), .CORE_KHZ(CORE_KHZ),
                .BUILD_ID(BUILD_ID), .DDR_MTS(DDR_MTS), .TRACE_DEPTH(TRACE_DEPTH), .TRACE_QD(TRACE_QD),
                .PQ_WIN(PQ_WIN), .DSTEP(DSTEP), .HOSTCAL(HOSTCAL), .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM),
-               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .ARCH_HASH(ARCH_HASH), .COLL_GATHER(COLL_GATHER || S > 1), .TMEM_IMPL(TMEM_IMPL),
+               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .ARCH_HASH(ARCH_HASH), .COLL_GATHER(COLL_GATHER || S > 1), .TMEM_IMPL(TMEM_IMPL),
                .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH), .TMEM_RPL(TMEM_RPL),
                .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK),
                .TMEM_SDM(TMEM_SDM)) dut (

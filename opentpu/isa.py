@@ -67,6 +67,11 @@ VFUNCS = {V_ADD: "add", V_SUB: "sub", V_RSUB: "rsub", V_MUL: "mul", V_MAX: "max"
           V_ARGMAX: "argmax", V_CMP_GT: "cmp_gt", V_CMP_EQ: "cmp_eq", V_SEL: "sel"}
 VFUNCS.update({f: f"u8_{i}" for i, f in enumerate(V_U8)})
 VFUNCS[V_RAND] = "rand"
+V_BFLY = 29               # the Hadamard butterfly stage at stride s = imm (u32, a power of two,
+#                           cols % 2s == 0): B is A's tile (b = a, brs = ars) at column c ^ s;
+#                           dst(r, c) = A(r, c) + B(r, c) if c & s == 0, else B(r, c) - A(r, c)
+#                           (Config.VBFLY; dst must not overlap A)
+VFUNCS[V_BFLY] = "bfly"
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
 V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS, \
     V_ATAN = range(0x20, 0x2B)          # V_ATAN: atan on [0, 1] (Config.TATAN, CAPS2 bit12)
@@ -75,7 +80,7 @@ VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "ge
                V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos", V_ATAN: "atan"})
 TFN_FUNCS = set(range(0x20, 0x2B))
 BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC,
-          V_CMP_GT, V_CMP_EQ, V_SEL}
+          V_CMP_GT, V_CMP_EQ, V_SEL, V_BFLY}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
 READS_B = BINARY | {V_RDOT}          # functions that read operand B in its bmode (OUTER: B_ROW)
 F_DSCALAR, F_DONE = 0x1, 0x2         # VOP OUTER: decay T[d] for every column / decay 1.0
@@ -589,7 +594,7 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND) else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND, V_BFLY) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
@@ -602,6 +607,16 @@ def rand(dst, a, rows, cols, drs, ars, key=0, ra=0, rb=0, rd=0, comment="rand"):
     the counter word (A's raw bits, e.g. an iota table's) and the key (raw u32) only."""
     return vop(V_RAND, dst, a, 0, rows, cols, drs, ars, 0, B_FULL, key & 0xFFFFFFFF,
                ra=ra, rb=rb, rd=rd, comment=comment)
+
+
+def bfly(dst, a, rows, cols, drs, ars, s, ra=0, rb=0, comment="bfly"):
+    """VOP BFLY (Config.VBFLY): one butterfly stage of the Hadamard transform at stride s over
+    each row of A [rows, cols]: dst(r, c) = A(r, c) + A(r, c ^ s) for c & s == 0, else
+    A(r, c ^ s) - A(r, c). s a power of two, cols % 2s == 0; dst must not overlap A."""
+    _check(s > 0 and s & (s - 1) == 0 and cols % (2 * s) == 0,
+           f"BFLY: stride {s}, cols {cols}: a power of two with cols % 2s == 0")
+    return vop(V_BFLY, dst, a, a, rows, cols, drs, ars, ars, B_FULL, s,
+               ra=ra, rb=rb, rc=rb, comment=comment)
 
 
 def argmax(dst, a, rows, cols, drs=2, ars=0, base=0, ra=0, rb=0, rd=0, comment="argmax"):

@@ -97,6 +97,8 @@ ldx="${LDX:-${T_LDX:-0}}"
 [[ "$ldx" == true ]] && ldx=1; [[ "$ldx" == false ]] && ldx=0
 td5="${TD5:-${T_TD5:-0}}"
 [[ "$td5" == true ]] && td5=1; [[ "$td5" == false ]] && td5=0
+vbfly="${VBFLY:-${T_VBFLY:-0}}"
+[[ "$vbfly" == true ]] && vbfly=1; [[ "$vbfly" == false ]] && vbfly=0
 if [[ "$tbgsc" == 1 && ( "$tbin" != 1 || "$tgsc" != 1 ) ]]; then
   echo "TBGSC requires both TBIN and TGSC" >&2
   exit 1
@@ -123,7 +125,7 @@ export TMEM_WORDS="${TMEM_WORDS:-${T_TMEM_WORDS:-65536}}"
 # CFG_HASH: the arch hash of what this build is (the knobs applied to the target's arch)
 arch_hash="$(PYTHONPATH="$root" python3 -m opentpu.target hash "$target" MCOLS="$mcols" \
   LANES="$lanes" ACT_ROWS="$act_rows" TMEM_WORDS="$TMEM_WORDS" DSTEP="$dstep" SEQ_WC="$seq_wc" \
-  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" VRAND="$vrand" TCQ="$tcq" TATAN="$tatan" QST4="$qst4" LDX="$ldx" TD5="$td5" 2>/dev/null || echo 0)"
+  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" VRAND="$vrand" TCQ="$tcq" TATAN="$tatan" QST4="$qst4" LDX="$ldx" TD5="$td5" VBFLY="$vbfly" 2>/dev/null || echo 0)"
 # BUILD_ID register: the git commit's first 8 hex digits, taken here (Vivado may run in Docker)
 build_id="${BUILD_ID:-$(git -C "$root" rev-parse HEAD 2>/dev/null | cut -c1-8)}"
 build_id="${build_id:-0}"
@@ -179,6 +181,7 @@ export OTPU_TATAN_GEN="$tatan"
 export OTPU_QST4_GEN="$qst4"
 export OTPU_LDX_GEN="$ldx"
 export OTPU_TD5_GEN="$td5"
+export OTPU_VBFLY_GEN="$vbfly"
 export PCIE_GEN="${PCIE_GEN:-2}"    # read by vivado/bd_native.tcl and userclk1_reroute.tcl
 export TRACE_DEPTH="${TRACE_DEPTH:-${T_TRACE_DEPTH:-16384}}"   # read by vivado/create_project.tcl
 export COLL_GATHER="${COLL_GATHER:-0}"                          # read by vivado/create_project.tcl

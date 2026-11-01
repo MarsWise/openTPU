@@ -1597,6 +1597,20 @@ class Builder:
         out.fresh = True
         return out
 
+    def bfly(self, x, s: int) -> Tile:
+        """VOP BFLY over x's rows (Config.VBFLY): one Hadamard butterfly stage at stride s,
+        into a new tile (lo + hi on the lower column of each pair, lo - hi on the upper)."""
+        if not getattr(self.cfg, "VBFLY", False):
+            raise CompileError("bfly: the target has no VOP BFLY (Config.VBFLY)")
+        x = self.materialize(x)
+        self.check_live(x)
+        out = self.alloc(x.shape)
+        ars = x.rs if len(x.shape) == 2 else 0
+        drs = out.rs if len(out.shape) == 2 else 0
+        self.emit(I.bfly(out.base, x.base, out.rows, out.cols, drs, ars, s))
+        out.fresh = True
+        return out
+
     # ---- peephole optimizations on the instruction just emitted
     def _last_vop_writing(self, t: Tile):
         body = self.stack[-1]
