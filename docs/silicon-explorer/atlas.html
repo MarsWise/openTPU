@@ -102,6 +102,20 @@
  </div>
 </section>
 
+<section class="profile-lab" id="profile-lab">
+ <div class="row profile-top">
+  <div><h2>Replay a real openTPU profile</h2><p class="muted small">Optional: import a real .otpuprof (RTL, ISA or board). The source's timestamp and unit remain visible; nothing is fabricated.</p></div>
+  <label class="upload-button" for="profile-file">Open .otpuprof / .json</label><input id="profile-file" type="file" accept=".otpuprof,.json,application/json,application/gzip" hidden>
+ </div>
+ <div id="profile-empty" class="profile-empty">No trace loaded. Use <code>python -m opentpu.lens record mlp -o run.otpuprof</code> or export from the existing profiler, then open the file here. Files stay local in your browser.</div>
+ <div id="profile-view" hidden>
+  <div class="profile-metrics"><div><span>Name</span><strong id="pf-name">—</strong></div><div><span>Source</span><strong id="pf-kind">—</strong></div><div><span>Cycles</span><strong id="pf-cycles">—</strong></div><div><span>Clock</span><strong id="pf-clock">—</strong></div></div>
+  <div class="profile-tools"><button class="tool" id="pf-back">← Previous instruction</button><button class="tool" id="pf-next">Next instruction →</button><button class="tool" id="pf-play">▶ Play starts</button><label class="micro-label" for="pf-pos">Instruction <span id="pf-pos-label">0 / 0</span></label><input id="pf-pos" type="range" min="0" max="0" value="0"></div>
+  <div id="pf-event" class="profile-event" aria-live="polite"></div>
+  <p class="muted small">Events are taken from the uploaded trace, in start-cycle order. This is <strong>instruction-start stepping</strong>, not continuous per-cycle animation or sampled physical power. For full waveform-level analysis, use otpu-lens.</p>
+ </div>
+</section>
+
 <section class="below">
  <div class="below-intro">
    <h2>What this project actually documents</h2>
