@@ -260,3 +260,336 @@ const TOUR=[
  ["Physical logic","bitlogic","The RTL ends at mapped FPGA primitives. Going down to transistor cells becomes an explicitly labelled textbook explanation."],
  ["Evidence and limits","hostlens","Real instruction timing, stalls and traces belong to otpu-lens and board reports, not an artistic animation."]
 ].map(([title,id,caption])=>({title,id,caption}));
+
+let view="rack",selected="rack",mode="explore",flow=0,step=0,tour=0,follow=true,speed=1,timer=null,playing=false;
+let panX=0,panY=0,zoom=1,pointer=null,suppressClick=false;
+const svgRoot=$("diagram"),camera=$("camera"),overlay=$("overlay");
+const PLAY_DELAY=2100;
+const badgeFor=n=>n.status==="measured"?"Measured":n.status==="derived"?"Derived":n.status==="conceptual"?"Textbook / inferred":"RTL / documented";
+const scaleOf=id=>{
+ const n=id||"";
+ if(n==="rack")return"Computer · metre scale";
+ if(n==="pciecard")return"PCIe card · centimetre scale";
+ if(n==="fpga")return"FPGA die · millimetre scale (logical drawing)";
+ if(n==="logicgate"||n==="fet")return"Logic / nanometre-scale textbook";
+ if(n==="silicon")return"Crystal lattice · ~0.5 nm";
+ if(n==="atom")return"Atomic scale · ~0.1 nm";
+ if(n==="nucleus")return"Nucleus · femtometres";
+ if(n==="quarks")return"Subnuclear scale · not a chip feature";
+ return"RTL logical drawing · not a floorplan";
+};
+const ancestors=id=>{let a=[],n=DATA.get(id);while(n){a.unshift(n);n=DATA.get(n.parent)}return a};
+function say(msg){const t=$("toast");t.textContent=msg;t.style.display="block";clearTimeout(say.timeout);say.timeout=setTimeout(()=>{t.style.display="none"},2100)}
+function uiState(){
+ const p=new URLSearchParams();
+ p.set("view",view);if(mode==="flow"){p.set("flow",FLOWS[flow].key);p.set("step",String(step+1))}
+ if(mode==="tour"){p.set("tour",String(tour+1))}
+ const h="#"+p.toString();
+ if(location.hash!==h)history.replaceState(null,"",h);
+}
+function readState(){
+ const p=new URLSearchParams(location.hash.replace(/^#/,""));
+ const v=p.get("view");if(v&&DATA.has(v))view=v;
+ const fl=FLOWS.findIndex(x=>x.key===p.get("flow"));
+ if(fl>=0){mode="flow";flow=fl;step=Math.min(FLOWS[fl].steps.length-1,Math.max(0,(+p.get("step")||1)-1));}
+ else if(p.has("tour")){mode="tour";tour=Math.min(TOUR.length-1,Math.max(0,(+p.get("tour")||1)-1));}
+}
+function resetCamera(){zoom=1;panX=0;panY=0;applyCamera()}
+function applyCamera(){camera.setAttribute("transform","translate("+panX+" "+panY+") scale("+zoom+")")}
+const currentFlowStep=()=>mode==="flow"?FLOWS[flow].steps[step]:null;
+function navigate(id,fromStage=false){
+ if(!DATA.has(id))return;
+ view=id;selected=id;resetCamera();draw();
+ if(!fromStage)uiState();
+}
+function choose(id){if(!DATA.has(id))return;selected=id;inspect(id);mark();const n=DATA.get(id);$("selection-pill").hidden=n.children.length===0;$("selection-pill").textContent="Zoom into "+n.name+" ↳";$("selection-pill").onclick=()=>navigate(id);$("node-actions").replaceChildren();
+ if(id!==view){const b=html("button","", "Zoom into "+n.short+" ↳");b.onclick=()=>navigate(id);$("node-actions").appendChild(b);}
+ if(n.parent){const b=html("button","", "↑ Parent");b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b);}
+}
+function sourceLink(file,label){
+ const a=html("a","",label||file);a.href=SOURCE+file;a.target="_blank";a.rel="noopener noreferrer";return a;
+}
+function inspect(id){
+ const n=DATA.get(id);if(!n)return;
+ $("node-kicker").textContent=badgeFor(n).toUpperCase()+" · "+n.type.toUpperCase();
+ $("node-title").textContent=n.name;$("node-description").textContent=n.desc;
+ const facts=$("node-facts");facts.replaceChildren();
+ for(const [k,val] of Object.entries(n.facts)){const row=html("div","fact");row.appendChild(html("span","",k));row.appendChild(html("b","",val));facts.appendChild(row)}
+ $("node-note").textContent=n.note||"All measurements and capacities are bound to the linked target, version or dated test. Click a block to inspect; double-click to zoom inside.";
+ const s=$("node-sources");s.replaceChildren();if(n.src)s.appendChild(sourceLink(n.src));
+ for(const ex of n.extra)s.appendChild(sourceLink(ex));
+ $("provenance").textContent=badgeFor(n);$("node-count").textContent=n.children.length?n.children.length+" sub-parts":"finest documented part";
+ $("node-actions").replaceChildren();
+ if(id!==view){const b=html("button","", "Go into "+n.short+" ↳");b.onclick=()=>navigate(id);$("node-actions").appendChild(b)}
+ if(n.parent){const b=html("button","", "↑ Parent");b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b)}
+}
+function drawFrame(g,n){
+ E("rect",{x:20,y:16,width:1080,height:686,rx:18,fill:"#0e1e2d",stroke:"#3971a2","stroke-width":2},g);
+ E("rect",{x:38,y:32,width:1044,height:89,rx:11,fill:"url(#chip-grad)",stroke:"#5a8eb7","stroke-width":1.5},g);
+ text(g,56,64,n.name,29,"#f6f7fa",750);
+ const sub=n.short+" · "+n.children.length+" sub-parts";
+ text(g,56,94,sub,15,"#a5c6dc");
+ const k=n.status==="conceptual"?"TEXTBOOK":n.status==="measured"?"MEASURED":n.status==="derived"?"DERIVED":"RTL / CONFIG";
+ E("rect",{x:885,y:42,width:175,height:29,rx:14,fill:"#1d3c4c",stroke:"#64869f"},g);
+ text(g,972,62,k,12,"#cfe5f4",700).setAttribute("text-anchor","middle");
+}
+function classify(id){const n=DATA.get(id);return n.type==="physical"?"physical":n.type==="control"?"control":n.type==="memory"?"memory":"compute"}
+function makePart(g,id,x,y,w,h,opts={}){
+ const n=DATA.get(id);
+ const gg=E("g",{"class":"part "+classify(id)+(selected===id?" selected":""),role:"button",tabindex:0,"aria-label":n.name},g);
+ const shape=E("rect",{class:"shape",x,y,width:w,height:h,rx:10},gg);
+ if(opts.highlight)shape.setAttribute("stroke","#f4bd62");
+ const title=E("title",{},gg);title.textContent=n.desc;
+ const narrow=w<195,small=h<72;
+ const titleSize=narrow?15:18;
+ const chars=narrow?20:Math.max(18,Math.floor(w/10));
+ const cap=n.name.length>chars?n.name.slice(0,chars-1)+"…":n.name;
+ text(gg,x+13,y+Math.min(30,h/2),cap,titleSize,"#f4f8fb",720);
+ if(!small){
+  const desc=n.short||n.desc;
+  const sub=desc.length>Math.max(20,Math.floor(w/8))?desc.slice(0,Math.max(20,Math.floor(w/8))-1)+"…":desc;
+  text(gg,x+13,y+52,sub,12,"#b7cadb");
+  if(h>95)text(gg,x+13,y+h-15,(n.children.length?n.children.length+" deeper levels ↳":"see source ↗"),11,"#70c9df");
+ }
+ gg.addEventListener("click",ev=>{if(!suppressClick){choose(id)}ev.stopPropagation()});
+ gg.addEventListener("dblclick",ev=>{navigate(id);ev.stopPropagation()});
+ gg.addEventListener("keydown",ev=>{if(ev.key==="Enter"){ev.preventDefault();navigate(id)}else if(ev.key===" "){ev.preventDefault();choose(id)}});
+ return gg;
+}
+function drawChildren(g,n){
+ const items=n.children;
+ if(!items.length){drawLeaf(g,n);return}
+ let cols=items.length<=2?items.length:items.length<=6?3:items.length<=9?3:items.length<=12?4:4;
+ const rows=Math.ceil(items.length/cols),left=55,top=177,width=1010,gapX=14,gapY=16;
+ const h=items.length>12?109:Math.min(194,Math.floor((473-(rows-1)*gapY)/rows));
+ const w=(width-(cols-1)*gapX)/cols;
+ const center=560;
+ if(items.length<=9){
+  E("line",{class:"wire",x1:center,y1:121,x2:center,y2:147},g);
+  E("line",{class:"wire",x1:left+w/2,y1:147,x2:left+width-w/2,y2:147},g);
+ }
+ items.forEach((id,i)=>{
+  const x=left+(i%cols)*(w+gapX),y=top+Math.floor(i/cols)*(h+gapY);
+  if(items.length<=9)E("line",{class:"wire",x1:x+w/2,y1:147,x2:x+w/2,y2:y},g);
+  makePart(g,id,x,y,w,h,{highlight:id===selected});
+ });
+ if(items.length===1)text(g,560,617,"Double-click the outlined block to descend one level",16,"#9ab0c3").setAttribute("text-anchor","middle");
+ // Visual bus: communication is conceptual; the exact timing is in the named RTL.
+ if(["slice","mxu","array","tmem","dram","fpga"].includes(n.id)){
+  E("rect",{x:55,y:660,width:1010,height:24,rx:5,fill:"#23374a",stroke:"#456580"},g);
+  text(g,560,677,n.id==="array"?"DSP48E1 cascades · 16 positions per group":n.id==="tmem"?"TMEM arbiter / bank routing":"Logical data and control paths · consult RTL for arbitration",12,"#b9cad6").setAttribute("text-anchor","middle");
+ }
+}
+function drawLeaf(g,n){
+ // Functional and physical terminal views — explicit schematic, never an implied physical floorplan.
+ if(n.id==="quarks"){
+  const colors=["#e28967","#7ba8df","#e28967"];
+  [["u",410],["u",710],["d",560]].forEach((p,i)=>{E("circle",{cx:p[1],cy:i===2?485:310,r:82,fill:colors[i]+"66",stroke:colors[i],"stroke-width":3},g);text(g,p[1],(i===2?485:310)+10,p[0],35,"#f1f5f9",700).setAttribute("text-anchor","middle")});
+  text(g,560,638,"Valence quarks of a proton: up · up · down (textbook)",16,"#a7c3d5").setAttribute("text-anchor","middle");
+ } else if(n.id==="atom"||n.id==="nucleus"){
+  E("circle",{cx:560,cy:404,r:82,fill:"#bf755255",stroke:"#f2b775","stroke-width":2},g);
+  text(g,560,411,"Si nucleus",19,"#ffffff",700).setAttribute("text-anchor","middle");
+  if(n.id==="atom")for(let i=0;i<14;i++){let theta=i*2*Math.PI/14;E("circle",{cx:560+220*Math.cos(theta),cy:404+181*Math.sin(theta),r:7,fill:"#8fbdff"},g)}
+  text(g,560,645,n.id==="atom"?"Neutral silicon: 14 protons, 14 electrons · schematic":"Nuclear constituents · schematic",14,"#b5c7d9").setAttribute("text-anchor","middle");
+ } else if(n.id==="dramCell"){
+  drawCell(g,"dram");
+ }else if(n.id.startsWith("cell")||n.id==="sramcell"){
+  drawCell(g,"sram");
+ }else if(n.id==="fet"||n.id==="logicgate"){
+  drawCell(g,"mos");
+ }else if(n.id.includes("product")||n.id==="mul"){
+  drawBitGrid(g,n);
+ }else if(n.id.includes("cascade")||n.id.includes("psum")||n.id==="carry"){
+  drawAdder(g);
+ }else if(n.id==="lut"){
+  drawBitGrid(g,n);
+ }else{
+  const box=E("rect",{x:170,y:210,width:780,height:365,rx:18,fill:"#192b3c",stroke:n.type==="physical"?"#c99e58":"#5b9ac2","stroke-width":2},g);
+  const splits=n.desc.match(/.{1,75}(?:\s|$)/g)||[n.desc];
+  for(let i=0;i<Math.min(5,splits.length);i++)text(g,560,310+i*29,splits[i].trim(),17,"#dceaf5").setAttribute("text-anchor","middle");
+  text(g,560,520,n.status==="conceptual"?"Textbook explanation · not an extracted hardware netlist":"RTL source linked in the details panel",13,"#e5bc7d").setAttribute("text-anchor","middle");
+ }
+}
+function drawAdder(g){
+ const names=[["A",150],["B",360],["CIN",570],["XOR / majority",780]];
+ names.forEach(q=>{E("rect",{x:q[1],y:290,width:q[0]==="XOR / majority"?180:150,height:112,rx:10,fill:"#1c3449",stroke:"#6ba8d1","stroke-width":2},g);text(g,q[1]+(q[0]==="XOR / majority"?90:75),345,q[0],q[0]==="XOR / majority"?16:22,"#fff",700).setAttribute("text-anchor","middle")});
+ E("path",{d:"M300 345H360 M510 345H570 M720 345H780",class:"wire"},g);
+ text(g,560,560,"SUM = A ⊕ B ⊕ CIN · COUT = AB + ACIN + BCIN",17,"#ded9cb").setAttribute("text-anchor","middle");
+}
+function drawBitGrid(g,n){
+ text(g,560,205,"16 × 16 conceptual arithmetic bitfield",19,"#dbeffc",700).setAttribute("text-anchor","middle");
+ for(let r=0;r<16;r++)for(let c=0;c<16;c++){E("rect",{x:265+c*36,y:226+r*23,width:29,height:17,rx:2,fill:(r+c)%5===0?"#bf7942":(r+c)%3===0?"#295e79":"#17344d",stroke:"#5185a1","stroke-width":.5},g)}
+ text(g,560,644,n.id==="lut"?"LUT6: 6 input bits select one of 64 configuration values":"Conceptual datapath bits; DSP48E1 internal gate topology is not public here",13,"#b9c8d7").setAttribute("text-anchor","middle");
+}
+function drawCell(g,what){
+ const names=what==="dram"?["BITLINE","ACCESS MOS","CAPACITOR"]:what==="sram"?["BIT / BIT̅","ACCESS MOS","CROSS-COUPLED INV."]:["GATE","SOURCE / DRAIN","CHANNEL"];
+ text(g,560,209,what==="dram"?"1T1C DRAM storage cell":what==="sram"?"6T SRAM textbook cell":"Ideal CMOS transistor and switch",19,"#f5cf91",700).setAttribute("text-anchor","middle");
+ names.forEach((s,i)=>{
+  const x=170+i*275;E("rect",{x,y:300,width:225,height:175,rx:12,fill:"#2d281f",stroke:"#d4a568","stroke-width":2},g);
+  text(g,x+112,358,s,16,"#efdbba",700).setAttribute("text-anchor","middle");
+  if(i<2)E("line",{class:"wire",x1:x+225,y1:388,x2:x+275,y2:388},g);
+ });
+ text(g,560,553,"Functional semiconductor model — source RTL contains no transistor extraction",14,"#b4bfc7").setAttribute("text-anchor","middle");
+}
+function mark(){
+ const c=DATA.get(selected);$("scene-status").textContent=c?c.name:"";
+ $("minimap").textContent=ancestors(view).map(n=>n.short).slice(-5).join(" › ");
+ // For deep focus the outline is already drawn by makePart; when on current node, highlight heading.
+ const os=$("overlay");os.replaceChildren();
+ if(mode==="flow"||mode==="tour"){
+  const key=mode==="flow"?FLOWS[flow].steps[step].id:TOUR[tour].id;
+  const match=key===view||DATA.get(key)?.parent===view;
+  if(match){
+    E("rect",{class:"focus-ring",x:32,y:26,width:1057,height:97,rx:15},os);
+    if(mode==="flow"){
+      E("path",{class:"trace-edge",d:"M160 145H960", "marker-end":"url(#flow-arrow)"},os);
+    }
+  }
+ }
+}
+function draw(){
+ const n=DATA.get(view);if(!n)return;
+ camera.replaceChildren();
+ const g=E("g",{},camera);
+ drawFrame(g,n);drawChildren(g,n);
+ $("scene-scale").textContent=scaleOf(view);
+ $("breadcrumbs").replaceChildren();
+ ancestors(view).forEach((n,i)=>{
+  if(i)$("breadcrumbs").appendChild(html("span","muted","›"));
+  const b=html("button","crumb",n.short);
+  b.onclick=()=>navigate(n.id);$("breadcrumbs").appendChild(b);
+ });
+ $("btn-up").disabled=!n.parent;
+ $("selection-pill").hidden=true;
+ inspect(selected= view);
+ $("node-actions").replaceChildren();
+ if(n.parent){let b=html("button","", "↑ Back to "+DATA.get(n.parent).name);b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b)}
+ for(const ch of n.children.slice(0,7)){const b=html("button","", "Explore "+DATA.get(ch).short);b.onclick=()=>navigate(ch);$("node-actions").appendChild(b)}
+ applyCamera();mark();
+}
+function showStage(){
+ let id,cap,title,src,kind="documented",tags=[];
+ if(mode==="flow"){
+  const item=FLOWS[flow].steps[step];id=item.id;title=item.title;cap=item.caption;src=item.src;kind=item.kind;tags=item.tags;
+  $("cap-label").textContent="FLOW "+FLOWS[flow].key+" · "+FLOWS[flow].name.toUpperCase()+" · "+(step+1)+"/"+FLOWS[flow].steps.length;
+  $("caption").textContent=cap;
+  $("cap-extra").textContent=FLOWS[flow].summary+" · Animation is illustrative, not measured timing.";
+ }else if(mode==="tour"){
+  const item=TOUR[tour];id=item.id;title=item.title;cap=item.caption;src=DATA.get(id).src;kind=DATA.get(id).status;
+  $("cap-label").textContent="GUIDED TOUR · SLIDE "+(tour+1)+" / "+TOUR.length;
+  $("caption").textContent=cap;$("cap-extra").textContent="Use ← / → to explore 18 chapters; T to toggle tour.";
+ }else{
+  $("cap-label").textContent="EXPLORE";$("caption").textContent="Click a component for sourced details. Double-click or press Enter to zoom into it. Select a flow to see hardware data movement.";$("cap-extra").textContent="Space: play · ← →: steps · +/-: hierarchy zoom · F: present · P: panel";
+  $("stage-details").hidden=true;
+  renderSteps();mark();return;
+ }
+ $("stage-details").hidden=false;
+ $("flow-stage-title").textContent=title;$("flow-stage-description").textContent=cap;
+ const a=$("flow-stage-source");a.href=SOURCE+src;a.textContent="Source: "+src;
+ const tagDiv=$("flow-stage-tags");tagDiv.replaceChildren();
+ [kind,...tags].forEach(t=>tagDiv.append(html("span","",t)));
+ if(follow)navigate(id,true);else{selected=id;inspect(id);}
+ $("tour-dots").replaceChildren();
+ if(mode==="tour")TOUR.forEach((t,i)=>{let b=html("button","tour-dot"+(i===tour?" on":""),"");b.setAttribute("aria-label","Slide "+(i+1));b.title=t.title;b.onclick=()=>{tour=i;showStage()};$("tour-dots").appendChild(b)});
+ renderSteps();mark();uiState();
+}
+function renderSteps(){
+ document.querySelectorAll(".flow-btn").forEach(b=>b.classList.toggle("active",mode==="flow"&&b.dataset.key===FLOWS[flow].key));
+ const box=$("stage-buttons");box.replaceChildren();
+ const items=mode==="flow"?FLOWS[flow].steps:mode==="tour"?TOUR:[];
+ items.forEach((item,i)=>{
+  const current=mode==="flow"?step:tour;
+  const b=html("button","stage-chip"+(i===current?" current":""),(i+1)+". "+item.title);
+  b.title=item.title;b.onclick=()=>{if(mode==="flow")step=i;else tour=i;showStage()};
+  box.appendChild(b);
+  if(i===current&&typeof b.scrollIntoView==="function")b.scrollIntoView({block:"nearest",inline:"nearest"});
+ });
+ $("btn-prev").disabled=!items.length;$("btn-next").disabled=!items.length;
+ $("btn-play").textContent=playing?"Ⅱ Pause":"▶ Play";
+ $("btn-tour").textContent=mode==="tour"?"Exit tour":"Tour";
+}
+function stop(){if(timer!==null){clearInterval(timer);timer=null}playing=false;renderSteps()}
+function move(delta){
+ if(mode==="explore"){if(delta>0){const n=DATA.get(view);if(n.children.length)navigate(n.children[0])}else{const n=DATA.get(view);if(n.parent)navigate(n.parent)}return}
+ if(mode==="flow"){const lim=FLOWS[flow].steps.length;step=Math.min(lim-1,Math.max(0,step+delta))}
+ else tour=Math.min(TOUR.length-1,Math.max(0,tour+delta));
+ showStage();
+}
+function play(){
+ if(playing){stop();return}
+ if(mode==="explore"){startFlow(0);return}
+ playing=true;
+ const tick=()=>{
+  const index=mode==="flow"?step:tour,lim=mode==="flow"?FLOWS[flow].steps.length:TOUR.length;
+  if(index>=lim-1){stop();return}
+  move(1);
+ };
+ timer=setInterval(tick,PLAY_DELAY/speed);renderSteps();
+}
+function startFlow(i){stop();mode="flow";flow=i;step=0;$("tour-dots").replaceChildren();showStage()}
+function toggleTour(){stop();if(mode==="tour"){mode="explore";showStage();uiState()}else{mode="tour";tour=0;showStage()}}
+function flowButtons(){
+ FLOWS.forEach((entry,i)=>{
+  const b=html("button","flow-btn");b.dataset.key=entry.key;b.title=entry.summary;
+  b.appendChild(html("span","key",entry.key));b.appendChild(html("span","",entry.name));
+  b.onclick=()=>startFlow(i);$("flow-nav").appendChild(b);
+ });
+}
+function search(){
+ const inp=$("node-search"),p=$("search-results");p.replaceChildren();
+ const q=inp.value.trim().toLowerCase();p.hidden=!q;
+ if(!q)return;
+ const matches=[...DATA.values()].filter(n=>(n.name+" "+n.id+" "+n.src).toLowerCase().includes(q)).slice(0,30);
+ matches.forEach(n=>{const b=html("button","",n.name);b.title=n.id;b.onclick=()=>{navigate(n.id);inp.value="";p.hidden=true};p.appendChild(b)});
+ if(!matches.length)p.appendChild(html("div","muted","No hardware node found"));
+}
+flowButtons();readState();draw();showStage();
+$("btn-up").onclick=()=>{let p=DATA.get(view).parent;if(p)navigate(p)};
+$("btn-home").onclick=()=>navigate("rack");
+$("btn-zin").onclick=()=>{zoom=Math.min(3.5,zoom*1.25);applyCamera()};
+$("btn-zout").onclick=()=>{zoom=Math.max(.5,zoom/1.25);applyCamera()};
+$("btn-prev").onclick=()=>move(-1);$("btn-next").onclick=()=>move(1);
+$("btn-play").onclick=play;
+$("btn-speed").onclick=()=>{speed=speed===1?2:speed===2?0.5:1;$("btn-speed").textContent=speed+"×";if(playing){stop();play()}};
+$("btn-follow").onclick=()=>{follow=!follow;$("btn-follow").classList.toggle("on",follow);$("btn-follow").textContent=follow?"Follow":"Manual";};
+$("btn-tour").onclick=toggleTour;
+$("btn-panel").onclick=()=>document.body.classList.toggle("panel-hidden");
+$("btn-panel-close").onclick=()=>document.body.classList.add("panel-hidden");
+$("btn-present").onclick=()=>{
+ if(document.fullscreenElement){document.exitFullscreen?.()}else{document.documentElement.requestFullscreen?.().catch(()=>say("Fullscreen unavailable in this browser"))}
+};
+$("node-search").addEventListener("input",search);
+$("btn-copy").onclick=async()=>{uiState();try{await navigator.clipboard.writeText(location.href);say("Link copied")}catch(e){say("Copy URL from the address bar")}};
+const wrap=$("svg-wrap");
+svgRoot.addEventListener("wheel",ev=>{ev.preventDefault();const factor=ev.deltaY<0?1.13:.88;zoom=Math.max(.5,Math.min(3.5,zoom*factor));applyCamera()},{passive:false});
+svgRoot.addEventListener("pointerdown",e=>{if(e.button!==0)return;pointer={x:e.clientX,y:e.clientY,panX,panY};suppressClick=false;wrap.classList.add("dragging");svgRoot.setPointerCapture?.(e.pointerId)});
+svgRoot.addEventListener("pointermove",e=>{
+ if(!pointer)return;
+ const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
+ if(Math.abs(dx)+Math.abs(dy)>6)suppressClick=true;
+ const w=svgRoot.getBoundingClientRect().width||1120,s=1120/w;
+ panX=pointer.panX+dx*s;panY=pointer.panY+dy*s;applyCamera();
+});
+const done=e=>{pointer=null;wrap.classList.remove("dragging");try{svgRoot.releasePointerCapture?.(e.pointerId)}catch(err){}setTimeout(()=>suppressClick=false,0)};
+svgRoot.addEventListener("pointerup",done);svgRoot.addEventListener("pointercancel",done);
+window.addEventListener("hashchange",()=>{const oldView=view,oldMode=mode;readState();if(oldView!==view||oldMode!==mode){draw();showStage()}});
+document.addEventListener("keydown",e=>{
+ if(["INPUT","TEXTAREA","SELECT"].includes(e.target?.tagName)||e.ctrlKey||e.altKey||e.metaKey)return;
+ const key=e.key.toLowerCase();
+ if(key===" "){e.preventDefault();play()}else if(e.key==="ArrowRight"){e.preventDefault();move(1)}else if(e.key==="ArrowLeft"){e.preventDefault();move(-1)}
+ else if(key==="backspace"||key==="-"){e.preventDefault();const p=DATA.get(view).parent;if(p)navigate(p)}
+ else if(key==="+"){const n=DATA.get(selected);if(n)navigate(selected)}
+ else if(key==="t"){toggleTour()}else if(key==="p"){document.body.classList.toggle("panel-hidden")}
+ else if(key==="c"){$("btn-follow").click()}else if(key==="f"){$("btn-present").click()}
+ else if(key==="s"){$("btn-speed").click()}
+ else{const ix=FLOWS.findIndex(f=>f.key.toLowerCase()===key);if(ix>=0)startFlow(ix)}
+});
+window.__openTPUAtlasChecks={
+ version:"2.0",nodes:PATHNODES(),flows:FLOWS.length,tour:TOUR.length,
+ view:()=>view,mode:()=>mode,selected:()=>selected,
+ goto:id=>navigate(id),
+ playFlow:key=>{const i=FLOWS.findIndex(f=>f.key===key);if(i<0)throw Error("Unknown flow");startFlow(i)},
+ status:()=>({node:view,stage:step,flow:FLOWS[flow].name,steps:FLOWS[flow].steps.length}),
+ getNode:id=>{const n=DATA.get(id);return n?{id:n.id,name:n.name,parent:n.parent,children:n.children.length,source:n.src}:null}
+};
+})();
