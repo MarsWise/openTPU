@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Source-linked hierarchical deep zoom of openTPU FPGA, DSP48E1, MXU, VPU, TMEM, ISA and measured inference performance.">
+<title>openTPU Deep Silicon Atlas</title>
+<style>
+:root{color-scheme:dark;--bg:#08111d;--p:#101f30;--p2:#152a41;--edge:#34506b;--fg:#e9f2ff;--muted:#9eb6cc;--accent:#52d7a9;--cyan:#67b8ff;--amber:#f4c26c;--pink:#ff92b8}
+*{box-sizing:border-box}body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:radial-gradient(circle at 40% -20%,#183757,#08111d 65%);color:var(--fg);margin:0}a{color:var(--cyan)}button,input,select{font:inherit}button{cursor:pointer;color:var(--fg)}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:3px}h1,h2,h3,p{margin:0}h1{font-size:clamp(26px,4vw,43px);line-height:1.15;letter-spacing:-.035em}h2{font-size:23px}h3{font-size:16px}
+header{padding:24px max(18px,calc((100vw - 1510px)/2)) 14px}.lead{max-width:950px;color:var(--muted);margin-top:10px}.eyebrow{color:var(--accent);font-size:11px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;margin-bottom:8px}
+nav{position:sticky;top:0;z-index:10;background:#0c1a2aeF;border-block:1px solid var(--edge);backdrop-filter:blur(12px);padding:9px max(18px,calc((100vw - 1510px)/2));display:flex;gap:7px;overflow:auto}.navbtn,.btn,.crumb{border:1px solid var(--edge);background:#172d44;border-radius:8px;padding:8px 11px;white-space:nowrap}.navbtn.active,.btn.active{border-color:var(--accent);background:#174737}.crumb{padding:5px 8px;font-size:12px}
+main{max-width:1545px;margin:auto;padding:17px 18px 85px}.page{display:none}.page.active{display:block}.panel{background:var(--p);border:1px solid var(--edge);border-radius:13px;padding:16px;min-width:0}.grid{display:grid;gap:13px}.split{grid-template-columns:minmax(0,1.8fr) minmax(290px,.85fr)}.twocol{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:repeat(3,minmax(0,1fr))}.mini4{grid-template-columns:repeat(4,minmax(0,1fr))}.metricgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:13px 0}.metric{background:#12263a;border:1px solid var(--edge);border-radius:10px;padding:12px}.metric small{font-size:11px;color:var(--muted)}.metric strong{display:block;font-size:24px;letter-spacing:-.025em}.hint{font-size:12px;color:var(--muted)}.meta{color:var(--muted);font-size:12px}.section{margin-top:16px}.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}.bread{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-height:40px}.search{background:#0e2136;color:var(--fg);border:1px solid var(--edge);border-radius:8px;padding:10px;min-width:170px;width:100%}
+#viewport{width:100%;height:clamp(500px,60vw,780px);border:1px solid #436481;border-radius:12px;background-color:#091825;background-image:radial-gradient(#234059 1px,transparent 1px);background-size:28px 28px;touch-action:none;cursor:grab}#viewport.grabbing{cursor:grabbing}#viewport text{font-family:system-ui,sans-serif}#viewport .node{cursor:pointer}#viewport .node rect{fill:#142e48;stroke:#4386b1;stroke-width:1.6}#viewport .node:hover rect,#viewport .node:focus rect{fill:#184f54;stroke:var(--accent);stroke-width:2.5}#viewport .node.active rect{fill:#225444;stroke:var(--accent)}#viewport .node.warn rect{stroke:#b7914e}#viewport .node text{fill:#e9f2ff;pointer-events:none}#viewport .wire{stroke:var(--accent);stroke-width:2;fill:none;opacity:.7}#viewport .subtitle{fill:#a7c1d5}
+.block{background:#12283c;border:1px solid var(--edge);padding:11px;border-radius:9px}.line{height:1px;background:var(--edge);margin:13px 0}.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.field{display:grid;gap:5px;color:var(--muted);font-size:12px}select,input[type=number]{color:var(--fg);background:#0e2539;border:1px solid var(--edge);border-radius:7px;padding:9px;max-width:100%}input[type=range]{width:100%;accent-color:var(--accent)}.chip{font-size:11px;border:1px solid var(--edge);border-radius:5px;padding:3px 6px;color:var(--muted)}.chip.measured{color:var(--accent);border-color:#3f8f77}.chip.derived{color:var(--amber);border-color:#967d43}.chip.concept{color:var(--pink);border-color:#855476}.fact{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #304c6566}.fact span{color:var(--muted)}.fact b{text-align:right}.note{border-left:3px solid var(--accent);background:#183b3288;border-radius:0 8px 8px 0;padding:10px 13px;margin:12px 0}.warning{border-color:var(--amber);background:#56401755}.scroll{max-height:260px;overflow:auto}.item{display:block;padding:8px;border:1px solid var(--edge);border-radius:7px;margin:6px 0;background:#132840;text-decoration:none}.item:hover{border-color:var(--cyan)}.item small{display:block;color:var(--muted)}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,th{border-bottom:1px solid var(--edge);padding:9px 6px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500}td.right{text-align:right}.barrow{display:grid;grid-template-columns:138px 1fr 95px;gap:8px;align-items:center;margin:9px 0}.track{height:17px;border-radius:6px;background:#25374a;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#3478bd,#5ad9a5)}.fill.gold{background:linear-gradient(90deg,#a56932,#e6c078)}.lanes{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}.lane{background:#163b32;border:1px solid #438975;border-radius:7px;min-height:56px;display:grid;place-content:center;text-align:center;cursor:pointer}.lane.active{background:#256754;border-color:#a0ffe0}
+.bitgrid{display:grid;grid-template-columns:repeat(16,1fr);gap:3px}.bit{min-height:22px;text-align:center;line-height:22px;background:#204b6d;border:1px solid #4a8bb6;border-radius:3px;font-size:10px}.bit.zero{background:#303848;border-color:#48576a;opacity:.75}.bit.sel{background:#28654f;border-color:var(--accent)}.bits{font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all;letter-spacing:.8px;color:#bde6fc;padding:10px;background:#0c1d2d;border-radius:7px}.stage{background:#17304a;border:1px solid var(--edge);border-radius:9px;padding:12px;min-height:90px;cursor:pointer}.stage.active{background:#254b3f;border-color:var(--accent)}.stages{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.stage b{font-size:14px}.stage p{font-size:11px;color:var(--muted)}
+#tracer{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin:14px 0}.traceNode{border:1px solid var(--edge);padding:10px;border-radius:8px;min-width:100px;background:#17304a;text-align:center}.traceNode.current{border-color:var(--amber);background:#55421e}.traceArrow{color:var(--accent);font-size:22px}.comparison{padding:10px;border:1px solid var(--edge);border-radius:8px}.mono{font-family:ui-monospace,Consolas,monospace}.readme{font-size:12px;color:var(--muted)}ol,ul{padding-left:23px}li{margin:6px 0}.sourceLinks a{display:block;margin:7px 0;word-break:break-word}footer{padding:20px max(18px,calc((100vw - 1510px)/2)) 33px;border-top:1px solid var(--edge);color:var(--muted);font-size:12px}
+@media(max-width:920px){.split,.twocol,.three{grid-template-columns:1fr}.metricgrid{grid-template-columns:repeat(2,1fr)}#viewport{height:580px}.stages{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:550px){.metricgrid{grid-template-columns:repeat(2,1fr)}.lanes,.mini4{grid-template-columns:repeat(4,1fr)}.stages{grid-template-columns:repeat(2,1fr)}.barrow{grid-template-columns:96px 1fr 75px;font-size:11px}.grid{gap:8px}#viewport{height:480px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<header>
+<div class="eyebrow">RTL-grounded deep zoom · Kintex-7 / NextGen snapshot</div>
+<h1>openTPU Deep Silicon Atlas</h1>
+<p class="lead">Explore the real design from FPGA and DDR3 to RTL units, individual systolic processing elements and DSP48E1 datapaths. Inspect memory banks, a ternary dot product, pipeline stages, instruction flow and inference throughput. Hardware-backed facts are distinguished from conceptual diagrams and calculated limits.</p>
+<div class="row section"><span class="chip measured">Source-linked hardware</span><span class="chip derived">Calculated metrics labelled</span><span class="chip concept">Logical drawings, not Vivado placement</span><a href="./index.html">Classic Explorer</a></div>
+</header>
+<nav id="nav" aria-label="Atlas sections"></nav>
+<main>
+<section id="explore" class="page active">
+<div class="metricgrid">
+<div class="metric"><small>FPGA</small><strong>XC7K480T</strong><small>Inspur YPCB-00338</small></div>
+<div class="metric"><small>MXU / m4</small><strong>512 MAC/cycle</strong><small>D128 × 4 columns, arithmetic peak</small></div>
+<div class="metric"><small>Local TMEM</small><strong>256 KiB</strong><small>8 FP32 banks, 65,536 words</small></div>
+<div class="metric"><small>External DRAM</small><strong>4 GiB</strong><small>Two DDR3-1066 controllers</small></div>
+</div>
+<div class="grid split">
+<div class="panel">
+<div class="row"><h2 style="flex:1">Architecture microscope</h2><span class="chip">Click blocks to enter</span></div>
+<div class="bread" id="bread"></div>
+<div class="toolbar"><button class="btn" id="up">Up one level</button><button class="btn" id="home">Chip</button><button class="btn" id="zin" title="Zoom in">+ Zoom</button><button class="btn" id="zout" title="Zoom out">− Zoom</button><button class="btn" id="reset" title="Reset pan and zoom">Reset view</button><span class="hint">Wheel to zoom · drag to pan</span></div>
+<svg id="viewport" role="group" aria-label="Interactive openTPU architecture tree" tabindex="0" viewBox="0 0 1120 720"><g id="scene"></g></svg>
+<div class="note warning">The layout is generated from a logical hierarchy and source comments. It is not an FPGA placement/routing image, transistor-level extraction, power map or a cycle-accurate simulation.</div>
+</div>
+<div class="panel">
+<h2 id="inspectorTitle">Select a component</h2>
+<div class="row section"><span class="chip" id="kindBadge"></span><span class="chip" id="depthBadge"></span></div>
+<p id="inspectorDesc" class="section"></p><div id="inspectorFacts" class="section"></div>
+<div class="note" id="inspectorNote"></div>
+<h3>RTL / evidence</h3><div class="sourceLinks" id="inspectorSources"></div>
+<h3 class="section">Jump to component</h3><input class="search" id="search" type="search" placeholder="Search: DSP48, sequencer, DMA, SRAM, TMM..." aria-label="Search architecture nodes"><div id="searchResults" class="scroll"></div>
+</div>
+</div>
+</section>
+<section id="dsp" class="page">
+<h2>DSP48E1 microscope · one processing element</h2><p class="meta">A conceptual walkthrough of the actual Xilinx 7-series mapping in <code>rtl/tech/xilinx7/otpu_tech_dsp.sv</code>. The implementation has configurable PAIR/QUAD input selection, internal pipeline registers, PCIN/PCOUT cascades, and a separate nine-DSP column-end accumulator.</p>
+<div class="grid twocol section">
+<div class="panel"><h3>Signed INT8 input example</h3><div class="grid twocol section"><label class="field">Activation (−128…127)<input id="a8" type="number" value="-12" min="-128" max="127"></label><label class="field">Weight (−128…127)<input id="w8" type="number" value="7" min="-128" max="127"></label></div>
+<div class="grid three section"><div class="block"><small class="hint">A / D path</small><h3>pre-adder selection</h3><p class="hint">INMODE chooses low/high weight input</p></div><div class="block"><small class="hint">B path</small><h3>activation register</h3><p class="hint">signed 8-bit operand in BREG</p></div><div class="block"><small class="hint">M path</small><h3>product</h3><p id="prod" class="mono"></p></div></div>
+<div class="line"></div><h3>P = PCIN + M (or P = M for FIRST)</h3><label class="field section">Previous accumulated chain value (small demonstration)<input id="pcin" type="number" value="100" min="-1000000" max="1000000"></label><div class="bits" id="dspbits"></div>
+<div class="note" id="dspInfo"></div></div>
+<div class="panel"><h3>How the real DSP maps</h3><div class="stages section" id="dspstages"></div><div class="note warning">This signed multiply-plus-add arithmetic is a teaching model. It does not simulate DSP48E1's exact cycle-by-cycle pipeline control, register enables, bit slicing, saturation, or bitstream configuration.</div>
+<div class="sourceLinks"><a id="dspSrc" target="_blank" rel="noopener noreferrer">DSP48E1 RTL mapping</a><a id="dspGeneric" target="_blank" rel="noopener noreferrer">Generic RTL reference</a><a id="dspStudy" target="_blank" rel="noopener noreferrer">Systolic MXU study</a></div></div>
+</div>
+</section>
+<section id="ternary" class="page">
+<h2>Ternary / BitNet · a weight without a multiplier</h2><p class="meta">Explore the three valid low-two-bit codes and how packed ternary weights affect a small accumulator. The real board pipeline's weight packing and group scaling are versioned features; this calculator does not claim to model a full GSC instruction.</p>
+<div class="grid twocol section">
+<div class="panel"><h3>One ternary activation step</h3>
+<div class="grid twocol section"><label class="field">Activation signed INT8<input type="number" id="act" min="-128" max="127" value="-23"></label><label class="field">Starting accumulator<input type="number" id="acc" value="100"></label></div>
+<div class="toolbar"><label class="field">Two-bit code<select id="trit"><option value="0">00: zero (TMM internal)</option><option value="1">01: plus one</option><option value="2">10: minus one</option><option value="3">11: reserved (invalid)</option></select></label></div>
+<div class="bits" id="ternaryResult"></div><div class="note" id="ternaryNote"></div>
+<h3 class="section">Packed weight illustration</h3><div class="bitgrid" id="ternaryBytes"></div><p class="meta section">Sixteen independent 2-bit positions shown as a conceptual packed 32-bit word. The Bonsai MLX input and internal TMM repacking use different conventions; do not treat this illustration as an automatic checkpoint decoder.</p></div>
+<div class="panel"><h3>Verified vs experimental</h3><table><thead><tr><th>Mode</th><th>Evidence</th></tr></thead><tbody>
+<tr><td>TMM on real FPGA</td><td>BitNet 2B4T reference agreement and board measurements documented</td></tr>
+<tr><td>GSC / Bonsai</td><td>Branch-specific native group scales and simulation; a new verified bitstream is required for some configurations</td></tr>
+<tr><td>QUAD / PAIR</td><td>Different capability flags, memory reuse and effective single-token throughput; never infer one from peak MACs</td></tr></tbody></table>
+<div class="sourceLinks"><a id="ternaryRtl" target="_blank" rel="noopener noreferrer">TMM implementation RTL</a><a id="ternaryDoc" target="_blank" rel="noopener noreferrer">BitNet board verification</a><a id="bonsaiDoc" target="_blank" rel="noopener noreferrer">Bonsai GSC contract</a></div></div>
+</div>
+</section>
+<section id="memory" class="page">
+<h2>Memory deep dive · bank, channel, beat</h2><p class="meta">Two independent address decoders: logical TMEM words map by modulo LANES; logical DRAM data are interleaved over 64-byte beats and optionally hashed across physical channels. Uses the formulas documented in the native DRAM adapter.</p>
+<div class="grid twocol section">
+<div class="panel">
+<h3>TMEM logical address</h3><label class="field section">Word address (0…65535)<input type="number" id="tmaddr" min="0" max="65535" value="333"></label>
+<div class="lanes section" id="tmBanks"></div><div class="note" id="tmInfo"></div>
+<p class="meta">The actual BRAM design uses register-stage bypass, read arbitration, sub-banks, replay and core_clk2x pumping. The bank selection does not by itself reproduce those timing details.</p>
+<div class="sourceLinks"><a id="tmemSource" target="_blank" rel="noopener noreferrer">TMEM RTL</a></div>
+</div>
+<div class="panel"><h3>DDR3 logical byte address</h3><label class="field section">Byte address (0…4294967295)<input id="ddraddr" type="number" min="0" max="4294967295" value="8192"></label><div class="toolbar"><label><input type="checkbox" id="chash" checked> CHASH enabled (target default)</label></div>
+<div class="grid twocol section"><div class="block"><h3>Channel 0</h3><div id="dch0" class="metric"></div></div><div class="block"><h3>Channel 1</h3><div id="dch1" class="metric"></div></div></div>
+<div class="note" id="ddrInfo"></div><div class="sourceLinks"><a id="dramSource" target="_blank" rel="noopener noreferrer">Native DRAM RTL</a><a id="chSource" target="_blank" rel="noopener noreferrer">Two clock-domain / channel bridge</a></div>
+</div>
+</div>
+<div class="grid three section"><div class="panel"><h3>DDR3 channels</h3><p>2 × 2 GiB, 64 data bits per channel, DDR3-1066, 17.056 GB/s nominal raw peak across both channels.</p></div><div class="panel"><h3>ACT RAM</h3><p>16 stationary rows × 128 blocks × 128 INT8 bytes = 256 KiB raw activation storage, plus 64-bit scale records.</p></div><div class="panel"><h3>TMEM</h3><p>8 banks × 8,192 FP32 words = 256 KiB logical tensor memory in m4; not a cache of DRAM weights.</p></div></div>
+</section>
+<section id="vpu" class="page">
+<h2>VPU · arithmetic and composite functions</h2>
+<div class="grid twocol section">
+<div class="panel"><h3>Eight vector lanes</h3><div class="lanes section" id="vpuLanes"></div><div class="note" id="vpuLaneInfo"></div><div class="sourceLinks"><a id="vpuRtl" target="_blank" rel="noopener noreferrer">VPU RTL</a><a id="fpRtl" target="_blank" rel="noopener noreferrer">FP32 staged units</a></div></div>
+<div class="panel"><h3>Composite op and reduction path</h3><div class="stages section" id="vpuStages"></div><div class="note" id="vpuOpInfo"></div><div class="sourceLinks"><a id="seRtl" target="_blank" rel="noopener noreferrer">Stream engine composite scheduler</a><a id="treeRtl" target="_blank" rel="noopener noreferrer">Reduction tree</a><a id="fpRules" target="_blank" rel="noopener noreferrer">Bit-exact FP32 spec</a></div></div>
+</div>
+</section>
+<section id="flow" class="page">
+<h2>Execution flow · conceptual instruction animation</h2>
+<div class="panel section">
+<div class="toolbar"><label class="field">Instruction<select id="flowSelect"></select></label><button class="btn" id="step">Next transfer</button><button class="btn" id="play">Play</button><button class="btn" id="rewind">Reset</button><label class="field">Pacing (ms)<input type="number" id="pace" min="350" max="5000" step="100" value="950"></label></div>
+<div id="tracer"></div><div class="note" id="traceInfo"></div>
+<div class="note warning">Animation shows semantic data dependencies and routing, not measured bus cycles, arbitration stalls, instruction latencies, trace activity or FPGA power. For cycle-level real/simulated evidence use <code>otpu-lens</code> with an <code>.otpuprof</code> file.</div>
+<div class="sourceLinks"><a id="seqSource" target="_blank" rel="noopener noreferrer">Scoreboard RTL</a><a id="lensSource" target="_blank" rel="noopener noreferrer">otpu-lens reference</a></div>
+</div>
+</section>
+<section id="performance" class="page">
+<h2>Measured throughput and simple memory roofline</h2>
+<div class="grid twocol section">
+<div class="panel"><h3>FPGA measured LLM decode</h3><div class="row section"><label class="field">Metric<select id="metricSelect"><option value="wall">Wall tok/s</option><option value="device">Device tok/s</option><option value="band">DDR GB/s</option></select></label></div><div id="modelBars" class="section"></div><p class="meta">Dated measurements and model-specific settings from the feature snapshot's main README. These are not fresh tests of a new bitstream.</p></div>
+<div class="panel"><h3>Weight-reading bandwidth bound</h3><p class="meta">A first-order estimate assuming weights are streamed from DDR once per generated token, batch size 1, with no KV/cache/compute/host overhead.</p>
+<div class="grid twocol section"><label class="field">Parameter count (billions)<input type="number" id="params" min="0.1" max="40" value="2" step="0.1"></label><label class="field">Effective bits per weight<select id="wbits"><option value="2">2-bit ternary packing</option><option value="4.25" selected>4.25 bits, FP4 with scales</option><option value="8">8-bit weights</option></select></label></div>
+<div class="grid twocol section"><label class="field">Assumed effective DRAM GB/s<input type="number" id="bw" min="1" max="17.056" step="0.1" value="15.8"></label><label class="field">DRAM utilization (%)<input type="range" id="util" min="20" max="100" value="93"></label></div>
+<div class="metricgrid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><div class="metric"><small>Weight bytes / token</small><strong id="weightBytes"></strong></div><div class="metric"><small>Optimistic weight bandwidth bound</small><strong id="roof"></strong></div></div>
+<div class="note warning">The output is not a benchmark prediction or a guarantee. For MLP/MoE, attention KV, reused weights, quant metadata, host expert streaming and batch >1, the model needs a different traffic accounting.</div></div>
+</div>
+<div class="grid twocol section"><div class="panel"><h3>Physical BitNet benchmark evidence</h3><table><tbody><tr><td>Full 30-layer BitNet 2B4T, FPGA device</td><td class="right">145.8 ms/token</td></tr><tr><td>Same host-driven run, wall</td><td class="right">271.5 ms/token</td></tr><tr><td>TMM M=1</td><td class="right">127.7 MAC/cycle</td></tr><tr><td>TMM M=16</td><td class="right">511.6 MAC/cycle</td></tr><tr><td>TMM M=16</td><td class="right">136.4 GOPS</td></tr></tbody></table><p class="meta">2026-10-20 test, specific build; no claim that a newly flashed card or Bonsai uses these values. BitNet single-token TMM uses only a quarter of the m4 column arithmetic peak.</p></div>
+<div class="panel"><h3>Different forms of evidence</h3><div class="fact"><span>Board benchmark</span><b><span class="chip measured">Measured</span></b></div><div class="fact"><span>D × MCOLS × clock</span><b><span class="chip derived">Arithmetic ceiling</span></b></div><div class="fact"><span>Traffic / bits per weight</span><b><span class="chip derived">Model-based bound</span></b></div><div class="fact"><span>Logical FPGA drawing</span><b><span class="chip concept">Conceptual</span></b></div><p class="meta section">For WNS, LUT, FF, DSP, BRAM utilization and pblocks, consult a real Vivado build for the same commit and target.</p></div></div>
+</section>
+<section id="sources" class="page">
+<h2>Reproducibility and source links</h2>
+<p class="meta">This atlas pins clickable implementation files to the feature branch commit it was read against, so a later refactor cannot silently change what a diagram links to.</p>
+<div class="grid twocol section" id="sourceGrid"></div>
+<div class="panel section"><h3>Limitations and acceptance</h3><ul>
+<li>The deep zoom descends to DSP48E1 logical blocks and FPGA LUT/FF/BRAM/CARRY4 concepts. It does <strong>not</strong> reconstruct transistor nets or physical transistor layouts from SystemVerilog.</li>
+<li>The code is a visual explanation; not a new RTL synthesis, Verilator simulation, firmware build or board run.</li>
+<li>The m4 target figures are sourced from the pinned target configuration. The m8 architecture can be inspected separately, but a timing-closed bitstream is not presumed.</li>
+<li>The physical chip layout, clock tree, pblock placement and gates-after-synthesis would require actual Vivado placement/routing files for the specific bitstream.</li>
+<li>The original ET-SoC-1 page served as an inspiration only. This interface is independently implemented using openTPU's publicly accessible own source.</li></ul></div>
+</section>
+</main>
+<footer>Independent openTPU Deep Silicon Atlas · branch docs/opentpu-silicon-explorer · source commit <span id="revision"></span> · no modifications to RTL or production branches.</footer>
+<script>
+(function(){
+"use strict";
+const SHA="55b975c14346cc692f1765729d750d79e8bc0b04", REPO="https://github.com/MarsWise/openTPU/blob/"+SHA+"/",NS="http://www.w3.org/2000/svg";
+const $=id=>document.getElementById(id), el=(tag,cl,s)=>{let e=document.createElement(tag);if(cl)e.className=cl;if(s!==undefined)e.textContent=s;return e};
+const svg=(tag,attrs)=>{let e=document.createElementNS(NS,tag);Object.entries(attrs||{}).forEach(q=>e.setAttribute(q[0],String(q[1])));return e};
+function link(id,path){const e=$(id);e.href=REPO+path;return e}
+$("revision").textContent=SHA.slice(0,12);
+const tabs=[["explore","Deep zoom"],["dsp","DSP48E1"],["ternary","Ternary"],["memory","Memory"],["vpu","VPU"],["flow","Dataflow"],["performance","Performance"],["sources","RTL sources"]];
+function navigate(tab){if(!$(tab))tab="explore";document.querySelectorAll(".page").forEach(p=>p.classList.toggle("active",p.id===tab));document.querySelectorAll(".navbtn").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));if(location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);window.scrollTo(0,0);if(tab==="explore")render();}
+tabs.forEach(t=>{let b=el("button","navbtn",t[1]);b.dataset.tab=t[0];b.onclick=()=>navigate(t[0]);$("nav").append(b)});addEventListener("hashchange",()=>navigate(location.hash.slice(1)||"explore"));navigate(location.hash.slice(1)||"explore");
+const tree=new Map(),add=(id,parent,title,desc,source,tag="rtl",facts=[],note="",refs=[])=>{tree.set(id,{id,parent,title,desc,source,tag,facts,note,refs,children:[]});if(parent){const p=tree.get(parent);if(!p)throw Error("Missing parent "+parent);p.children.push(id)}};
+add("chip",null,"openTPU Kintex-7","One physical YPCB-00338 FPGA card with host PCIe, two DDR3 channels and an openTPU compute slice.","targets/ypcb-00338.toml","rtl",[["FPGA","XC7K480T"],["Memory","4 GiB DDR3"],["Core","133.33 MHz"],["Host","PCIe Gen2 x8"]],"Clock, physical routing and dies cannot be inferred from the logical block diagram.");
+add("host","chip","Host / PCIe","User-space driver, model packing, kernels, register and DMA access.","opentpu/host/board.py","rtl",[["PCIe target","Gen2 ×8"],["Interface","XDMA / AXI"]],"Negotiated PCIe width depends on the actual board and slot.");
+add("board","chip","Board wrapper","Top-level FPGA wrapper with clocks, LiteDRAM PHY, XDMA and control registers.","rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv","rtl",[["Input clock","50 MHz"],["Core clock","133.33 MHz"]]);
+add("ddr","chip","DDR3 channels","Two 2 GiB physical DDR3 channels with independent LiteDRAM bridges.","rtl/mem/otpu_native_dram.sv","rtl",[["Total DRAM","4 GiB"],["Nominal peak","17.056 GB/s"]]);
+add("core","chip","Compute core","One openTPU slice, its control/trace wrapper and shared memory interface.","rtl/top/otpu_slice.sv","rtl",[["Slices","1"],["MXU","D=128; MCOLS=4"],["VPU","8 lanes"]]);
+add("clock","board","Clock domains","MMCM-derived core, controller, XDMA, and 2× clock for pumped TMEM; asynchronous crossing is handled in RTL.","rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv","rtl",[["core_clk2x","2 × core"],["CDC","Asynchronous FIFOs"]]);
+add("pcie","board","XDMA / BAR0","PCIe Gen2 x8 XDMA and AXI-Lite register access to host and calibration controls.","rtl/shell/otpu_ctrl.sv","rtl",[["Control","BAR0"],["DMA","AXI"]]);
+add("shell","board","Memory bridges","Two otpu_mem_ch instances arbitrate accelerator native beats and host AXI traffic, with clock-domain crossings.","rtl/shell/otpu_mem_ch.sv","rtl",[["Beat","64 bytes"],["Host AXI","128-bit"]]);
+add("trace","board","Observability","Build identity, counters, temperature and trace registers exposed through BAR0.","docs/observability.md","doc",[["Register map","versioned"],["Trace","hardware + Lens"]]);
+add("ch0","ddr","Channel 0","First 2 GiB of physical DDR3.","rtl/shell/otpu_mem_ch.sv","rtl",[["Data","64 bits"],["Rate","1066 MT/s"]]);
+add("ch1","ddr","Channel 1","Second 2 GiB DDR3, with native 64-byte beat mapping.","rtl/shell/otpu_mem_ch.sv","rtl",[["Data","64 bits"],["Rate","1066 MT/s"]]);
+add("interleave","ddr","Interleave + CHASH","One chunk of D=128 bytes is mapped into 64-byte beats on both physical channels; CHASH helps distribute strided accesses.","rtl/mem/otpu_native_dram.sv","rtl",[["Channel","beat[0] XOR parity(chunk)"],["Chunk","128 B"]],"CHASH is selectable, and the host uses the same physical mapping.");
+add("slice","core","openTPU slice","The concurrent functional units and scoreboard. Explicit DRAM/TMEM accesses and physical arbitration.","rtl/top/otpu_slice.sv","rtl",[["Compute","1 slice"],["No conventional cache","explicit movement"]]);
+add("soc","core","Wrapper + counters","Firmware control, trace collection and host-visible status.","rtl/shell/otpu_board.sv","rtl",[["Counters","DRAM + unit stalls"],["Identity","BUILD_ID / CFG_HASH"]]);
+add("seq","slice","Sequencer","Fetch, decode, dependency tracking, dispatch window and MM prefetch/release.","rtl/seq/otpu_seq.sv","rtl",[["Architectural registers","16 × 32-bit"],["Window","16 entries (m4)"]]);
+add("dma","slice","DMA","Explicit streams and transfers between external DRAM and TMEM.","rtl/dma/otpu_dma.sv");
+add("mxu","slice","Systolic MXU","D=128 × MCOLS=4 integer dot-product datapath with input weight FIFOs and exact accumulation.","rtl/mxu/otpu_mxu.sv","rtl",[["D","128"],["MCOLS","4"],["Peak","512 MAC/cycle"]],"A matrix instruction's sustained throughput depends on M, quantization format, row replay and DRAM.");
+add("vpu","slice","FP32 VPU","Eight FP32 lanes for elementwise arithmetic, approximated composite functions and reductions.","rtl/vpu/otpu_vpu.sv","rtl",[["LANES","8"],["Composite lanes","2"]]);
+add("quant","slice","Quantizer","QACT takes FP32 from TMEM and fills scaled INT8 stationary activation rows in ACT RAM.","rtl/vpu/otpu_quant.sv");
+add("tmem","slice","TMEM scratchpad","65,536 32-bit logical words banked across eight lanes, using BRAM with arbitration and 2× pumping.","rtl/mem/otpu_tmem.sv","rtl",[["Words","65,536"],["Banks","8"],["Capacity","256 KiB"]]);
+add("act","slice","ACT RAM","Stationary INT8 activations and per-block 64-bit quantization records.","rtl/mem/otpu_actram.sv","rtl",[["Rows","16"],["Blocks/row","128"],["Bytes/block","128"]]);
+add("coll","slice","Collective","S-slice BAR/GATHER logic. Present in general RTL, not a physical mesh on the S=1 card.","rtl/top/otpu_coll.sv","rtl",[["Physical slices","1"],["Other targets","S may vary"]]);
+add("imem","seq","IMEM + fetch","Synchronous instruction memory, one-instruction lookahead and register input arguments.","rtl/seq/otpu_seq.sv","rtl",[["Registers","R0–R15"],["Instruction","8 × 32-bit words"]]);
+add("score","seq","Scoreboard","Memory-range RAW/WAR/WAW dependency tracking with parallel unit dispatch.","rtl/seq/otpu_seq.sv","rtl",[["Dispatch","in order"],["Execution","overlaps independent units"]]);
+add("pre","seq","MM prefetch","A matrix instruction can start fetching DRAM inputs earlier than execution release.","rtl/seq/otpu_seq.sv");
+add("ld","dma","DRAM stream mover","Loads/stores aligned chunks and streams to the other units.","rtl/dma/otpu_dma.sv");
+add("wb","dma","Memory B arbitration","DMA has priority before MXU stream requests for DRAM port B.","rtl/top/otpu_slice.sv");
+add("wait","dma","WAITW / stream modes","Host rendezvous and DSTEP/STREAM moving logic.","rtl/dma/otpu_dma.sv");
+add("fifo","mxu","Weight / scale FIFOs","Weight chunks from port B and scale rows from port A; separate issuer and consumer.","rtl/mxu/otpu_mxu.sv");
+add("array","mxu","Systolic MAC array","Four compute columns; each column has D=128 product positions along DSP chains.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Columns","4"],["PEs per column","128"],["FPGA cell","DSP48E1"]],"Logical PE count from D × MCOLS; physical utilization also includes epilogue and infrastructure.");
+add("end","mxu","Column end","Group sums are scaled and accumulated exactly in DSP48E1 cascades, followed by an FP32 epilogue.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Column-end DSPs","9 / column"],["Accumulator","48-bit"]],"The 9 column-end DSPs are distinct from the array's 128 PE positions.");
+add("tmm","mxu","Ternary adapter","Packed ternary TMM and group-scale GSC branch-specific paths share existing integer machinery.","rtl/mxu/otpu_mxu.sv","rtl",[["BitNet","FPGA-tested"],["GSC","branch-specific"]],"Do not equate native TMM/GSC throughput with the standard INT8 MXU peak.",["docs/nextgen/BITNET_COMPAT.md","docs/nextgen/BONSAI_4B.md"]);
+add("ep","end","FP32 epilogue","Converts the 48-bit exact accumulation to FP32 and applies quantization scales, then writes TMEM.","rtl/mxu/otpu_mxu.sv");
+add("colacc","end","Eight group terms","The group-scaling column end consumes eight groups and accumulates their adjusted integer sums.","rtl/tech/xilinx7/otpu_tech_dsp.sv");
+add("gsc","tmm","Group scales","GSC scales an integer block before FP32 accumulation, preserving ternary grouping semantics.","docs/nextgen/BONSAI_4B.md","doc");
+add("pair","tmm","PAIR / QUAD","Select one of packed halves/quarters with distinct capability flags, reuse and perf characteristics.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["TPAIR","target-dependent"],["TQUAD","target-dependent"]]);
+add("fpipe","vpu","FP32 arithmetic slots","Pipelined FP32 add, multiply and nonfused mul-then-add.","rtl/vpu/otpu_fpipe.sv","rtl",[["Fmul","LAT≥2"],["Fadd","LAT≥4"]],"otpu_fmadd performs two roundings; it is not a single IEEE fused FMA.");
+add("composite","vpu","Composite functions","EXP2, RECIP, RSQRT and LOG2 run on long composite lanes; stream engine optionally time-multiplexes stages.","rtl/vpu/otpu_se_comp.sv");
+add("reduction","vpu","Reduction tree","64 interleaved FP32 partials folded through a scheduled reduction tree.","rtl/vpu/otpu_vtree.sv","rtl",[["Partials","64"],["Lanes","8"]]);
+add("stream","vpu","Stream engine","Reusable VPU arithmetic in a staged pipeline for DSTEP/STREAM.","rtl/vpu/otpu_se_comp.sv");
+add("fp32","fpipe","IEEE-like numerical kernels","Round-to-nearest-even FP32 with flushed subnormals; defined deviations from full IEEE-754.","rtl/vpu/otpu_fp.sv","rtl",[["Multiply","two stages or more"],["Add","four stages or more"]]);
+add("rom","composite","TFN coefficient ROM","Generated 2048 entries of polynomial coefficients for table-based functions.","rtl/vpu/otpu_tfn_rom.sv");
+add("interp","composite","Newton / Horner","Multiple arithmetic slots evaluate predefined approximation steps, preserving ISA rounding semantics.","rtl/vpu/otpu_se_comp.sv");
+add("part64","reduction","64 partial accumulators","FP32 partial sums are interleaved to respect pipeline latency.","rtl/vpu/otpu_vtree.sv");
+add("fold","reduction","Folding add tree","Row-level and lane-level reductions produce final row sums.","rtl/vpu/otpu_vtree.sv");
+add("arb","tmem","Bank arbiter","Port requests are granted whole-unit and can stall units pending resource availability.","rtl/top/otpu_slice.sv");
+add("banked","tmem","8 logical banks","TMEM bank = FP32 word address modulo LANES; each bank has 8,192 logical words.","rtl/mem/otpu_tmem.sv","rtl",[["Word width","32 bits"],["Logical banks","8"]]);
+add("pump","tmem","2× BRAM pump","TMEM_IMPL=3 uses one copy with sub-bank arbitration and a doubled core clock for RAM ports.","rtl/mem/otpu_tmem.sv","rtl",[["Target impl","3"],["Clock","core_clk2x"]]);
+add("bypass","tmem","Write bypass / replay","Registered writes and a forwarding path preserve read-after-write memory semantics.","rtl/mem/otpu_tmem.sv");
+add("actstores","act","Activation byte storage","One memory per column/piece, with byte enables and delayed quantizer writes.","rtl/mem/otpu_actram.sv");
+add("scales","act","Scale records","Each activation row/block stores Sa and four sub-block offsets.","rtl/mem/otpu_actram.sv","rtl",[["Scale record","64 bits"]]);
+add("bar","coll","BAR","Synchronization of all slices participating in the collective.","rtl/top/otpu_coll.sv");
+add("gather","coll","GATHER","Reads TMEM segments and broadcasts into other slices' TMEM under collective grants.","rtl/top/otpu_coll.sv");
+for(let i=0;i<4;i++){add("c"+i,"array","Column "+i,"Stationary activation row "+i+" dot-product with one streamed weight chunk.","rtl/mxu/otpu_mxu.sv","rtl",[["Logical products","128"],["Activation row",String(i)],["MAC peak","128 / cycle"]]);for(let g=0;g<8;g++){const group="c"+i+"g"+g;add(group,"c"+i,"Group "+g,"One chain of sixteen logical INT8 product positions; chain products reduce via PCIN/PCOUT.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Chain positions","16"],["DSP family","DSP48E1"]]);for(let p=0;p<16;p++){const id=group+"p"+p;add(id,group,"PE "+p,"DSP48E1 processing element: operand registers, 8-bit signed product and local PCIN accumulation. Logical instance in the chain.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Column",String(i)],["Group",String(g)],["Chain index",String(p)],["DSP","DSP48E1"]]);add(id+"dsp",id,"DSP48E1 internal datapath","One DSP48E1 technology primitive, with A/D input selection, B register, multiplier M, adder P and cascade signals.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Product","INT8 × INT8"],["Cascade","PCIN→PCOUT"]]);for(const [key,n,desc] of [["input","A / D / INMODE","Registered weight path; select low/high packed operand before multiplication."],["breg","BREG","Registered activation operand into the DSP."],["mult","Multiplier M","Signed product between activation and selected weight."],["add","ALU P / PCIN","P = PCIN + M, or P = M at chain start."],["pcout","PCOUT","Carries accumulated chain result into the next DSP stage."]])add(id+"dsp"+key,id+"dsp",n,desc,"rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Physical primitive","DSP48E1"]]);}}}
+for(let i=0;i<8;i++){const id="bank"+i;add(id,"banked","Bank "+i,"Logical bank "+i+": words whose address modulo eight equals "+i+".","rtl/mem/otpu_tmem.sv","rtl",[["Words","8192"],["Physical","BRAM-backed"]]);add(id+"ram",id,"BRAM storage","Logical capacity backed by Xilinx Block RAM copies/ports depending on TMEM_IMPL and target.","rtl/tech/generic/otpu_tech_ram.sv","concept",[["Technology","Xilinx BRAM"],["Mapping","implementation-dependent"]],"Do not infer exact RAMB36 placement/instantiation from this logical row.");}
+for(let i=0;i<8;i++){const id="lane"+i;add(id,"fpipe","Lane "+i,(i<2?"Composite-capable FP32 lane.":"Simple arithmetic FP32 lane.")+" Output staging depends on the function.","rtl/vpu/otpu_vpu.sv","rtl",[["Lane",String(i)],["Composite",i<2?"yes":"no"]]);}
+const primitiveParent="clock";add("primitives",primitiveParent,"FPGA primitives (conceptual)","Hardware realization uses device technology primitives. Actual count/location only exists after synthesis and implementation.","docs/board.md","concept",[],"These are device-level explanatory building blocks, not a decompiled physical netlist.");
+for(const [id,title,desc,src] of [["dsp48","DSP48E1","Dedicated multiplier/adder/cascade hardware.","rtl/tech/xilinx7/otpu_tech_dsp.sv"],["bram","RAMB36 / BRAM","Embedded SRAM blocks for logical memories and FIFOs.","rtl/mem/otpu_tmem.sv"],["lut","LUT6","Configurable logic functions; may implement mux/decode/boolean logic.","docs/board.md"],["carry","CARRY4","Fast carry logic for addition and other mapped arithmetic.","docs/board.md"],["ff","FDRE / flip-flop","Synchronous state element; local clock enable may suppress toggles.","docs/board.md"],["bufg","Clock buffer","Global clock distribution, MMCM outputs and timing constraints.","rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv"]])add("prim"+id,"primitives",title,desc,src,"concept",[],"Technology-level example; no primitive-level PPA claims without the generated netlist.");
+let active="chip",scl=1,tx=0,ty=0,drag=null,dragMoved=false;
+const hierarchy=id=>{const a=[];let n=tree.get(id);while(n){a.unshift(n);n=tree.get(n.parent)}return a};
+const labelFor=node=>node.tag==="concept"?"Conceptual block":node.tag==="doc"?"Documented semantics":"RTL-backed component";
+function enter(id){if(!tree.has(id))return;active=id;scl=1;tx=0;ty=0;render()}
+function render(){const n=tree.get(active);if(!n)return;$("inspectorTitle").textContent=n.title;$("inspectorDesc").textContent=n.desc;$("kindBadge").textContent=labelFor(n);$("kindBadge").className="chip "+(n.tag==="concept"?"concept":n.tag==="doc"?"derived":"measured");$("depthBadge").textContent="Level "+(hierarchy(active).length-1);
+const facts=$("inspectorFacts");facts.replaceChildren();for(const kv of n.facts){let d=el("div","fact","");d.append(el("span","",kv[0]),el("b","",kv[1]));facts.append(d)}
+$("inspectorNote").textContent=n.note||"Select an inner block for deeper details. Source is pinned to the verified feature branch snapshot.";
+const links=$("inspectorSources");links.replaceChildren();for(const s of [n.source,...n.refs]){let a=el("a","",s);a.href=REPO+s;a.target="_blank";a.rel="noopener noreferrer";links.append(a)}
+const bread=$("bread");bread.replaceChildren();hierarchy(active).forEach((item,i)=>{if(i)bread.append(el("span","hint","›"));const b=el("button","crumb",item.title);b.title=item.id;b.onclick=()=>enter(item.id);bread.append(b)});
+const scene=$("scene");scene.replaceChildren();const group=svg("g",{transform:"translate("+tx+" "+ty+") scale("+scl+")"});scene.append(group);
+const box=svg("rect",{x:28,y:22,width:1064,height:91,rx:16,fill:"#173a47",stroke:"#4cd5b0","stroke-width":2});group.append(box);
+const name=svg("text",{x:50,y:58,"font-size":25,"font-weight":700,fill:"#e9f2ff"});name.textContent=n.title;group.append(name);
+const subtitle=svg("text",{x:50,y:85,"font-size":13,fill:"#b7ccd9"});subtitle.textContent=n.children.length+" child blocks • "+(n.source||"");group.append(subtitle);
+const count=n.children.length;
+if(!count){let t=svg("text",{x:560,y:320,"text-anchor":"middle","font-size":25,fill:"#e9f2ff"});t.textContent="Lowest documented logical level";group.append(t);let t2=svg("text",{x:560,y:355,"text-anchor":"middle","font-size":14,fill:"#aac4d6"});t2.textContent="Open the pinned RTL source to inspect the exact implementation.";group.append(t2)}
+else{
+let cols=count<=3?Math.min(3,count):count<=8?3:count<=16?4:5;
+let rows=Math.ceil(count/cols),gap=16,usableW=1038,cardW=(usableW-gap*(cols-1))/cols,top=164,usableH=520,cardH=Math.min(126,(usableH-gap*(rows-1))/rows);
+let center=560;
+for(let i=0;i<count;i++){const c=tree.get(n.children[i]),col=i%cols,row=Math.floor(i/cols),x=41+col*(cardW+gap),y=top+row*(cardH+gap);
+if(count<=8){const line=svg("line",{x1:center,y1:113,x2:x+cardW/2,y2:y,stroke:"#388875","stroke-width":2,opacity:.65});group.append(line)}
+const ng=svg("g",{class:"node"+(c.tag==="concept"?" warn":""),tabindex:0,role:"button","aria-label":"Open "+c.title});const r=svg("rect",{x,y,width:cardW,height:cardH,rx:10});ng.append(r);
+const t=svg("text",{x:x+12,y:y+27,"font-size":count>16?14:17,"font-weight":650});t.textContent=c.title.length>32?c.title.slice(0,30)+"…":c.title;ng.append(t);
+const maxLetters=count>16?33:42;
+const d=svg("text",{x:x+12,y:y+48,"font-size":11,fill:"#afd1e3"});d.textContent=c.desc.slice(0,maxLetters)+(c.desc.length>maxLetters?"…":"");ng.append(d);
+if(cardH>=74){const m=svg("text",{x:x+12,y:y+cardH-14,"font-size":10,fill:"#64d8ad"});m.textContent=c.children.length?"Explore "+c.children.length+" blocks":"View source";ng.append(m)}
+ng.addEventListener("click",()=>{if(!dragMoved)enter(c.id)});ng.addEventListener("keydown",ev=>{if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();enter(c.id)}});group.append(ng)}
+}
+}
+const vp=$("viewport");vp.addEventListener("wheel",event=>{event.preventDefault();const factor=event.deltaY<0?1.12:.89;scl=Math.max(.55,Math.min(2.8,scl*factor));render()},{passive:false});
+vp.addEventListener("pointerdown",e=>{if(e.button!==0)return;drag={x:e.clientX,y:e.clientY,tx,ty};dragMoved=false;vp.classList.add("grabbing");vp.setPointerCapture(e.pointerId)});
+vp.addEventListener("pointermove",e=>{if(!drag)return;const w=vp.getBoundingClientRect().width||1120,scale=1120/w;tx=drag.tx+(e.clientX-drag.x)*scale;ty=drag.ty+(e.clientY-drag.y)*scale;if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>5)dragMoved=true;render()});
+function dragEnd(e){drag=null;vp.classList.remove("grabbing");try{if(vp.hasPointerCapture(e.pointerId))vp.releasePointerCapture(e.pointerId)}catch(_){}}
+vp.addEventListener("pointerup",dragEnd);vp.addEventListener("pointercancel",dragEnd);
+$("zin").onclick=()=>{scl=Math.min(2.8,scl*1.2);render()};$("zout").onclick=()=>{scl=Math.max(.55,scl/1.2);render()};$("reset").onclick=()=>{scl=1;tx=0;ty=0;render()};$("up").onclick=()=>{let n=tree.get(active);if(n.parent)enter(n.parent)};$("home").onclick=()=>enter("chip");
+const search=$("search");function updateSearch(){const q=search.value.trim().toLowerCase(),out=$("searchResults");out.replaceChildren();if(!q)return;let items=[...tree.values()].filter(x=>x.title.toLowerCase().includes(q)||x.id.toLowerCase().includes(q)||x.desc.toLowerCase().includes(q)||x.source.toLowerCase().includes(q));const limit=32;items.slice(0,limit).forEach(x=>{let b=el("button","item",x.title);b.style.width="100%";b.style.textAlign="left";b.append(el("small","",x.source));b.onclick=()=>{enter(x.id);search.value="";updateSearch()};out.append(b)});if(items.length>limit)out.append(el("p","hint","Showing first "+limit+" of "+items.length+" matches"))}search.addEventListener("input",updateSearch);render();
+const clampInt=(id,min,max)=>{let e=$(id),v=Math.trunc(Number(e.value));if(!Number.isFinite(v))v=min;v=Math.min(max,Math.max(min,v));e.value=v;return v};
+function dspCalc(){const a=clampInt("a8",-128,127),w=clampInt("w8",-128,127),prev=clampInt("pcin",-1000000,1000000),prod=a*w,sum=BigInt(prev+prod);$("prod").textContent=String(prod);const uint=BigInt.asUintN(48,sum);$("dspbits").textContent="A = "+a+" (0x"+(a&255).toString(16).padStart(2,"0")+")\nW = "+w+" (0x"+(w&255).toString(16).padStart(2,"0")+")\nM = "+prod+"\nPCIN = "+prev+"\nP = "+sum.toString()+"\nP[47:0] = 0x"+uint.toString(16).padStart(12,"0")+"\nP binary = "+uint.toString(2).padStart(48,"0");$("dspInfo").textContent="A chain starting position uses P = M. Other stages use P = PCIN + M and forward it on the dedicated cascade. The actual DSP stage registers, control and possible packed-quarter decode depend on otpu_pe parameters."}
+["a8","w8","pcin"].forEach(id=>$(id).addEventListener("input",dspCalc));dspCalc();
+const dspSteps=[["A / D","Low/high 8-bit weight streams"],["INMODE","Select register and pre-adder gates"],["BREG","Signed activation operand"],["M","Hardware product register"],["P","PCIN + M through DSP ALU"],["PCOUT","Cascade to the next PE"],["MXCE","9-DSP column-end exact accumulator"],["TMEM","FP32-scaled output"]];
+dspSteps.forEach((s,i)=>{const b=el("button","stage",undefined);b.style.textAlign="left";b.append(el("b","",s[0]),el("p","",s[1]));b.onclick=()=>{[...$("dspstages").children].forEach(x=>x.classList.remove("active"));b.classList.add("active");$("dspInfo").textContent=s[0]+": "+s[1]+". See otpu_pe/otpu_mxce in the linked technology RTL.";};$("dspstages").append(b)});
+link("dspSrc","rtl/tech/xilinx7/otpu_tech_dsp.sv");link("dspGeneric","rtl/tech/generic/otpu_tech_dsp.sv");link("dspStudy","docs/mxu_systolic.md");
+function ternaryCalc(){const x=clampInt("act",-128,127),acc=Number($("acc").value)||0,code=Number($("trit").value);const trit=code===0?0:code===1?1:code===2?-1:null;const delta=trit===null?null:x*trit;const next=delta===null?null:acc+delta;$("ternaryResult").textContent="activation: "+x+"\ntrit: "+(trit===null?"INVALID":trit)+"\nMAC contribution: "+(delta===null?"INVALID":delta)+"\nupdated accumulator: "+(next===null?"INVALID":next);$("ternaryNote").textContent=trit===null?"Code 11 is invalid in the internal 00/01/10 TMM representation. A real decoder must reject it.":trit===0?"Zero weight: do not multiply; contribution = 0. Power gating behavior still depends on actual RTL.":"Value "+trit+": accumulation can be implemented using signed addition/subtraction instead of a general full-precision multiplier."}
+["act","acc","trit"].forEach(id=>$(id).addEventListener("input",ternaryCalc));ternaryCalc();
+const bp=$("ternaryBytes");for(let i=0;i<16;i++){let b=el("button","bit"+(i%3===0?" zero":""),i%3===0?"00":i%3===1?"01":"10");b.title="Illustrative code "+i;b.onclick=()=>{const next=b.textContent==="00"?"01":b.textContent==="01"?"10":"00";b.textContent=next;b.classList.toggle("zero",next==="00");b.classList.add("sel")};bp.append(b)}
+link("ternaryRtl","rtl/mxu/otpu_mxu.sv");link("ternaryDoc","docs/nextgen/BITNET_COMPAT.md");link("bonsaiDoc","docs/nextgen/BONSAI_4B.md");
+function memoryCalc(){const addr=clampInt("tmaddr",0,65535),bank=addr%8,row=Math.floor(addr/8);const out=$("tmBanks");out.replaceChildren();for(let i=0;i<8;i++){const b=el("div","lane"+(i===bank?" active":""),"B"+i);out.append(b)}$("tmInfo").textContent="word "+addr+" → bank "+bank+"; row "+row+". Byte address "+(addr*4)+". Each logical bank holds 8,192 FP32 words; this is an address map, not a DDR address.";
+const da=clampInt("ddraddr",0,4294967295),beat=Math.floor(da/64),m=Math.floor(beat/2),base=beat%2;let parity=0,k=m;while(k>0){parity^=(k%2);k=Math.floor(k/2)}const c=base^($("chash").checked?parity:0);$("dch0").textContent=c===0?"Selected":"Other";$("dch1").textContent=c===1?"Selected":"Other";$("ddrInfo").textContent="Byte "+da+" → 64-byte logical beat "+beat+" → chunk "+m+" → physical channel "+c+" (beat parity "+base+", chunk parity "+parity+"). Physical channel beat index "+m+"; offset "+(da%64)+". The host performs the same CHASH mapping when writing model weights."}
+["tmaddr","ddraddr","chash"].forEach(id=>$(id).addEventListener("input",memoryCalc));$("chash").addEventListener("change",memoryCalc);memoryCalc();
+link("tmemSource","rtl/mem/otpu_tmem.sv");link("dramSource","rtl/mem/otpu_native_dram.sv");link("chSource","rtl/shell/otpu_mem_ch.sv");
+let selLane=0,selOp=0;const ops=[["ADD / MUL","Simple elementwise path; the specific latency is chosen by the staged function."],["EXP2","Nine-operation composite program using range reduction and polynomial evaluation."],["RECIP","Six-operation Newton refinement program; not a perfectly rounded IEEE divide."],["RSQRT","Ten-operation reciprocal square-root composite program."],["LOG2","Ten-operation polynomial/exponent handling path."],["RDOT / RSUM","64 interleaved partials followed by the folding addition tree."],["TFN","Table functions with a ROM of polynomial coefficients; capability and target dependent."]];
+function drawVpu(){const out=$("vpuLanes");out.replaceChildren();for(let i=0;i<8;i++){const b=el("button","lane"+(i===selLane?" active":""),"Lane "+i);b.onclick=()=>{selLane=i;drawVpu()};out.append(b)}$("vpuLaneInfo").textContent="Lane "+selLane+(selLane<2?" is a long lane with composite-function slots in the default m4 architecture.":" executes the simple operation paths; composite ops are scheduled on lanes 0–1.");
+let s=$("vpuStages");s.replaceChildren();ops.forEach((op,i)=>{const b=el("button","stage"+(i===selOp?" active":""),"");b.style.textAlign="left";b.append(el("b","",op[0]),el("p","",op[1].slice(0,58)));b.onclick=()=>{selOp=i;drawVpu()};s.append(b)});$("vpuOpInfo").textContent=ops[selOp][1]+ " The internal software reference, staged pipeline and RTL must be compared for exact FP32 behavior."}drawVpu();
+link("vpuRtl","rtl/vpu/otpu_vpu.sv");link("fpRtl","rtl/vpu/otpu_fpipe.sv");link("seRtl","rtl/vpu/otpu_se_comp.sv");link("treeRtl","rtl/vpu/otpu_vtree.sv");link("fpRules","docs/isa.md");
+const flows=[
+["MM · matrix",["ISA","Scoreboard","DRAM B weights","MXU + ACT RAM","FP32 epilogue","TMEM"],"DRAM weights are streamed and stationary activation rows reused while the MXU computes, subject to dependencies."],
+["LD / ST",["ISA","Scoreboard","DMA","DDR3/TMEM"],"Data transfer is explicit. Actual port arbitration can stall the DMA."],
+["QACT",["ISA","TMEM","Quantizer","ACT RAM","MXU (later)"],"Quantization fills stationary INT8 ACT RAM with scales used by the MXU."],
+["VOP",["ISA","TMEM","VPU lanes","Reduction / composite","TMEM"],"Exact instruction semantics and staggered pipeline latency depend on the VOP."],
+["TMM",["ISA","Packed ternary DDR","Ternary adapter","Integer datapath","FP32 scales","TMEM"],"BitNet / Bonsai packed weights use version-dependent TMM adapters and scale contracts."],
+["GATHER",["ISA","Collective","Slice TMEM","All slices TMEM"],"Multi-slice collective operation. The default board only has one slice."]
+];let flowIdx=0,flowStep=0,timer=null;flows.forEach((f,i)=>{const o=el("option","",f[0]);o.value=i;$("flowSelect").append(o)});
+function drawFlow(){const f=flows[flowIdx],p=$("tracer");p.replaceChildren();f[1].forEach((s,i)=>{if(i)p.append(el("span","traceArrow","→"));p.append(el("div","traceNode"+(i===flowStep?" current":""),s))});$("traceInfo").textContent=f[2]+" Selected step "+(flowStep+1)+" of "+f[1].length+".";};
+function stop(){if(timer!==null){clearInterval(timer);timer=null;$("play").textContent="Play"}}
+$("flowSelect").onchange=()=>{stop();flowIdx=Number($("flowSelect").value);flowStep=0;drawFlow()};$("step").onclick=()=>{flowStep=(flowStep+1)%flows[flowIdx][1].length;drawFlow()};$("rewind").onclick=()=>{stop();flowStep=0;drawFlow()};$("play").onclick=()=>{if(timer!==null){stop();return}const pace=Math.max(350,Math.min(5000,Number($("pace").value)||950));timer=setInterval(()=>{$("step").click()},pace);$("play").textContent="Pause"};drawFlow();
+link("seqSource","rtl/seq/otpu_seq.sv");link("lensSource","docs/lens.md");
+const benchmark=[
+["LFM2.5-230M",59.0,52.3,14.5],["LFM2.5-230M FP4",85.8,82.1,14.1],["Qwen3-0.6B FP4",31.3,30.7,13.9],["Qwen3.5-0.8B FP4",24.5,23.3,14.1],["Qwen3.5-2B FP4",12.09,12.03,15.8],["Qwen3.5-4B FP4",5.88,5.87,15.7],["SmolLM3-3B FP4",8.74,8.72,15.7]];
+function perfBars(){const val=$("metricSelect").value,idx=val==="wall"?2:val==="device"?1:3,max=val==="band"?17.056:90;const p=$("modelBars");p.replaceChildren();for(const row of benchmark){let n=el("div","barrow","");n.append(el("span","",row[0]));let t=el("div","track",""),b=el("div","fill"+(val==="band"?" gold":""));b.style.width=Math.min(100,row[idx]/max*100)+"%";t.append(b);n.append(t,el("span","",String(row[idx])+(val==="band"?" GB/s":" tok/s")));p.append(n)}}
+function roof(){let p=Math.max(.1,Math.min(40,Number($("params").value)||2)),bits=Number($("wbits").value),u=Number($("util").value),bw=Math.max(.1,Math.min(17.056,Number($("bw").value)||15.8)),bytes=p*1e9*bits/8,eff=bw*(u/100),rate=eff*1e9/bytes;$("weightBytes").textContent=(bytes/1e9).toFixed(3)+" GB";$("roof").textContent=rate.toFixed(2)+" tok/s";$("roof").title="Bandwidth "+eff.toFixed(2)+" GB/s divided by "+(bytes/1e9).toFixed(3)+" GB per token";}
+$("metricSelect").onchange=perfBars;["params","wbits","bw","util"].forEach(id=>$(id).addEventListener("input",roof));perfBars();roof();
+const sources=[
+["Board target","targets/ypcb-00338.toml","m4 config, clock, memory capacity and interface"],
+["FPGA top","rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv","Clocking, PCIe, LiteDRAM, XDMA"],
+["openTPU slice","rtl/top/otpu_slice.sv","Units and arbitration"],
+["Sequencer","rtl/seq/otpu_seq.sv","Fetch, scoreboard, MM prefetch"],
+["MXU","rtl/mxu/otpu_mxu.sv","INT8/FP4/ternary matrix datapaths"],
+["DSP48E1 mapping","rtl/tech/xilinx7/otpu_tech_dsp.sv","PE and MXCE technology primitives"],
+["Generic DSP reference","rtl/tech/generic/otpu_tech_dsp.sv","Simulation-equivalent model"],
+["VPU","rtl/vpu/otpu_vpu.sv","FP32 SIMD datapath"],
+["FP32 pipeline","rtl/vpu/otpu_fpipe.sv","Staged arithmetic"],
+["FP32 rules","rtl/vpu/otpu_fp.sv","IEEE-like reference behavior"],
+["Reduction tree","rtl/vpu/otpu_vtree.sv","64 partial sums and tree"],
+["Stream composite","rtl/vpu/otpu_se_comp.sv","Microprogram / staging"],
+["TFN ROM","rtl/vpu/otpu_tfn_rom.sv","Table coefficients"],
+["TMEM","rtl/mem/otpu_tmem.sv","Banks, arbitration, bypass"],
+["ACT RAM","rtl/mem/otpu_actram.sv","Stationary activations"],
+["DMA","rtl/dma/otpu_dma.sv","Load/store/stream"],
+["Native DRAM adapter","rtl/mem/otpu_native_dram.sv","CHASH / channel mapping"],
+["DDR bridge","rtl/shell/otpu_mem_ch.sv","Clock crossings / ECC"],
+["BitNet results","docs/nextgen/BITNET_COMPAT.md","Dated FPGA tests"],
+["Bonsai path","docs/nextgen/BONSAI_4B.md","GSC and ternary formats"],
+["SmolVLA status","docs/nextgen/VLA.md","Experimental workloads"],
+["Lens profiler","docs/lens.md","Measured/RTL cycle-level traces"],
+["Benchmarks","README.md","Dated model performance"],
+["Source target selector","opentpu/target.py","Build variants"],
+["ISA simulator","opentpu/isasim.py","Bit-exact interpretation"]
+];
+sources.forEach(s=>{const c=el("div","block",""),a=el("a","",s[0]);a.href=REPO+s[1];a.target="_blank";a.rel="noopener noreferrer";c.append(a,el("p","meta",s[2]),el("code","readme",s[1]));$("sourceGrid").append(c)});
+})();
+</script>
+</body>
+</html>
