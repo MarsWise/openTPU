@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Independent ET-SoC-1 architecture explorer, based on published architecture documents and measured research data.">
+<title>ET-SoC-1 · Architecture & Measurement Explorer</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1019;--panel:#111b2b;--panel2:#162338;--edge:#304867;--txt:#e7f0ff;--muted:#a9bed7;--cyan:#5fbefa;--mint:#44d6ab;--amber:#ffc56b;--pink:#ff90bb;--purple:#be9cff}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(125deg,#07121d,#121323 85%);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--txt)}
+a{color:var(--cyan)}a:hover{text-decoration:none}button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,a:focus-visible{outline:3px solid var(--amber);outline-offset:3px}
+h1,h2,h3,p{margin:0}h1{font-size:clamp(24px,3vw,40px);letter-spacing:-.04em;line-height:1.16}h2{font-size:clamp(21px,2.2vw,29px);letter-spacing:-.025em}h3{font-size:17px}small,.muted{color:var(--muted)}
+header{max-width:1500px;margin:auto;padding:28px 24px 14px}header p{max-width:850px;margin-top:10px;color:var(--muted)}.eyebrow{color:var(--mint);font-size:12px;text-transform:uppercase;letter-spacing:.2em;font-weight:700;margin-bottom:9px}
+nav{position:sticky;z-index:20;top:0;background:#0d1525eF;border-bottom:1px solid var(--edge);backdrop-filter:blur(12px);overflow-x:auto;display:flex;gap:8px;padding:11px max(calc((100vw - 1452px)/2),22px)}
+nav button,.pill,.mode,.stagebtn{border:1px solid var(--edge);border-radius:9px;padding:8px 12px;background:#142238;white-space:nowrap}
+nav button[aria-selected=true],.pill.active,.mode.active,.stagebtn.active{background:#15354c;border-color:var(--cyan);color:#fff}
+main{max-width:1500px;margin:auto;padding:25px 24px 90px}.page{display:none;animation:in .15s ease}.page.active{display:block}@keyframes in{from{opacity:.4;transform:translateY(5px)}to{opacity:1}}
+.hero{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:22px 0}.card,.box{border:1px solid var(--edge);border-radius:14px;background:var(--panel);padding:18px}.card strong{display:block;font-size:clamp(24px,3vw,38px);letter-spacing:-.04em;font-variant-numeric:tabular-nums}.card span{display:block;color:var(--muted);font-size:13px}.layout{display:grid;grid-template-columns:1.35fr 1fr;gap:16px}.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.slabel{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em;margin:18px 0 8px}.detail{border-left:3px solid var(--mint);padding:12px 15px;background:#10312b66;border-radius:0 9px 9px 0;margin-top:14px}.warn{border-left-color:var(--amber);background:#614c1733}
+svg{max-width:100%;height:auto} .shires{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}.shire,.mini,.lane,.bank{border:1px solid #41658a;background:#19304d;border-radius:6px;padding:6px;text-align:center;min-width:0}.shire{font-size:11px;min-height:46px}.shire:hover,.shire.active,.mini.active,.lane.active,.bank.active{background:#244e67;border-color:var(--mint);box-shadow:0 0 0 1px var(--mint)}.shire.dim{opacity:.35}.mini-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:7px}.mini{min-height:70px;display:flex;flex-direction:column;justify-content:center}.mini small{font-size:10px}.lane-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:7px}.lane{min-height:68px;font-size:12px;background:#0b392f}.lane b{display:block;font-size:16px}.pipeline{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px}.stagebtn{white-space:normal;min-height:115px;display:flex;flex-direction:column;gap:8px;text-align:left;border-color:#506581}.stagebtn b{font-size:22px;color:var(--amber)}.stagebtn small{white-space:normal}.wire{height:5px;border-radius:3px;background:linear-gradient(90deg,var(--cyan),var(--mint));margin:15px auto;width:100%;opacity:.65}.compress{display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin:13px 0}.bit{background:#20537c;border:1px solid #4d8cbd;border-radius:3px;height:21px;opacity:.7}.bit.hot{background:#d36b40;border-color:#ffc58d;opacity:1}.bit.off{opacity:.14}.bars{margin-top:12px}.barrow{display:grid;grid-template-columns:170px 1fr 100px;align-items:center;gap:10px;margin:9px 0}.bartrack{height:18px;background:#263449;border-radius:5px;overflow:hidden}.barfill{height:100%;background:linear-gradient(90deg,#316ca7,#4adab8)}.barfill.amber{background:linear-gradient(90deg,#b36c2c,#e8bd67)}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--edge);vertical-align:top}th{color:var(--muted);font-size:13px}tr:hover td{background:#ffffff05}.tag{font-size:11px;border:1px solid #4c6582;border-radius:5px;padding:2px 6px;color:var(--muted)}.tag.measured{color:var(--mint);border-color:#347d69}.tag.derived{color:var(--amber);border-color:#936c2f}.tag.vendor{color:var(--purple);border-color:#7861a3}
+ul{padding-left:23px}li{margin:5px 0}.source{font-size:12px;color:var(--muted)}footer{max-width:1452px;margin:auto;padding:20px 24px 35px;color:var(--muted);border-top:1px solid var(--edge);font-size:12px}.metric{color:var(--mint);font-weight:700}.controls{margin:16px 0}.progress{height:8px;background:#24344a;border-radius:5px;overflow:hidden}.progress>div{height:100%;background:var(--mint);transition:width .15s}.footnote{font-size:13px;color:var(--muted);margin-top:10px}
+@media(max-width:850px){.hero{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.grid3{grid-template-columns:1fr 1fr}.pipeline{grid-template-columns:repeat(4,1fr)}.mini-grid,.lane-grid{grid-template-columns:repeat(4,1fr)}.barrow{grid-template-columns:95px 1fr 80px;font-size:12px}.shires{grid-template-columns:repeat(6,1fr)}}
+@media(max-width:480px){main,header{padding-left:12px;padding-right:12px}.hero,.grid2,.grid3{grid-template-columns:1fr 1fr}.pipeline{grid-template-columns:repeat(2,1fr)}.shires{grid-template-columns:repeat(4,1fr)}th,td{padding:6px;font-size:12px}}
+</style>
+</head>
+<body>
+<header>
+<div class="eyebrow">Open architecture study · 2026-11-01</div>
+<h1>ET-SoC-1: from a thousand RISC-V cores to one FMA bit</h1>
+<p>An independent, interactive technical explorer. Navigate shires, cores, vector lanes, a seven-stage FMA, a compressor tree, memory and measured performance. Built for hardware research and comparisons to FPGA openTPU. Not affiliated with Esperanto, Ainekko or Spacesheep.</p>
+</header>
+<nav role="tablist" aria-label="Sections" id="nav"></nav>
+<main>
+<section class="page active" id="overview">
+<h2>Silicon at a glance</h2>
+<p class="muted">Distinguish vendor specifications, calculations and card measurements.</p>
+<div class="hero">
+ <div class="card"><span>Physical Minion cores</span><strong>1,088</strong><span>+ 4 out-of-order Maxion CPUs</span></div>
+ <div class="card"><span>Active research configuration</span><strong>1,024</strong><span>32 compute shires × 32 minions</span></div>
+ <div class="card"><span>Measured FP32 matrix multiply</span><strong>9.18</strong><span>TFLOP/s at ~600 MHz (one research run)</span></div>
+ <div class="card"><span>External DRAM</span><strong>32 GB</strong><span>LPDDR4x on a PCIe card</span></div>
+</div>
+<div class="layout">
+<div class="box">
+<h3>How the machine scales</h3>
+<svg viewBox="0 0 680 230" role="img" aria-label="Hierarchy: active ET chip, shires, neighbourhoods, Minion cores, eight lanes">
+ <g font-family="system-ui" text-anchor="middle" font-size="13" fill="#ebf3ff">
+ <rect x="10" y="30" width="145" height="75" rx="12" stroke="#5dbaf1" fill="#17304a"/><text x="82" y="61">ET chip</text><text x="82" y="80" fill="#b5c8dc">32 active shires</text>
+ <path d="M155 67H175" stroke="#43d7aa" stroke-width="3"/>
+ <rect x="175" y="30" width="145" height="75" rx="12" stroke="#5dbaf1" fill="#17304a"/><text x="247" y="61">1 shire</text><text x="247" y="80" fill="#b5c8dc">4 neighbourhoods</text>
+ <path d="M320 67H340" stroke="#43d7aa" stroke-width="3"/>
+ <rect x="340" y="30" width="145" height="75" rx="12" stroke="#5dbaf1" fill="#17304a"/><text x="412" y="61">1 neighbourhood</text><text x="412" y="80" fill="#b5c8dc">8 minions</text>
+ <path d="M485 67H505" stroke="#43d7aa" stroke-width="3"/>
+ <rect x="505" y="30" width="165" height="75" rx="12" stroke="#44d6ab" fill="#15332f"/><text x="587" y="61">1 Minion</text><text x="587" y="80" fill="#b5c8dc">8 SIMD lanes</text>
+ <text x="342" y="152" font-size="22" fill="#ffc56b">1,024 × 8 = 8,192 FP32 lanes</text>
+ <text x="342" y="186" fill="#b5c8dc">Each lane: 1 fused multiply-add / cycle</text><text x="342" y="205" fill="#b5c8dc">2 FLOPs / FMA · theoretical ~9.83 TFLOP/s at 600 MHz</text>
+ </g>
+</svg>
+<div class="detail">32 active compute shires versus 34 physical Minion shires is a configuration distinction, not a discrepancy. Published chip totals include 1,088 Minion cores. Research kernels typically use 1,024.</div>
+</div>
+<div class="box">
+<h3>Five research questions</h3>
+<ul>
+<li>How does Tensor Sequencer reuse the eight vector lanes?</li>
+<li>Why can 4 KiB of configurable L1 be effective?</li>
+<li>Where does NoC locality beat a DRAM roundtrip?</li>
+<li>How can identical FLOP rates draw different power?</li>
+<li>Which principles transfer to FPGA ternary inference?</li>
+</ul>
+<div class="detail warn">This visualization is a new explanation based on public architecture and benchmark sources, not the original author's page or physical floorplan.</div>
+</div>
+</div>
+</section>
+<section class="page" id="topology">
+<h2>Hierarchical topology explorer</h2>
+<p class="muted">Select a compute shire, a neighbourhood and a minion. The diagram is logical rather than a literal silicon floorplan.</p>
+<div class="layout" style="margin-top:16px">
+<div class="box"><h3>ET chip · 34 physical Minion shires</h3><p class="footnote">32 are used in the cited 1,024-core benchmark configuration; two additional Minion shires shown dimmed.</p><div class="shires" id="shires"></div></div>
+<div class="box"><h3 id="topTitle">Shire 0</h3><p class="muted" id="topDetails"></p><div class="slabel">Neighbourhoods</div><div class="row" id="neighs"></div><div class="slabel">Minions in selected neighbourhood</div><div class="mini-grid" id="minions"></div><div class="detail" id="topInfo"></div></div>
+</div>
+</section>
+<section class="page" id="minion">
+<h2>Inside one ET-Minion</h2>
+<div class="hero">
+<div class="card"><span>Hardware threads</span><strong>2</strong><span>One dual-hart vector/tensor engine</span></div>
+<div class="card"><span>Register width</span><strong>256b</strong><span>32 vector registers per thread</span></div>
+<div class="card"><span>Vector lanes</span><strong>8</strong><span>32 bits each</span></div>
+<div class="card"><span>L1 data storage</span><strong>4 KiB</strong><span>Firmware-configurable partition</span></div>
+</div>
+<div class="layout">
+<div class="box"><h3>Vector/tensor lane selector</h3><div class="lane-grid" id="lanes"></div><div class="detail" id="laneInfo"></div></div>
+<div class="box"><h3>Execution and control</h3>
+<div class="grid2" style="margin-top:14px">
+<div class="box"><b>Integer core</b><p class="footnote">64-bit in-order, single-issue RISC-V control, ALU, CSR, multiplier and divider.</p></div>
+<div class="box"><b>Tensor Sequencer</b><p class="footnote">Emits operations that execute on the vector datapath rather than on a separate parallel compute array.</p></div>
+<div class="box"><b>Floating-point FMA</b><p class="footnote">One new FP32 operation per lane per cycle after pipeline fill.</p></div>
+<div class="box"><b>Integer MA units</b><p class="footnote">Small integer multiply-accumulate datapaths used for quantized matrix work.</p></div>
+</div>
+<div class="detail warn">The shown blocks are a functional decomposition. The open Erbium RTL need not represent every taped-out silicon revision detail.</div>
+</div>
+</div>
+</section>
+<section class="page" id="fma">
+<h2>Seven-stage floating-point multiply-add</h2>
+<p class="muted">One of eight lanes. An operation can enter every cycle, and the filled pipeline returns one result per cycle. Latency: seven cycles.</p>
+<div class="box" style="margin-top:16px">
+<div class="pipeline" id="stages"></div>
+<div class="wire"></div>
+<h3 id="fmaTitle"></h3><p id="fmaDesc" style="margin:9px 0;color:var(--muted)"></p>
+<div class="row controls"><button class="pill" id="fmaPrev">◀ Previous</button><button class="pill" id="fmaNext">Next ▶</button><button class="pill" id="fmaAuto">Auto walkthrough</button><span class="muted" id="fmaProgress"></span></div>
+<div class="progress"><div id="fmaBar"></div></div>
+</div>
+<div class="grid3" style="margin-top:14px">
+<div class="box"><h3>Input fanout</h3><p class="footnote">Operand A is broadcast across eight lanes; B and accumulator C are lane-specific.</p></div>
+<div class="box"><h3>Partial products</h3><p class="footnote">Radix-4 Booth recoding and compressor reduction reduce multiplier work before carry propagation.</p></div>
+<div class="box"><h3>Gating</h3><p class="footnote">For the documented zero-word case, operand-valid control can avoid clocking the main pipeline stages.</p></div>
+</div>
+</section>
+<section class="page" id="wallace">
+<h2>Wallace / compressor tree visualizer</h2>
+<p class="muted">Conceptual row-count reduction matching the reported implementation schedule; the grid is illustrative and does not reproduce proprietary netlists.</p>
+<div class="box" style="margin-top:16px">
+<div class="row" id="wallControls"></div>
+<div class="slabel" id="wallLabel"></div>
+<div class="compress" id="compressGrid"></div>
+<div class="detail" id="wallDetails"></div>
+</div>
+<div class="grid3" style="margin-top:12px">
+<div class="box"><b>Booth recoding</b><p class="footnote">Signed partial products using digits such as -2, -1, 0, +1, +2.</p></div>
+<div class="box"><b>Carry-save reduction</b><p class="footnote">Local compression avoids a full carry-propagate adder at every tree level.</p></div>
+<div class="box"><b>Final adder</b><p class="footnote">The remaining two rows enter a final adder producing the binary product.</p></div>
+</div>
+</section>
+<section class="page" id="memory">
+<h2>Memory hierarchy and data movement</h2>
+<div class="layout" style="margin-top:12px">
+<div class="box"><h3>Configurable L1 · 16 sets × 4 ways × 64 B</h3>
+<p class="footnote">Select a set, observe the 4 KiB partition. Sets 0–11 can be allocated as 3 KiB tensor scratchpad, with remaining sets providing two 512 B hart portions.</p>
+<div class="row" id="setButtons" style="margin:15px 0"></div>
+<div class="detail" id="setInfo"></div>
+</div>
+<div class="box"><h3>One shire's 4 MiB local storage</h3>
+<div class="grid3" style="margin-top:12px">
+<div class="box"><b>2.5 MiB</b><p class="footnote">Scratchpad example</p></div>
+<div class="box"><b>1 MiB</b><p class="footnote">L3 slice example</p></div>
+<div class="box"><b>512 KiB</b><p class="footnote">L2 example</p></div>
+</div>
+<div class="detail warn">These are a depicted firmware cache mode, not an invariant partition for every workload.</div>
+</div>
+</div>
+<div class="box" style="margin-top:14px"><h3>Representative measured bandwidth and timing</h3>
+<table><thead><tr><th>Path</th><th>Observation</th><th>Interpretation</th></tr></thead><tbody>
+<tr><td>Repeated TensorLoad 1 KiB</td><td class="metric">~199 cycles</td><td>L2 hit after first DRAM read; one card's example</td></tr>
+<tr><td>First TensorLoad 1 KiB</td><td class="metric">~1,344 cycles</td><td>Initial external-memory path; one card's example</td></tr>
+<tr><td>Local L2/scratchpad</td><td class="metric">128 B / shire-cycle</td><td>Measured active-shire ceiling in the studied stream</td></tr>
+<tr><td>DDR read stream</td><td class="metric">~76 GB/s</td><td>Reported sustained card bandwidth in the experiment</td></tr>
+<tr><td>LPDDR4x nominal</td><td>~137 GB/s</td><td>Published bandwidth specification; not the same as sustained traffic</td></tr>
+</tbody></table>
+</div>
+</section>
+<section class="page" id="network">
+<h2>On-chip network and broadcast</h2>
+<p class="muted">Interactive explanation of why local communication is valuable; not a cycle-accurate NoC simulator.</p>
+<div class="layout" style="margin-top:14px">
+<div class="box">
+<h3>Choose a data path</h3>
+<div class="row controls" id="flows"></div>
+<svg id="networkSvg" viewBox="0 0 640 250" role="img" aria-label="Conceptual on-chip routes"></svg>
+<div class="detail" id="flowInfo"></div>
+</div>
+<div class="box">
+<h3>Measured bottlenecks and opportunities</h3>
+<table><tbody>
+<tr><td>Directed NoC link</td><td class="metric">~92 GB/s</td></tr>
+<tr><td>Relay versus DRAM</td><td class="metric">12.3× faster</td></tr>
+<tr><td>Same-shire scratchpad versus DRAM</td><td class="metric">30.7× faster</td></tr>
+<tr><td>PCIe host → card DMA</td><td class="metric">12.46–12.60 GB/s</td></tr>
+<tr><td>PCIe card → host DMA</td><td class="metric">10.41–10.54 GB/s</td></tr>
+</tbody></table>
+<p class="footnote">Relay speedups belong to the researchers' specific chained workload. They cannot be applied to every LLM kernel.</p>
+</div>
+</div>
+</section>
+<section class="page" id="performance">
+<h2>Computing performance: theoretical versus measured</h2>
+<div class="hero">
+<div class="card"><span>FP32 FMA peak · 1024 cores</span><strong>9.83</strong><span>TFLOP/s at 600 MHz · derived</span></div>
+<div class="card"><span>FP32 dense matmul</span><strong>9.18</strong><span>TFLOP/s · measured example</span></div>
+<div class="card"><span>FP16 matmul</span><strong>18.4</strong><span>TFLOP/s · measured example</span></div>
+<div class="card"><span>INT8 peak</span><strong>78.64</strong><span>TOPS · derived, not LLM throughput</span></div>
+</div>
+<div class="layout">
+<div class="box"><h3>Compute roof vs experiments</h3><div class="bars" id="perfBars"></div><p class="footnote">Different datatypes are intentionally labelled separately; bar magnitudes are not an efficiency ranking.</p></div>
+<div class="box"><h3>Example published LLM inference</h3>
+<table><thead><tr><th>Device</th><th>Tokens/s</th><th>Power</th><th>Tokens/s/W</th></tr></thead><tbody>
+<tr><td>ET-SoC-1</td><td>11.5</td><td>27 W</td><td>0.423</td></tr>
+<tr><td>NVIDIA A100</td><td>58</td><td>208 W</td><td>0.278</td></tr>
+</tbody></table>
+<div class="detail warn">Vendor-reported application case; model/workload/batch details are essential. This is not a general ET-SoC-1 speed for Llama, Qwen or Dory and cannot be compared directly with a different model on openTPU.</div>
+<p class="footnote">Source: Esperanto's open-source GenAI data analytics article linked under Sources.</p>
+</div>
+</div>
+</section>
+<section class="page" id="power">
+<h2>Power is a function of the data</h2>
+<p class="muted">Same kind of FP32 matmul, approximately the same throughput, different operand patterns and heat.</p>
+<div class="layout" style="margin-top:14px">
+<div class="box"><h3>Measured board watts by operand pattern</h3><div class="row controls" id="powButtons"></div><div class="bars" id="powBars"></div><div class="detail" id="powInfo"></div></div>
+<div class="box"><h3>What explains the difference?</h3>
+<ul><li>Zero-word operand gating can suppress deep pipeline activity.</li>
+<li>Clocked but stable registers still incur clock-distribution energy.</li>
+<li>Random mantissas, exponents and signs activate different logic.</li>
+<li>Temperature-dependent leakage contributes to baseline and thermal feedback.</li>
+<li>A negative floating-point zero may not match a bitwise zero gate.</li></ul>
+<div class="detail warn">On the research card, about 36 W board idle at 80 °C is a large contribution. The ratio between dynamic increments is not the ratio between total board watts.</div>
+</div>
+</div>
+</section>
+<section class="page" id="fpga">
+<h2>Lessons for openTPU on FPGA</h2>
+<div class="grid3" style="margin-top:15px">
+<div class="box"><h3>Keep</h3><p class="footnote">Explicit tensor command scheduling, data reuse, banked scratchpads, double buffering, performance counters.</p></div>
+<div class="box"><h3>Adapt</h3><p class="footnote">Operand isolation and clock enable for ternary zeros; compressor or balanced reduction for accumulation, benchmarked against DSP48 mapping.</p></div>
+<div class="box"><h3>Do not blindly transplant</h3><p class="footnote">ASIC voltage scaling, latch register files, foundry clock-gating cells, an entire thousand-core NoC, or an FP32 Booth multiplier for ternary arithmetic.</p></div>
+</div>
+<div class="box" style="margin-top:14px"><h3>Priority experiments</h3>
+<table><thead><tr><th>Experiment</th><th>Baseline</th><th>Acceptance evidence</th></tr></thead><tbody>
+<tr><td>Ternary zero gating</td><td>Current ternary engine</td><td>Cycle-exact result + WNS + toggle/power estimate and board watts if available</td></tr>
+<tr><td>CSA or balanced reduction</td><td>Current dot-product accumulation</td><td>Equivalent outputs, clock, LUT/FF/DSP utilization and fmax</td></tr>
+<tr><td>BRAM double buffering</td><td>Current DDR streaming</td><td>DDR bytes/token, stall cycles, token/s, activation and weights residency</td></tr>
+<tr><td>Sequencer / async DMA</td><td>Current ISA dispatch</td><td>Command overhead versus measured end-to-end performance</td></tr>
+</tbody></table></div>
+</section>
+<section class="page" id="sources">
+<h2>Primary sources and limits</h2>
+<div class="box" style="margin-top:16px">
+<p>This site is independently authored. It does not reproduce the source website's HTML, artwork, text corpus, branding or proprietary layout. Numbers are transcribed selectively for engineering comparison, with links to where they were reported.</p>
+<div id="sourceList" style="margin-top:15px"></div>
+<div class="detail warn">Important distinctions: (1) 1088 physical Minions vs 1024 used in many runs; (2) on-card power vs rail power vs inferred switching power; (3) LPDDR specification vs sustained bandwidth; (4) peak TOPS vs model-specific tokens/s; (5) Erbium RTL vs taped-out silicon.</div>
+</div>
+</section>
+</main>
+<footer>Independent ET-SoC-1 research interface · Architecture and measurements as published through 2026-11-01 · No affiliation or endorsement · All graphics and frontend code in this page independently authored.</footer>
+<script>
+(function(){
+"use strict";
+const tabs=[["overview","Overview"],["topology","Topology"],["minion","Minion"],["fma","FP32 FMA"],["wallace","Wallace tree"],["memory","Memory"],["network","NoC / dataflow"],["performance","Performance"],["power","Power / thermal"],["fpga","FPGA lessons"],["sources","Sources"]];
+const byId=id=>document.getElementById(id), node=(tag,cls,content)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(content!=null)e.textContent=content;return e};
+let current="overview";tabs.forEach(([id,label])=>{const b=node("button","",label);b.setAttribute("role","tab");b.onclick=()=>go(id);b.dataset.page=id;byId("nav").appendChild(b)});
+function go(id){if(!byId(id))return;current=id;document.querySelectorAll(".page").forEach(p=>p.classList.toggle("active",p.id===id));document.querySelectorAll("#nav button").forEach(b=>b.setAttribute("aria-selected",String(b.dataset.page===id)));location.hash=id;window.scrollTo({top:0,behavior:"smooth"})}go(location.hash.slice(1)||"overview");
+window.addEventListener("hashchange",()=>go(location.hash.slice(1)||"overview"));
+let shire=0,neigh=0,minion=0,lane=0;
+function drawTopology(){
+const container=byId("shires");container.replaceChildren();
+for(let i=0;i<34;i++){const b=node("button","shire"+(i>=32?" dim":"")+(shire===i?" active":""),"S"+i);b.title="Shire "+i;b.onclick=()=>{shire=i;neigh=0;minion=0;drawTopology()};container.append(b)}
+byId("topTitle").textContent="Shire "+shire+" · "+(shire<32?"research compute active":"physical reserve");
+byId("topDetails").textContent="4 neighbourhoods · 32 physical Minions · 4 MiB shared cache/scratchpad budget per shire";
+const n=byId("neighs");n.replaceChildren();for(let i=0;i<4;i++){const b=node("button","pill"+(neigh===i?" active":""),"Neighbourhood "+i);b.onclick=()=>{neigh=i;minion=0;drawTopology()};n.append(b)}
+const m=byId("minions");m.replaceChildren();for(let i=0;i<8;i++){const b=node("button","mini"+(minion===i?" active":""),"M"+i);b.append(node("small","", "minion "+i));b.onclick=()=>{minion=i;drawTopology()};m.append(b)}
+byId("topInfo").textContent="Selected: shire "+shire+" / neighbourhood "+neigh+" / minion "+minion+". Each Minion has two harts and eight 32-bit vector lanes. The neighbourhood shares an instruction cache and the shire connects to cache banks and the mesh.";
+}drawTopology();
+function drawLanes(){const e=byId("lanes");e.replaceChildren();for(let i=0;i<8;i++){let b=node("button","lane"+(lane===i?" active":""),"Lane "+i);b.append(node("b","","FMA"));b.onclick=()=>{lane=i;drawLanes()};e.append(b)}byId("laneInfo").textContent="Lane "+lane+": a 32-bit slice of the vector register file; FP32 multiply-add pipeline, integer multiply-add functions and transcendental path. The eight lanes share the vector/tensor issue system."}drawLanes();
+const stages=[
+["f0","Unpack","Extract sign, exponent and significand from operands; classify special values and zero-word gating."],
+["f1","Booth rows","Recoding of multiplier partial products; first two 4:2-compressor reduction levels."],
+["f2","Product","Final compressor reduction to two rows, carry-propagate product adder and alignment decision."],
+["f3","Align / merge","Shift and align accumulator, optional inversion for subtract cases, combine partial sums."],
+["f4","Add / locate","Wide addition with an anticipated leading-one position."],
+["f5","Normalise","Shift result into normalized significand and identify rounding/sticky information."],
+["f6","Round / commit","Rounding, special cases and status flags; write the architectural result."]
+];let sidx=0,auto=null;
+function stageDraw(){const e=byId("stages");e.replaceChildren();stages.forEach((s,i)=>{let b=node("button","stagebtn"+(i===sidx?" active":""),"");b.append(node("b","",s[0]),node("small","",s[1]));b.onclick=()=>{sidx=i;stageDraw()};e.append(b)});byId("fmaTitle").textContent=stages[sidx][0]+" · "+stages[sidx][1];byId("fmaDesc").textContent=stages[sidx][2];byId("fmaProgress").textContent=(sidx+1)+" / 7";byId("fmaBar").style.width=((sidx+1)/7*100)+"%"}
+byId("fmaPrev").onclick=()=>{sidx=(sidx+6)%7;stageDraw()};byId("fmaNext").onclick=()=>{sidx=(sidx+1)%7;stageDraw()};byId("fmaAuto").onclick=()=>{if(auto){clearInterval(auto);auto=null;byId("fmaAuto").textContent="Auto walkthrough"}else{auto=setInterval(()=>{sidx=(sidx+1)%7;stageDraw()},1300);byId("fmaAuto").textContent="Stop walkthrough"}};stageDraw();
+const levels=[
+["Booth input","16 primary Booth rows plus correction rows","16 partial product rows before carry-save reduction"],
+["CSA level 1","16 → 8 rows","Four 4:2 compressor arrays in the first reduction step"],
+["CSA level 2","8 → 4 rows","Two compressor arrays; one stage boundary registers the result"],
+["CSA level 3","4 → 2 rows","Further compression reduces the main partial products"],
+["CSA level 4","2 + correction → 2","Correction and sign terms folded into the final carry-save representation"],
+["Carry-propagate adder","2 → binary product","A single wide adder resolves carry propagation"]
+];let widx=0;
+function wallDraw(){const e=byId("wallControls");e.replaceChildren();levels.forEach((l,i)=>{let b=node("button","mode"+(widx===i?" active":""),String(i+1));b.title=l[0];b.onclick=()=>{widx=i;wallDraw()};e.append(b)});const l=levels[widx];byId("wallLabel").textContent=l[0]+" · "+l[1];byId("wallDetails").textContent=l[2]+"; schematic conceptual bits, not source RTL placement.";const g=byId("compressGrid");g.replaceChildren();for(let i=0;i<128;i++){let b=node("span","bit","");let fraction=[1,.63,.38,.25,.18,.125][widx];if((i%16)/16>fraction)b.classList.add("off");if(i%16==7||i%16==8)b.classList.add("hot");g.append(b)}}wallDraw();
+let set=0;function setDraw(){const e=byId("setButtons");e.replaceChildren();for(let i=0;i<16;i++){let b=node("button","mode"+(set===i?" active":""),String(i));b.onclick=()=>{set=i;setDraw()};e.append(b)}byId("setInfo").textContent="Set "+set+": "+(set<12?"tensor scratchpad partition; 12 sets × 256 B = 3,072 B total":"hart partition; upper four sets supply a combined 1,024 B split between two harts")+". Each set has 4 ways and each way is a 64 B cache line."}setDraw();
+const flows=[
+["broadcast","Broadcast","Inputs reused across consumers: an operand or tensor tile distributes to multiple Minion lanes."],
+["relay","On-chip relay","Intermediate results passed between adjacent or nearby shires without going through DRAM."],
+["dram","External memory","Minion request traverses cache/NoC to a memory shire and LPDDR4x."],
+["allreduce","Reduction","Partial results from multiple shires combine using synchronization and the mesh."]
+];let flow=0;function drawFlow(){const c=byId("flows");c.replaceChildren();flows.forEach((f,i)=>{let b=node("button","pill"+(i===flow?" active":""),f[1]);b.onclick=()=>{flow=i;drawFlow()};c.append(b)});const svg=byId("networkSvg");svg.replaceChildren();const ns="http://www.w3.org/2000/svg";const mk=(tag,attr)=>{const e=document.createElementNS(ns,tag);for(let k in attr)e.setAttribute(k,attr[k]);svg.append(e);return e};for(let i=0;i<8;i++){let col=i%4,row=Math.floor(i/4),x=55+col*150,y=55+row*115;mk("rect",{x,y,width:105,height:62,rx:10,fill:"#183751",stroke:"#4e86b0","stroke-width":1.5});let t=mk("text",{x:x+53,y:y+35,fill:"#e7f0ff","text-anchor":"middle","font-size":13});t.textContent="Shire "+i}let arrows=[];if(flow===0)arrows=[[0,1],[0,2],[0,3],[0,4],[0,5],[0,6],[0,7]];if(flow===1)arrows=[[0,1],[1,2],[2,3],[3,7]];if(flow===2)arrows=[[0,4],[4,5],[5,6],[6,7]];if(flow===3)arrows=[[0,1],[2,3],[4,5],[6,7],[1,3],[5,7],[3,7]];for(const [a,b] of arrows){const x1=55+(a%4)*150+52,y1=55+Math.floor(a/4)*115+31,x2=55+(b%4)*150+52,y2=55+Math.floor(b/4)*115+31;let line=mk("line",{x1,y1,x2,y2,stroke:"#43d7aa","stroke-width":3,"stroke-dasharray":"8 5"});const anim=document.createElementNS(ns,"animate");anim.setAttribute("attributeName","stroke-dashoffset");anim.setAttribute("values","0;-26");anim.setAttribute("dur","1.2s");anim.setAttribute("repeatCount","indefinite");line.appendChild(anim)}byId("flowInfo").textContent=flows[flow][2]}drawFlow();
+const perf=[["FP32 peak",9.83,11,"derived"],["FP32 measured",9.18,11,"measured"],["FP16 measured",18.4,21,"measured"],["INT8 peak",78.64,85,"derived"]];for(const [name,value,max,status] of perf){const d=node("div","barrow","");d.append(node("span","",name));let t=node("div","bartrack",""),fill=node("div","barfill"+(status==="derived"?" amber":""));fill.style.width=(value/max*100)+"%";t.append(fill);d.append(t,node("span","",value+" "+(name.startsWith("INT8")?"TOPS":"TF")));byId("perfBars").append(d)}
+const patterns=[["zeros",38.23],["ones",46.87],["random",63.93]],desc={"zeros":"A zero operand can suppress FMA pipeline clock enables, though the card still consumes idle/leakage power.","ones":"Constant values engage valid FMA instructions and clock pipeline registers, with little net toggling.","random":"Random values activate substantial internal combinational logic and increase switching power and thermal load."};let psel="random";
+function drawPower(){const b=byId("powButtons");b.replaceChildren();patterns.forEach(([name])=>{let x=node("button","pill"+(psel===name?" active":""),name);x.onclick=()=>{psel=name;drawPower()};b.append(x)});const e=byId("powBars");e.replaceChildren();patterns.forEach(([name,w])=>{let d=node("div","barrow","");d.append(node("span","",name));let t=node("div","bartrack",""),f=node("div","barfill"+(psel===name?" amber":""));f.style.width=w/70*100+"%";t.append(f);d.append(t,node("span","",w+" W"));e.append(d)});byId("powInfo").textContent=desc[psel]}drawPower();
+const sources=[
+["Research repository and raw results","https://github.com/yaroslavvb/et-soc1-prototyping","Open reports, data, experiment scripts and original authored interactive pages"],
+["Author's original interactive site","https://spacesheep.dev/@yaroslavvb/et-soc1-chip-diagram","The original page being studied; not reproduced here"],
+["Methodology and findings","https://github.com/yaroslavvb/et-soc1-prototyping/blob/main/docs/findings/README.md","Claims checked across research cards and the importance of caveats"],
+["Chip RTL branch","https://github.com/openhwfoundation/core-et/tree/erbium","Open Erbium RTL for architectural investigation"],
+["ET platform SDK","https://github.com/aifoundry-org/et-platform","Runtime, firmware, functional emulator and device tooling"],
+["Vendor product specs","https://www.esperanto.ai/products/","Chip and PCIe-card specifications"],
+["Performance and power interpretation","https://github.com/yaroslavvb/et-soc1-prototyping/blob/main/docs/findings/13-why-low-power.md","Includes FP32/FP16 and energy-per-FLOP comparisons"],
+["Data-dependent FMA power","https://github.com/yaroslavvb/et-soc1-prototyping/blob/main/docs/findings/10-data-dependent-power.md","Experiment details for zeros, ones and random operands"],
+["Vendor LLM case study","https://www.esperanto.ai/blog/enhancing-data-analytics-platform-with-open-source-genai-based-language-models/","11.5 tokens/s and 27 W ET example versus A100 in one application"],
+["On-chip relay research","https://github.com/yaroslavvb/et-soc1-prototyping/blob/main/docs/findings/18-on-chip-relay.md","Workload-specific relay and scratchpad speedups"]
+];sources.forEach(([title,url,details])=>{const d=node("div","box",""),a=node("a","",title);a.href=url;a.target="_blank";a.rel="noopener noreferrer";d.append(a,node("p","footnote",details));d.style.marginBottom="8px";byId("sourceList").append(d)});
+})();
+</script>
+</body>
+</html>
