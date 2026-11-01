@@ -126,6 +126,31 @@ main{max-width:1545px;margin:auto;padding:17px 18px 85px}.page{display:none}.pag
 <div class="grid twocol section"><div class="panel"><h3>Physical BitNet benchmark evidence</h3><table><tbody><tr><td>Full 30-layer BitNet 2B4T, FPGA device</td><td class="right">145.8 ms/token</td></tr><tr><td>Same host-driven run, wall</td><td class="right">271.5 ms/token</td></tr><tr><td>TMM M=1</td><td class="right">127.7 MAC/cycle</td></tr><tr><td>TMM M=16</td><td class="right">511.6 MAC/cycle</td></tr><tr><td>TMM M=16</td><td class="right">136.4 GOPS</td></tr></tbody></table><p class="meta">2026-10-20 test, specific build; no claim that a newly flashed card or Bonsai uses these values. BitNet single-token TMM uses only a quarter of the m4 column arithmetic peak.</p></div>
 <div class="panel"><h3>Different forms of evidence</h3><div class="fact"><span>Board benchmark</span><b><span class="chip measured">Measured</span></b></div><div class="fact"><span>D × MCOLS × clock</span><b><span class="chip derived">Arithmetic ceiling</span></b></div><div class="fact"><span>Traffic / bits per weight</span><b><span class="chip derived">Model-based bound</span></b></div><div class="fact"><span>Logical FPGA drawing</span><b><span class="chip concept">Conceptual</span></b></div><p class="meta section">For WNS, LUT, FF, DSP, BRAM utilization and pblocks, consult a real Vivado build for the same commit and target.</p></div></div>
 </section>
+<section id="logic" class="page">
+<h2>Logic microscope · gates, adder, LUT6 and CMOS</h2>
+<p class="meta">An educational descent below RTL. These are exact Boolean formulas and idealised CMOS switching concepts, NOT extracted internal DSP48E1 circuitry, a Xilinx device netlist, or a mapped 7-nm transistor floorplan.</p>
+<div class="grid twocol section">
+<div class="panel"><h3>Gate and full-adder truth table</h3>
+<div class="toolbar"><label class="field">Logic function<select id="logicFn"><option value="nand">NAND</option><option value="xor">XOR</option><option value="and">AND</option><option value="or">OR</option><option value="nor">NOR</option><option value="fa">Full adder (A, B, CIN)</option></select></label><label class="field">Input A<select id="logicA"><option value="0">0</option><option value="1">1</option></select></label><label class="field">Input B<select id="logicB"><option value="0">0</option><option value="1">1</option></select></label><label class="field">Carry-in<select id="logicCin"><option value="0">0</option><option value="1">1</option></select></label></div>
+<div class="metricgrid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><div class="metric"><small>Output bit / SUM</small><strong id="logicOut">—</strong></div><div class="metric"><small>Carry-out</small><strong id="logicCarry">—</strong></div></div>
+<table id="truthTable"><thead><tr><th>A</th><th>B</th><th>CIN</th><th>Y / SUM</th><th>COUT</th></tr></thead><tbody id="truthRows"></tbody></table>
+<div class="note" id="logicExplain"></div>
+</div>
+<div class="panel"><h3>Four-transistor static CMOS NAND model</h3>
+<svg id="cmosSvg" role="img" aria-label="Idealized CMOS NAND pull-up and pull-down network" viewBox="0 0 530 370" style="width:100%;border:1px solid var(--edge);border-radius:9px;background:#0d2032"></svg>
+<div class="note" id="cmosExplain"></div>
+<p class="meta">PMOS conduct at gate 0 and NMOS at gate 1. Two PMOS parallel pull up; two NMOS series pull down. This is a textbook CMOS NAND implementation. In a real FPGA, the configurable logic is physically built differently and cannot be inferred transistor-by-transistor from its SystemVerilog.</p>
+</div>
+</div>
+<div class="grid twocol section">
+<div class="panel"><h3>LUT6 programmable truth-table evaluation</h3><p class="meta">A 6-input lookup table represents an arbitrary Boolean function using 64 configuration bits. This shows how a simple truth-table model selects one bit, not the physical internal Xilinx LUT netlist.</p>
+<div class="grid twocol section"><label class="field">64-bit truth table (16 hex digits)<input id="lutMask" class="mono" value="AAAAAAAAAAAAAAAA" maxlength="16" style="padding:9px;background:#0d2032;color:var(--fg);border:1px solid var(--edge);border-radius:8px"></label><label class="field">6-bit LUT input, 0…63<input id="lutIndex" type="number" min="0" max="63" value="19"></label></div>
+<div class="bits" id="lutBits"></div><div class="note" id="lutExplain"></div></div>
+<div class="panel"><h3>Dynamic switching energy · illustrative only</h3><p class="meta">P = α × C × V² × f. C and α are hypothetical inputs here; this is not measured openTPU power, nor an estimate of real DSP or chip leakage.</p>
+<div class="grid twocol section"><label class="field">Capacitance, femtofarads<input id="ecap" type="number" min="0.001" max="10000" step=".1" value="10"></label><label class="field">Voltage, V<input id="evolt" type="number" min=".1" max="3" step=".05" value="1"></label><label class="field">Frequency, MHz<input id="efreq" type="number" min=".1" max="1000" step=".1" value="133.33"></label><label class="field">Activity α, 0…1<input id="ealpha" type="number" min="0" max="1" step=".05" value=".5"></label></div>
+<div class="metricgrid" style="grid-template-columns:repeat(2,minmax(0,1fr))"><div class="metric"><small>Dynamic power (hypothetical)</small><strong id="ePower">—</strong></div><div class="metric"><small>C V² (nominal energy/event)</small><strong id="eEvent">—</strong></div></div><div class="note warning">Real FPGA power estimation needs actual Vivado switching activities (SAIF/VCD), capacitance extracted from implementation, supply rails, static leakage, memory PHY and board regulator losses.</div></div>
+</div>
+</section>
 <section id="sources" class="page">
 <h2>Reproducibility and source links</h2>
 <p class="meta">This atlas pins clickable implementation files to the feature branch commit it was read against, so a later refactor cannot silently change what a diagram links to.</p>
@@ -147,7 +172,7 @@ const $=id=>document.getElementById(id), el=(tag,cl,s)=>{let e=document.createEl
 const svg=(tag,attrs)=>{let e=document.createElementNS(NS,tag);Object.entries(attrs||{}).forEach(q=>e.setAttribute(q[0],String(q[1])));return e};
 function link(id,path){const e=$(id);e.href=REPO+path;return e}
 $("revision").textContent=SHA.slice(0,12);
-const tabs=[["explore","Deep zoom"],["dsp","DSP48E1"],["ternary","Ternary"],["memory","Memory"],["vpu","VPU"],["flow","Dataflow"],["performance","Performance"],["sources","RTL sources"]];
+const tabs=[["explore","Deep zoom"],["dsp","DSP48E1"],["ternary","Ternary"],["memory","Memory"],["vpu","VPU"],["flow","Dataflow"],["performance","Performance"],["logic","Logic → CMOS"],["sources","RTL sources"]];
 function navigate(tab){if(!$(tab))tab="explore";document.querySelectorAll(".page").forEach(p=>p.classList.toggle("active",p.id===tab));document.querySelectorAll(".navbtn").forEach(b=>b.classList.toggle("active",b.dataset.tab===tab));if(location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);window.scrollTo(0,0);if(tab==="explore")render();}
 tabs.forEach(t=>{let b=el("button","navbtn",t[1]);b.dataset.tab=t[0];b.onclick=()=>navigate(t[0]);$("nav").append(b)});addEventListener("hashchange",()=>navigate(location.hash.slice(1)||"explore"));
 const tree=new Map(),add=(id,parent,title,desc,source,tag="rtl",facts=[],note="",refs=[])=>{tree.set(id,{id,parent,title,desc,source,tag,facts,note,refs,children:[]});if(parent){const p=tree.get(parent);if(!p)throw Error("Missing parent "+parent);p.children.push(id)}};
@@ -204,6 +229,12 @@ add("actstores","act","Activation byte storage","One memory per column/piece, wi
 add("scales","act","Scale records","Each activation row/block stores Sa and four sub-block offsets.","rtl/mem/otpu_actram.sv","rtl",[["Scale record","64 bits"]]);
 add("bar","coll","BAR","Synchronization of all slices participating in the collective.","rtl/top/otpu_coll.sv");
 add("gather","coll","GATHER","Reads TMEM segments and broadcasts into other slices' TMEM under collective grants.","rtl/top/otpu_coll.sv");
+
+add("primgates","primitives","Logic gates and transistor concepts","Educational logic beneath the behavioral RTL; without a post-synthesis mapped netlist, actual cell instances and transistor count are unknown.","docs/board.md","concept",[],"Open the Logic → CMOS tab for Boolean truth tables, one CMOS NAND and energy equations.");
+add("primgatesnand","primgates","CMOS NAND example","Two PMOS pull up in parallel; two NMOS pull down in series.","docs/board.md","concept",[["Transistors","4, ideal static CMOS"]],"Textbook gate illustration only, not the fabricated DSP48E1 gates.");
+add("primgatesadd","primgates","Full-adder equation","Sum = A XOR B XOR CIN; carry = majority(A, B, CIN). FPGA carry chains may implement additions with dedicated CARRY4 resources.","docs/board.md","concept");
+add("primgateslut","primgates","LUT6 truth table","Six inputs index 64 configuration bits to implement Boolean logic.","docs/board.md","concept",[["Inputs","6"],["Config bits","64"]]);
+add("primgatessram","primgates","6T SRAM concept","Cross-coupled inverters and access transistors form a conventional six-transistor SRAM bit cell. Actual FPGA BRAM implementation is not published here.","docs/board.md","concept");
 for(let i=0;i<4;i++){add("c"+i,"array","Column "+i,"Stationary activation row "+i+" dot-product with one streamed weight chunk.","rtl/mxu/otpu_mxu.sv","rtl",[["Logical products","128"],["Activation row",String(i)],["MAC peak","128 / cycle"]]);for(let g=0;g<8;g++){const group="c"+i+"g"+g;add(group,"c"+i,"Group "+g,"One chain of sixteen logical INT8 product positions; chain products reduce via PCIN/PCOUT.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Chain positions","16"],["DSP family","DSP48E1"]]);for(let p=0;p<16;p++){const id=group+"p"+p;add(id,group,"PE "+p,"DSP48E1 processing element: operand registers, 8-bit signed product and local PCIN accumulation. Logical instance in the chain.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Column",String(i)],["Group",String(g)],["Chain index",String(p)],["DSP","DSP48E1"]]);add(id+"dsp",id,"DSP48E1 internal datapath","One DSP48E1 technology primitive, with A/D input selection, B register, multiplier M, adder P and cascade signals.","rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Product","INT8 × INT8"],["Cascade","PCIN→PCOUT"]]);for(const [key,n,desc] of [["input","A / D / INMODE","Registered weight path; select low/high packed operand before multiplication."],["breg","BREG","Registered activation operand into the DSP."],["mult","Multiplier M","Signed product between activation and selected weight."],["add","ALU P / PCIN","P = PCIN + M, or P = M at chain start."],["pcout","PCOUT","Carries accumulated chain result into the next DSP stage."]])add(id+"dsp"+key,id+"dsp",n,desc,"rtl/tech/xilinx7/otpu_tech_dsp.sv","rtl",[["Physical primitive","DSP48E1"]]);}}}
 for(let i=0;i<8;i++){const id="bank"+i;add(id,"banked","Bank "+i,"Logical bank "+i+": words whose address modulo eight equals "+i+".","rtl/mem/otpu_tmem.sv","rtl",[["Words","8192"],["Physical","BRAM-backed"]]);add(id+"ram",id,"BRAM storage","Logical capacity backed by Xilinx Block RAM copies/ports depending on TMEM_IMPL and target.","rtl/tech/generic/otpu_tech_ram.sv","concept",[["Technology","Xilinx BRAM"],["Mapping","implementation-dependent"]],"Do not infer exact RAMB36 placement/instantiation from this logical row.");}
 for(let i=0;i<8;i++){const id="lane"+i;add(id,"fpipe","Lane "+i,(i<2?"Composite-capable FP32 lane.":"Simple arithmetic FP32 lane.")+" Output staging depends on the function.","rtl/vpu/otpu_vpu.sv","rtl",[["Lane",String(i)],["Composite",i<2?"yes":"no"]]);}
@@ -280,6 +311,49 @@ const benchmark=[
 function perfBars(){const val=$("metricSelect").value,idx=val==="wall"?2:val==="device"?1:3,max=val==="band"?17.056:90;const p=$("modelBars");p.replaceChildren();for(const row of benchmark){let n=el("div","barrow","");n.append(el("span","",row[0]));let t=el("div","track",""),b=el("div","fill"+(val==="band"?" gold":""));b.style.width=Math.min(100,row[idx]/max*100)+"%";t.append(b);n.append(t,el("span","",String(row[idx])+(val==="band"?" GB/s":" tok/s")));p.append(n)}}
 function roof(){let p=Math.max(.1,Math.min(40,Number($("params").value)||2)),bits=Number($("wbits").value),u=Number($("util").value),bw=Math.max(.1,Math.min(17.056,Number($("bw").value)||15.8)),bytes=p*1e9*bits/8,eff=bw*(u/100),rate=eff*1e9/bytes;$("weightBytes").textContent=(bytes/1e9).toFixed(3)+" GB";$("roof").textContent=rate.toFixed(2)+" tok/s";$("roof").title="Bandwidth "+eff.toFixed(2)+" GB/s divided by "+(bytes/1e9).toFixed(3)+" GB per token";}
 $("metricSelect").onchange=perfBars;["params","wbits","bw","util"].forEach(id=>$(id).addEventListener("input",roof));perfBars();roof();
+
+function calculateLogic(){
+ const fn=$("logicFn").value,a=Number($("logicA").value),b=Number($("logicB").value),ci=Number($("logicCin").value);
+ const gate=(aa,bb,cc)=>{let s=0,carry=null;switch(fn){case"and":s=aa&bb;break;case"or":s=aa|bb;break;case"xor":s=aa^bb;break;case"nor":s=1-(aa|bb);break;case"fa":s=aa^bb^cc;carry=(aa&bb)|(aa&cc)|(bb&cc);break;default:s=1-(aa&bb)}return[s,carry]};
+ const result=gate(a,b,ci);$("logicOut").textContent=String(result[0]);$("logicCarry").textContent=result[1]===null?"not used":String(result[1]);
+ const rows=$("truthRows");rows.replaceChildren();
+ for(let aa=0;aa<2;aa++)for(let bb=0;bb<2;bb++)for(let cc=0;cc<(fn==="fa"?2:1);cc++){const tr=el("tr",""),[o,carry]=gate(aa,bb,cc);for(let v of [aa,bb,fn==="fa"?cc:"—",o,carry===null?"—":carry])tr.append(el("td","",String(v)));rows.append(tr)}
+ $("logicExplain").textContent=fn==="fa"?"Full adder: SUM = A ⊕ B ⊕ CIN; COUT = (A·B) + (A·CIN) + (B·CIN). This is a Boolean-level model of a 1-bit adder.":"Gate result Y = "+result[0]+". The truth table is independent from technology mapping.";
+ // NAND schematic always follows A and B, even when the selected generic truth function differs.
+ const s=$("cmosSvg");s.replaceChildren();
+ const rect=(x,y,w,h,stroke,fill)=>s.append(svg("rect",{x,y,width:w,height:h,rx:8,stroke,fill,"stroke-width":2}));
+ const line=(x1,y1,x2,y2,color)=>s.append(svg("line",{x1,y1,x2,y2,stroke:color,"stroke-width":3}));
+ const txt=(x,y,t,color="#e9f2ff")=>{let e=svg("text",{x,y,fill:color,"font-size":15});e.textContent=t;s.append(e)};
+ txt(245,28,"VDD", "#f4c26c");line(265,35,265,58,"#f4c26c");
+ line(162,58,365,58,"#f4c26c");
+ const pma=a===0,pmb=b===0,nma=a===1,nmb=b===1;
+ rect(120,86,90,50,pma?"#4ed8a9":"#536679",pma?"#194c3a":"#172739");txt(140,116,"P_A");txt(120,78,"PMOS A");
+ rect(321,86,90,50,pmb?"#4ed8a9":"#536679",pmb?"#194c3a":"#172739");txt(341,116,"P_B");txt(321,78,"PMOS B");
+ line(162,58,162,86,"#f4c26c");line(365,58,365,86,"#f4c26c");
+ line(162,136,162,170,"#bde7ff");line(365,136,365,170,"#bde7ff");line(162,170,265,170,"#bde7ff");line(265,170,365,170,"#bde7ff");
+ txt(278,163,"Y = "+(1-(a&b)), "#4ed8a9");
+ line(265,170,265,190,"#bde7ff");
+ rect(219,195,90,51,nma?"#4ed8a9":"#536679",nma?"#194c3a":"#172739");txt(237,226,"N_A");
+ line(265,246,265,259,"#bde7ff");
+ rect(219,265,90,51,nmb?"#4ed8a9":"#536679",nmb?"#194c3a":"#172739");txt(237,296,"N_B");
+ line(265,316,265,341,"#bde7ff");txt(277,345,"GND","#f4c26c");
+ txt(19,352,"Green = conducting transistor","#a6c2d8");
+ $("cmosExplain").textContent="NAND subnetwork for A="+a+", B="+b+": PMOS A "+(pma?"ON":"OFF")+", PMOS B "+(pmb?"ON":"OFF")+", NMOS A "+(nma?"ON":"OFF")+", NMOS B "+(nmb?"ON":"OFF")+". Ideal output "+(1-(a&b))+". Diagram always shows NAND independent of selected general gate function.";
+}
+["logicFn","logicA","logicB","logicCin"].forEach(id=>$(id).addEventListener("change",calculateLogic));calculateLogic();
+function calculateLut(){
+ const raw=$("lutMask").value.trim().replace(/^0x/i,"");let mask=0n;
+ try{if(!/^[0-9a-f]{1,16}$/i.test(raw))throw Error("Need 1–16 hexadecimal digits");mask=BigInt("0x"+raw)}catch(e){$("lutExplain").textContent="Invalid 64-bit LUT mask: "+String(e.message);$("lutBits").textContent="—";return}
+ const ix=Math.max(0,Math.min(63,Math.floor(Number($("lutIndex").value)||0)));$("lutIndex").value=ix;
+ const val=Number((mask>>BigInt(ix))&1n);$("lutBits").textContent="Index (I5…I0): "+ix.toString(2).padStart(6,"0")+"\nMask: 0x"+mask.toString(16).padStart(16,"0").toUpperCase()+"\nSelected bit: "+val;
+ $("lutExplain").textContent="LUT6 selects configuration bit "+ix+". A real synthesized Xilinx LUT mapping may use one or more physical primitives and an INIT constant; this is the generic 64-bit truth-table behavior.";
+}
+["lutMask","lutIndex"].forEach(id=>$(id).addEventListener("input",calculateLut));calculateLut();
+function calculateEnergy(){
+ const c=Math.max(0,Number($("ecap").value)||0)*1e-15,V=Math.max(0,Number($("evolt").value)||0),f=Math.max(0,Number($("efreq").value)||0)*1e6,alpha=Math.max(0,Math.min(1,Number($("ealpha").value)||0));
+ const E=c*V*V,P=alpha*E*f;$("ePower").textContent=(P*1e6).toFixed(3)+" µW";$("eEvent").textContent=(E*1e15).toFixed(2)+" fJ";$("eEvent").title="Effective CV² coefficient; excludes short-circuit current and leakage.";}
+["ecap","evolt","efreq","ealpha"].forEach(id=>$(id).addEventListener("input",calculateEnergy));calculateEnergy();
+
 const sources=[
 ["Board target","targets/ypcb-00338.toml","m4 config, clock, memory capacity and interface"],
 ["FPGA top","rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv","Clocking, PCIe, LiteDRAM, XDMA"],
