@@ -4,9 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Explore openTPU as an interactive hierarchy: board, FPGA, systolic MXU, DSP48E1, SRAM and logic, with measured and conceptual data paths.">
-<title>openTPU — interactive architecture and dataflows</title>
-<link rel="stylesheet" href="./atlas.css">
-<script src="./atlas.js" defer></script>
+<title>Inside openTPU — interactive architecture and dataflows</title>
+<style>
+:root{color-scheme:dark;--bg:#090e14;--surface:#10171f;--panel:#141d27;--line:#35495c;--ink:#f1f4f8;--muted:#a9bac9;--blue:#4aa4ff;--compute:#3d9fff;--memory:#26c095;--control:#ae94ff;--physical:#edab61;--pink:#e078b3}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{background:var(--bg);color:var(--ink);margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input{font:inherit}button{cursor:pointer;color:inherit}button:disabled{opacity:.4;cursor:default}a{color:#7fc1ff}h1,h2,h3,p{margin:0}h1{font-size:clamp(24px,3vw,36px);line-height:1.12;letter-spacing:-.035em}h1 span{color:#8ac4ff}h2{font-size:21px}h3{font-size:16px}.muted{color:var(--muted)}.small{font-size:12px}.row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.skip{position:absolute;top:-200px;left:0;padding:12px;background:var(--bg);z-index:30}.skip:focus{top:0}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid #f8ca7a;outline-offset:3px}
+.site-head{padding:16px 22px 13px;border-bottom:1px solid #293848;display:grid;gap:14px}.brand-top{display:flex;align-items:center;gap:11px}.brand-mark{font-weight:800;color:#081521;background:#70b8f8;border-radius:6px;font-size:11px;padding:2px 7px}.brand-eyebrow{font-size:11px;letter-spacing:.095em;text-transform:uppercase;color:var(--muted)}.tagline{color:var(--muted);margin-top:5px;font-size:12px;max-width:950px}.flow-nav{display:flex;align-items:center;flex-wrap:wrap;gap:5px}.flow-btn{display:flex;gap:6px;align-items:center;background:#121d29;border:1px solid #37516c;border-radius:7px;padding:8px 9px;font-size:12px;white-space:nowrap;min-height:37px}.flow-btn .key{background:#243e58;color:#91c7ff;min-width:18px;text-align:center;border-radius:3px}.flow-btn.active{border-color:#f2be69;background:#3d311e}.flow-btn.active .key{background:#a97832;color:#fff}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 335px;min-height:575px;border-bottom:1px solid #374e62}.main-stage{min-width:0;display:flex;flex-direction:column}.scene-tools{padding:8px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #293e50;min-height:49px}.tool,.square,.crumb,.player-primary{background:#162536;border:1px solid #39516b;border-radius:7px;padding:7px 10px;white-space:nowrap}.tool:hover,.square:hover,.crumb:hover{background:#24405a;border-color:#6eaee4}.square{min-width:34px;text-align:center;font-size:16px}.breadcrumbs{display:flex;gap:5px;align-items:center;overflow-x:auto;flex:1;min-width:0}.crumb{font-size:11px;padding:6px 8px}.crumb:last-child{border-color:#70b8fb;color:#d0eaff}.scene-scale{font-size:11px;color:#adbbcb;white-space:nowrap}.svg-wrap{position:relative;min-height:480px;flex:1;overflow:hidden;background:#0b151f}.svg-wrap svg{display:block;width:100%;height:100%;min-height:480px;touch-action:none;cursor:grab}.svg-wrap.dragging svg{cursor:grabbing}.svg-wrap svg .part{cursor:pointer;outline:none}.svg-wrap svg .part:hover .shape,.svg-wrap svg .part.selected .shape{stroke:#f9c774;stroke-width:3;filter:drop-shadow(0 0 5px #c3873388)}.svg-wrap svg .part:focus .shape{stroke:#fff;stroke-width:3}.svg-wrap svg .shape{stroke-width:1.7;fill:#192b3e}.svg-wrap svg .compute .shape{stroke:#4189c0;fill:#16324d}.svg-wrap svg .memory .shape{stroke:#299874;fill:#153a36}.svg-wrap svg .control .shape{stroke:#8c77ce;fill:#28233e}.svg-wrap svg .physical .shape{stroke:#b8874e;fill:#33281e}.svg-wrap svg text{font-family:system-ui,sans-serif;fill:#f2f5f7}.svg-wrap svg .node-meta{fill:#b1c0cc;font-size:13px}.svg-wrap svg .node-name{font-weight:730;font-size:19px}.svg-wrap svg .trace-edge{stroke:#eca64d;stroke-width:5;stroke-dasharray:12 9;fill:none;animation:slide 1.1s linear infinite}.svg-wrap svg .wire{stroke:#607589;stroke-width:2.5;fill:none}.svg-wrap svg .axis{stroke:#44576b;stroke-width:1.5}.svg-wrap svg .focus-ring{fill:none;stroke:#ffce77;stroke-width:3;stroke-dasharray:6 5}@keyframes slide{to{stroke-dashoffset:-42}}.scene-hint{position:absolute;left:14px;bottom:12px;color:#a8bdcf;font-size:11px;background:#0e1b28db;border-radius:6px;padding:6px 10px;pointer-events:none}.selection-pill{position:absolute;top:14px;right:15px;border:1px solid #c9974a;background:#362718;color:#ffe7ae;padding:8px 11px;border-radius:8px}.mini-map{position:absolute;right:12px;bottom:12px;background:#152437e8;padding:6px 9px;border:1px solid #36516b;border-radius:6px;color:#9fb6c9;font-size:11px}.stage-footer{display:flex;gap:14px;flex-wrap:wrap;padding:8px 13px;border-top:1px solid #293e50;font-size:11px;color:#9cafbe;min-height:35px}.legend-item{display:flex;align-items:center;gap:5px}.legend-item i{width:12px;height:12px;border:1px solid #679bc6;border-radius:2px}.lg-compute{background:#1c466a}.lg-memory{background:#1c5b49!important;border-color:#36a784!important}.lg-control{background:#413667!important;border-color:#a993ed!important}.lg-physical{background:#5d3d22!important;border-color:#e4a65f!important}.scene-status{margin-left:auto;color:#9fbbda}
+.inspector{background:#111a25;border-left:1px solid #38536a;display:flex;flex-direction:column;min-width:0;max-height:850px}.inspector-scroll{flex:1;min-height:0;overflow:auto;padding:15px}.inspector-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.micro-label{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#97adc1;font-weight:800}.inspector-kicker{font-size:11px;color:#62cdb0;letter-spacing:.07em;text-transform:uppercase}.inspector h2{font-size:23px;line-height:1.2;margin:7px 0 10px}.inspector p{color:#cbd7df;font-size:13px;line-height:1.6}.node-facts{margin:14px 0}.fact{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid #304251}.fact span{font-size:12px;color:#a5b6c5}.fact b{font-size:12px;text-align:right;font-weight:650}.inspector-note{font-size:12px;border-left:3px solid #c2985a;padding:9px 11px;background:#47352249;border-radius:0 6px 6px 0;margin:12px 0;color:#ddcbb4}.zoom-actions{display:flex;flex-wrap:wrap;gap:7px;margin:13px 0}.zoom-actions button{background:#223e53;border:1px solid #659ad0;border-radius:6px;padding:7px 9px;font-size:12px}.sources{display:grid;gap:7px;margin-top:10px}.sources a{display:block;text-decoration:none;border:1px solid #30475d;padding:8px;border-radius:6px;font:11px/1.45 ui-monospace,Consolas,monospace;overflow-wrap:anywhere}.sources a:hover{border-color:#8abcf2}.inspector-foot{border-top:1px solid #354b5e;padding:12px 15px}.inspector-foot .row{justify-content:space-between;font-size:11px;margin-bottom:7px}.provenance{color:#60bfa7}.inspector input{display:block;background:#0b1521;border:1px solid #334f67;padding:9px;color:#fff;width:100%;border-radius:7px;margin-top:7px}.search-results{max-height:190px;overflow:auto}.search-results button{display:block;border:1px solid #36536e;background:#172738;padding:7px 9px;border-radius:5px;margin:4px 0;width:100%;text-align:left}.stage-details{border-top:1px solid #39516b;margin-top:16px;padding-top:13px}.stage-details h3{margin:7px 0}.flow-stage-tags{margin:10px 0;display:flex;gap:5px;flex-wrap:wrap}.flow-stage-tags span{border:1px solid #6a5d3e;color:#f8d49c;border-radius:4px;font-size:11px;padding:2px 5px}
+.player{border-bottom:1px solid #344b5e;background:#101925}.player-row{display:flex;align-items:center;gap:7px;padding:11px 14px;flex-wrap:wrap}.player-primary{background:#275072;border-color:#4c9acc;font-weight:700}.player-primary.secondary{background:#2b3349;border-color:#9788d1}.toggle.on{border-color:#5ec7aa;background:#173f35}.stages{display:flex;align-items:center;gap:5px;flex:1;overflow-x:auto;min-width:165px}.stage-chip{border:1px solid #3a4c5d;background:#1c2731;border-radius:7px;padding:6px 9px;font-size:11px;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}.stage-chip.current{background:#5a4324;border-color:#f4bd62;color:#fff}.player-caption{display:grid;grid-template-columns:1fr;gap:5px;padding:8px 15px 14px}.cap-title{display:flex;gap:10px;align-items:center;color:#efbf75;font-size:11px;letter-spacing:.09em;font-weight:700}.tour-dots{display:flex;gap:4px}.tour-dot{height:5px;width:14px;border-radius:5px;background:#425165}.tour-dot.on{background:#f7bf64}.player-caption p{font-size:14px;max-width:1250px}.cap-bottom{display:flex;align-items:center;justify-content:space-between;gap:14px;color:#9db0c3;font-size:12px}.plain{border:0;background:none;text-decoration:underline;color:#93caff}
+.below{max-width:1420px;margin:auto;padding:32px 23px 55px}.below-intro{max-width:1020px}.below-intro p{margin:9px 0;color:#b8c8d7}.below-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0}.below-grid article,.measurement,.footnotes{border:1px solid #344b61;border-radius:12px;padding:18px;background:#111b27}.below-grid p,.measurement p,.footnotes p{margin-top:9px;color:#b3c5d2;font-size:13px}.measurement table{width:100%;border-collapse:collapse;margin-top:12px}.measurement th,.measurement td{padding:9px 12px;text-align:left;border-bottom:1px solid #34485b}.measurement th{font-size:12px;color:#a9bbca}.tag{display:inline-block;font-size:11px;border:1px solid #617486;padding:2px 7px;border-radius:6px}.tag.measured{border-color:#3e9b7c;color:#6cd7b2}.tag.derived{border-color:#b58846;color:#f1bf74}.footnotes{margin-top:14px}footer{border-top:1px solid #2e4153;padding:20px 24px 30px;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;color:#889eb2;font-size:12px}#toast{position:fixed;bottom:15px;right:15px;background:#27445a;border:1px solid #78b9e2;border-radius:8px;padding:10px;z-index:40;color:#fff;display:none}
+body.panel-hidden .workspace{grid-template-columns:1fr}body.panel-hidden .inspector{display:none}
+@media(min-width:1250px){.site-head{grid-template-columns:1fr auto}.flow-nav{max-width:940px;justify-content:flex-end}.workspace{min-height:650px}}@media(max-width:900px){.workspace{grid-template-columns:1fr}.inspector{border-left:0;border-top:1px solid #365169;max-height:none}.inspector-scroll{max-height:400px}.svg-wrap svg{min-height:460px}.scene-tools{flex-wrap:wrap}.scene-scale{display:none}}@media(max-width:650px){.site-head{padding:14px 11px}.workspace{min-height:400px}.svg-wrap,.svg-wrap svg{min-height:360px}.scene-hint{font-size:10px;left:7px;bottom:7px;max-width:65%}.scene-tools{padding:7px;gap:4px}.crumb{padding:5px}.stage-footer{gap:6px}.mini-map{display:none}.player-row{padding:9px 7px}.stage-chip{max-width:106px}.below{padding:20px 10px}.below-grid{grid-template-columns:1fr}.measurement{overflow-x:auto}.player-caption{padding:9px}.flow-btn{font-size:11px;padding:6px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+
+.profile-lab{max-width:1420px;margin:28px auto 2px;padding:18px 22px;border:1px solid #3e5366;border-radius:12px;background:#131e2a}.profile-top{justify-content:space-between}.profile-top h2{font-size:20px}.upload-button{background:#204b64;border:1px solid #63b4dc;color:#e8f5ff;border-radius:7px;padding:10px 12px;cursor:pointer;font-size:12px;font-weight:700}.upload-button:hover{background:#29627c}.profile-empty{padding:18px;background:#102233;border:1px dashed #547089;border-radius:9px;margin-top:13px;color:#adbdcb;font-size:13px}.profile-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:14px 0}.profile-metrics>div{background:#17293a;border:1px solid #38556c;padding:10px;border-radius:8px}.profile-metrics span{display:block;font-size:11px;color:#9eb4c5}.profile-metrics strong{font-size:16px;overflow-wrap:anywhere}.profile-tools{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.profile-tools input{flex:1;min-width:120px;accent-color:#6ec8fa}.profile-event{background:#111e2e;border-left:3px solid #6bcfac;padding:12px;margin:12px 0;border-radius:0 8px 8px 0;line-height:1.7}.profile-event b{color:#f5cd82}
+@media(max-width:640px){.profile-lab{margin:16px 10px;padding:12px}.profile-metrics{grid-template-columns:repeat(2,1fr)}}
+
+</style>
+
 </head>
 <body>
 <a class="skip" href="#stage">Skip to architecture</a>
@@ -149,5 +164,855 @@
 </section>
 <footer><span>openTPU Atlas · Source revision <code>55b975c14346</code> · Independent visualization</span><a href="./deep.html">Previous prototype (archived)</a></footer>
 <div id="toast" role="status" aria-live="polite"></div>
+<script>
+"use strict";
+/*
+ * openTPU Atlas v2 — independently authored visualization, no external libraries.
+ * Numbers are based on openTPU's pinned target and linked documentation.
+ * Animated flows are explanations, NOT VCD/SAIF traces or timing measurements.
+ */
+(()=> {
+const REV="55b975c14346cc692f1765729d750d79e8bc0b04";
+const SOURCE="https://github.com/MarsWise/openTPU/blob/"+REV+"/";
+const NS="http://www.w3.org/2000/svg";
+const $=id=>document.getElementById(id);
+const E=(tag,props={},parent)=>{
+ const el=document.createElementNS(NS,tag);
+ for(const [k,v] of Object.entries(props))el.setAttribute(k,String(v));
+ if(parent)parent.appendChild(el);return el;
+};
+const text=(parent,x,y,value,size=15,fill="#f1f5f9",weight=400)=>{
+ let t=E("text",{x,y,"font-size":size,fill,"font-weight":weight},parent);t.textContent=String(value);return t;
+};
+const html=(tag,cls="",content)=>{
+ const n=document.createElement(tag);if(cls)n.className=cls;if(content!==undefined)n.textContent=String(content);return n;
+};
+const enc=encodeURIComponent;
+const DATA=new Map();
+function node(id,parent,name,desc,short,type,src,facts={},status="documented",note="",extra=[]){
+ if(DATA.has(id))throw Error("duplicate "+id);
+ if(parent&&!DATA.has(parent))throw Error("unknown parent "+id+" -> "+parent);
+ const n={id,parent,name,desc,short:short||name,type:type||"control",src,extra,
+  facts,status,note,children:[]};
+ DATA.set(id,n);
+ if(parent)DATA.get(parent).children.push(id);
+ return n;
+}
+const doc="docs/targets.md",brd="targets/ypcb-00338.toml",top="rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv";
+const sl="rtl/top/otpu_slice.sv",seq="rtl/seq/otpu_seq.sv",dma="rtl/dma/otpu_dma.sv";
+const mxu="rtl/mxu/otpu_mxu.sv",dsp="rtl/tech/xilinx7/otpu_tech_dsp.sv";
+const mem="rtl/mem/otpu_tmem.sv",act="rtl/mem/otpu_actram.sv",vpu="rtl/vpu/otpu_vpu.sv";
+const fpipe="rtl/vpu/otpu_fpipe.sv",ram="rtl/tech/generic/otpu_tech_ram.sv";
+const nat="rtl/mem/otpu_native_dram.sv",bridge="rtl/shell/otpu_mem_ch.sv";
+node("rack",null,"AI workstation and PCIe card","The host compiles the model into openTPU programs, manages weights in DDR3, transfers commands and reads responses. The target here is the Inspur YPCB-00338 card.","Host + FPGA card","control",doc,{"Scope":"one FPGA card","Model data":"host ↔ DDR3"},"documented","System grouping and positions are logical, not a photo or a rack footprint.");
+node("host","rack","Host machine","Host-side Python engine and device driver configure the board, assemble programs and coordinate PCIe transfers.","CPU + RAM + runtime","control","opentpu/host/board.py",{"Software":"Python runtime","Role":"orchestration"},"documented");
+node("pciecard","rack","YPCB-00338 accelerator card","Xilinx Kintex-7 FPGA, two 2 GiB DDR3 channels, PCIe Gen2 x8 target, and clock/power components.","FPGA + dual DDR3","compute",brd,{"FPGA":"XC7K480T","DRAM":"4 GiB DDR3","Host":"PCIe Gen2 x8","Clock":"133.33 MHz"},"documented","Board bitstreams may negotiate a lower PCIe width; target configuration is not proof of link negotiation.");
+node("hostpcie","host","Host PCIe controller","Transfers model chunks and control writes to the FPGA. The XDMA endpoint can be constrained by the negotiated link.","Host I/O","control","docs/board.md");
+node("runtime","host","Compiler and runtime","Program ISA compilation, tensor layouts, conversion of model weights, inference and host-device synchronization.","Python kernels","control","opentpu/compiler.py",{"Execution":"compiled instruction programs"},"documented");
+node("hostlens","host","Trace inspection","The otpu-lens profiler is the actual trace timeline and stall analysis tool, complementary to this explanatory atlas.","otpu-lens","control","docs/lens.md",{"Input":"profile / trace"},"documented","This atlas does not claim to import real hardware traces.");
+node("fpga","pciecard","Kintex-7 FPGA die","The active RTL implements one compute slice with a systolic MXU, SIMD VPU, quantizer, DMA, TMEM and sequencer.","XC7K480T","compute",top,{"Family":"Xilinx 7-series","Process":"28 nm family","Target":"-2 speed grade"},"documented","The physical layout inside the die is not derivable from the source's block hierarchy.");
+node("ddr0","pciecard","DDR3 channel 0","One 64-bit 2 GiB DDR3 channel behind LiteDRAM.","2 GiB · 64b","memory",bridge,{"Capacity":"2 GiB","Rate":"1066 MT/s"},"documented");
+node("ddr1","pciecard","DDR3 channel 1","Second independent 64-bit 2 GiB DDR3 channel.","2 GiB · 64b","memory",bridge,{"Capacity":"2 GiB","Rate":"1066 MT/s"},"documented");
+node("powers","pciecard","Power and clocks","Board-level power regulation, 50 MHz reference input and MMCM-generated clocks.","Clock / regulator","physical",top,{"Input":"50 MHz","Core":"133.33 MHz"},"conceptual","The power regulator topology is not reconstructed from board schematics.");
+node("shell","fpga","FPGA shell","XDMA/AXI, board control, LiteDRAM, clock domain crossings, status counters, trace buffers and native DRAM arbitration.","Host-facing shell","control","rtl/shell/otpu_board.sv");
+node("slice","fpga","openTPU compute slice","Independent hardware engines run concurrently under dependency-aware command issue, sharing TMEM and DRAM channels.","One slice","compute",sl,{"Slices":"S=1","Core":"133.33 MHz","DMAs":"explicit","Units":"SEQ / DMA / MXU / VPU / QUANT"},"documented");
+node("xdma","shell","XDMA / PCIe endpoint","The PCIe host sends configuration and data over Xilinx XDMA and AXI interfaces.","PCIe endpoint","control",top,{"Target link":"Gen2 x8"},"documented");
+node("clocks","shell","Clock / reset domains","Different FPGA, DDR3 and PCIe domains connected by asynchronous FIFO structures; TMEM can use doubled core clock.","MMCM + CDC","control",top,{"Core":"133.33 MHz","TMEM pump":"2× core"},"documented");
+node("control","shell","Registers / trace","Control, IDs, trace and observability registers for host-visible status.","BAR0 + trace","control","docs/observability.md",{"Identity":"CFG_HASH / BUILD_ID"},"documented");
+node("dram","shell","Native memory adapter","Interleaves 64-byte beats over two channels, CHASH swaps chunk halves for better stride distribution.","64 B beats","memory",nat,{"Channels":"2","D":"128 bytes","Hash":"CHASH"},"documented");
+node("ddrbridge","dram","DDR3 bridges","Each channel merges accelerator native traffic and XDMA AXI host traffic, with FIFOs for clock crossings.","otpu_mem_ch","memory",bridge);
+node("drammap","dram","Channel interleave","A 128-byte chunk spans two physical channels: consecutive 64-byte beats map to channel parity, optionally XOR'ed with chunk index parity.","CHASH map","memory",nat,{"Beat":"64 bytes","Chunk":"128 bytes"},"documented");
+node("bankctrl","dram","DRAM arbiter","Port A handles scales and scalar traffic; port B streams chunks. Reads and writes are queued with backpressure and tags.","Ports A / B / SW","memory",nat,{"Order":"per-channel queues"},"documented");
+node("seq","slice","Instruction sequencer","R0–R15 register setup, IMEM fetch, dependency scoreboard and dispatch of independent commands into parallel execution engines.","ISA + scoreboard","control",seq,{"Issue":"in order","Window":"16 entries (target)"},"documented");
+node("dma","slice","DMA engine","Explicit movement between external DDR3 and TMEM; priority over the MXU for one DRAM traffic path.","LD / ST / DSTEP","control",dma);
+node("mxu","slice","Systolic MXU","Integer matrix multiplication with stationary activations and streamed quantized weights, exact accumulation and FP32 epilogue.","D128 × 4 columns","compute",mxu,{"D":"128","Columns":"4","Peak":"512 integer MAC/cycle"},"derived","512 MAC/cycle is an arithmetic ceiling, not the sustained throughput of every model.");
+node("vpu","slice","Vector processing unit","Eight FP32 lanes, including two lanes equipped to execute composite transcendental functions.","8 FP32 lanes","compute",vpu,{"LANES":"8","VPU_CL":"2"},"documented");
+node("quant","slice","Activation quantizer","QACT creates INT8 blocks and scale metadata from TMEM FP32 activations for the stationary ACT RAM.","QACT","compute","rtl/vpu/otpu_quant.sv");
+node("tmem","slice","Tensor memory","FP32 scratchpad implemented with eight logical banks, arbitration, bypass and resource-specific FPGA memory structures.","256 KiB · 8 banks","memory",mem,{"Words":"65,536","Word":"32 bits","Banks":"8"},"documented");
+node("actram","slice","Activation RAM","Stationary INT8 tiles and per-block scale records feeding the MXU across its four columns.","16 × 128 × 128","memory",act,{"Raw bytes":"256 KiB","Rows":"16","Blocks":"128"},"derived","Raw INT8 capacity excludes scale metadata and RAM mapping overhead.");
+node("collective","slice","Collective unit","Cross-slice BAR/GATHER RTL exists; the current YPCB target has one slice, not a physical multi-slice mesh.","BAR / GATHER","control","rtl/top/otpu_coll.sv",{"S":"1 (on card)"},"documented");
+node("imem","seq","Instruction memory","Synchronous FPGA RAM stores compiled instruction words. An instruction is fetched one ahead into a register.","IMEM","memory",seq,{"IMEM words":"32,768"},"documented");
+node("reg","seq","Register file","Scalar instruction arguments R8..R15 and register-relative addresses, loop counts and HALT/CHAIN logic.","R0…R15","control",seq);
+node("scoreboard","seq","Dependency scoreboard","Tracks memory footprints and conflicting RAW/WAR/WAW accesses so independent DMA, MXU and VPU commands can overlap.","RAW / WAR / WAW","control",seq,{"Policy":"oldest ready per unit"},"documented");
+node("dispatch","seq","Issue and release","Starts independent units; matrix prefetch can start earlier than the release of stationary operands.","Command window","control",seq);
+node("preload","dma","LD / ST engine","Loads chunk streams from DDR3 into TMEM and stores results with explicit completion.","Transfers","control",dma);
+node("stream","dma","Stream engine","DSTEP/STREAM use the DMA's data stream and the VPU arithmetic tail.","DSTEP / STREAM","control",dma);
+node("waitw","dma","WAITW rendezvous","Memory-polling synchronization command, with timeout/error behavior.","WAITW","control",dma);
+node("weights","mxu","Weight and scale streamer","B port streams quantized weight chunks; A port fetches scale rows; FIFOs decouple fetch from compute.","DDR3 → FIFO","memory",mxu,{"Chunk":"128 bytes"},"documented");
+node("stationary","mxu","Stationary ACT tiles","One weight chunk can be consumed against multiple activation rows held in ACT RAM, depending on M and column reuse.","Reuse ACT RAM","memory",act);
+node("array","mxu","Four systolic columns","Each of four columns performs a chain of 128 logical products, divided into 8 groups of 16 DSP48E1 processing elements.","4 × 128 PE","compute",dsp,{"Array products":"512 / cycle (peak)","PE cell":"DSP48E1"},"derived","Pipelined product count includes logical arithmetic positions; complete FPGA DSP count additionally includes column end, VPU and infrastructure.");
+node("epilogue","mxu","Column-end and FP32","Eight group sums are scaled and accumulated in a nine-DSP column end, then converted to FP32 with quantization scales.","Exact sum → FP32","compute",dsp,{"DSPs / end":"9","Exact accumulator":"48 bits"},"documented");
+node("tmm","mxu","Ternary / BitNet matrix","Ternary packing carries values −1/0/+1 using 2-bit codes. Branch-specific GSC handles group scales; effective decode throughput depends on M.","TMM / GSC","compute",mxu,{"TMM M=1":"127.7 MAC/cycle","TMM M=16":"511.6 MAC/cycle"},"measured","These are dated FPGA measurements from the BitNet compatibility report.",["docs/nextgen/BITNET_COMPAT.md","docs/nextgen/BONSAI_4B.md"]);
+node("wpacked","tmm","Packed ternary weights","Internal TMM uses 00=0, 01=+1, 10=−1. Bits from source checkpoints may need lossless format conversion.","2-bit codes","memory","docs/nextgen/BONSAI_4B.md",{"Valid":"00,01,10","Reserved":"11"},"documented");
+node("wdecode","tmm","Ternary decode / select","Selectable encoded weight groups feed an integer MAC datapath and produce scaled results.","No FP32 weight multiply","compute",dsp,{},"documented","The DSP RTL implements packed weight selection; the whole end-to-end TMM path is version-dependent.");
+node("groupScale","tmm","Group scale adapter","Bonsai GSC accounts for per-block scale before FP32 accumulation; documented verification is not identical to production board.","GSC path","compute","docs/nextgen/BONSAI_4B.md",{},"documented","Do not mark new GSC as board-verified without a matching bitstream.");
+node("vpuLane","vpu","Eight SIMD lanes","LANES=8 vector FP32 elements per cycle; composite functions are scheduled onto the configured long lanes.","8 lanes","compute",vpu,{"Ordinary op":"8 elements/cycle (peak)","Composite lanes":"2"},"derived");
+node("fops","vpu","FP32 pipelined arithmetic","FP32 add/mul are independently pipelined; openTPU fmadd is mul then add with two roundings, not a single fused FMA.","mul → add","compute","rtl/vpu/otpu_fpipe.sv",{"Mul latency":"≥2 cycles","Add latency":"≥4 cycles"},"documented");
+node("reduction","vpu","Reduction network","RSUM/RDOT use 64 interleaved partials followed by scheduled folding stages.","64 partials","compute","rtl/vpu/otpu_vtree.sv");
+node("composite","vpu","Composite function pipeline","EXP2, RECIP, RSQRT and LOG2 use staged numerical approximations and reusable slots.","Horner / Newton","compute","rtl/vpu/otpu_se_comp.sv");
+node("rounding","fops","FP32 rules","Binary32 rounding-to-nearest-even and flush-to-zero on input/output. Source defines exact behavior.","FP32 FTZ","control","rtl/vpu/otpu_fp.sv",{"Round":"nearest-even","Subnormals":"flush to zero"},"documented");
+node("mul","fops","FP32 multiplier","Staged arithmetic computes a rounded FP32 product.","FP32 multiply","compute","rtl/vpu/otpu_fpipe.sv");
+node("adder","fops","FP32 adder","Staged FP32 addition with normalization and rounding behavior specified in the source.","FP32 add","compute","rtl/vpu/otpu_fpipe.sv");
+node("tree","reduction","Partial folding","The 64 partials are folded by pipelined adders and delayed registers. Exact scheduling follows RTL.","Pipelined fold","compute","rtl/vpu/otpu_vtree.sv");
+node("e2","composite","EXP2 polynomial","Polynomial Horner steps and a range-reduction path approximate 2^x.","9 operations","compute","rtl/vpu/otpu_se_comp.sv",{"Ops":"9"},"documented");
+node("rrecip","composite","RECIP iterative","Newton refinement reuses the FP32 multiplier and adder path.","6 operations","compute","rtl/vpu/otpu_se_comp.sv",{"Ops":"6"},"documented");
+node("rsqrt","composite","RSQRT iterative","Reciprocal square-root approximation uses a longer series of arithmetic operations.","10 operations","compute","rtl/vpu/otpu_se_comp.sv",{"Ops":"10"},"documented");
+node("log","composite","LOG2 polynomial","Polynomial and exponent extraction implement logarithm approximation.","10 operations","compute","rtl/vpu/otpu_se_comp.sv",{"Ops":"10"},"documented");
+node("rom","composite","TFN tables","An optional table-based path stores coefficient triples in ROM; target capabilities determine its availability.","Coefficient ROM","memory","rtl/vpu/otpu_tfn_rom.sv",{"Entries":"2,048"},"documented");
+node("bankArb","tmem","TMEM request arbiter","Contending units are granted whole-unit access to banked memory. Requests not granted can stall or replay.","Priority + replay","control",sl);
+node("banks","tmem","Eight TMEM banks","bank = (FP32 word address) mod 8, 8,192 words per logical bank.","Bank decoder","memory",mem,{"Banks":"8","Words/bank":"8192"},"documented");
+node("bram","tmem","Block RAM implementation","TMEM_IMPL=3 uses sub-bank organization and a 2× pumped storage path with forwarding on registered writes.","Xilinx BRAM","memory",mem,{"Mode":"TMEM_IMPL=3","Pump":"2×"},"documented");
+node("bypass","tmem","Write bypass","Registered write pipeline with bypass keeps same-address read-after-write behavior observable in the core.","Forwarding","control",mem);
+node("storage","actram","Activation byte arrays","Each column/piece has physical block RAM storage for stationary INT8 activation blocks.","INT8 arrays","memory",act);
+node("scales","actram","Scale records","Each (row, block) stores Sa and four sub-block offsets as a 64-bit record.","Sa + offsets","memory",act,{"Record":"64 bits"},"documented");
+node("chend","epilogue","Column-end nine DSPs","Each column end consumes eight group sums and their block scales, using cascaded DSP48E1 cells.","9 DSP48E1","compute",dsp);
+node("fpconv","epilogue","FP32 output conversion","Exact int48 output converted and scaled, optionally accumulated, before TMEM writeback.","i2f + scaling","compute",mxu);
+for(let b=0;b<8;b++){
+ node("bank"+b,"banks","TMEM bank "+b,"Logical FP32 bank "+b+" accepts word addresses with modulo-eight result "+b+".","8,192 words","memory",mem,{"Selector":"addr mod 8 = "+b,"Storage":"8,192 words"},"documented");
+ node("sub"+b,"bank"+b,"Sub-banks and ports","The 2× pumped implementation subdivides physical RAM storage and arbitrates resource access; memory sources define port behavior.","BRAM ports","memory",mem,{"Physical exact placement":"not provided"},"documented");
+ node("cell"+b,"sub"+b,"SRAM cell (textbook)","A conventional static SRAM bit cell may be represented as cross-coupled inverters and two access transistors.","6T cell","physical",ram,{"Cell model":"6T SRAM"},"conceptual","A textbook six-transistor SRAM drawing, NOT a disclosed Xilinx BRAM cell schematic.");
+}
+for(let c=0;c<4;c++){
+ const col="col"+c;
+ node(col,"array","Column "+c,"A stationary INT8 activation row takes one weight chunk across 128 logical processing positions.","128 MAC positions","compute",dsp,{"D":"128","Groups":"8","Chain positions":"16"},"documented");
+ for(let g=0;g<8;g++){
+  const grp=col+"g"+g;
+  node(grp,col,"DSP chain "+g,"Sixteen DSP48E1 positions share a PCIN/PCOUT cascade across one group.","16 PE","compute",dsp,{"Group":String(g),"Products":"16"},"documented");
+  for(let p=0;p<16;p++){
+   const pe=grp+"pe"+p;
+   node(pe,grp,"PE "+p,"Processing element otpu_pe: signed input registers, DSP48E1 hardware product and cascade accumulation.","DSP48E1","compute",dsp,{"Column":String(c),"Group":String(g),"Index":String(p)},"documented");
+   for(const [sid,name,brief] of [
+    ["areg","A / D weight inputs","Two register paths carry selectable packed weight components."],
+    ["inmode","INMODE select","A registered control selects the input presented to the multiplier."],
+    ["breg","BREG activation","The signed activation is held in a DSP input register."],
+    ["product","M multiplier","Signed product created inside the DSP48E1 dedicated arithmetic primitive."],
+    ["psum","P accumulator","P = M at the first position, otherwise P = PCIN + M."],
+    ["cascade","PCOUT cascade","Dedicated cascade output feeds the following processing element."]
+   ]) node(pe+sid,pe,name,brief,"DSP primitive","compute",dsp,{"Primitive":"DSP48E1","Field":sid},"documented","A technology-level functional description, not an extracted transistor netlist.");
+  }
+ }
+}
+node("bitlogic","fpga","Logic and FPGA primitives","An educational expansion below synthesis: DSP, LUT6, CARRY4, BRAM and flop examples. Exact instantiated count requires an implementation report.","Technology cells","physical","docs/board.md",{},"conceptual","The blocks below are generic primitive descriptions, not a generated LUT-level netlist.");
+node("lut","bitlogic","LUT6 logic","A six-input LUT evaluates one of 64 configuration bits as a Boolean function.","64-bit truth table","physical",doc,{"Inputs":"6","Truth entries":"64"},"conceptual");
+node("carry","bitlogic","CARRY4 chain","Dedicated fast FPGA carry propagation for additions and counters.","Carry chain","physical",doc,{"Primitive":"Xilinx 7-series"},"conceptual");
+node("flop","bitlogic","Flip-flop / CE","Clocked bit storage with explicit clock enable. Different reset/enable forms map to suitable primitives.","FF + enable","physical",doc,{},"conceptual");
+node("logicgate","bitlogic","Boolean gates","XOR/AND/NAND, mux and full-adder Boolean equations explain digital functions below RTL.","Logic gates","physical",doc,{},"conceptual");
+node("sramcell","bitlogic","SRAM 6T cell","Cross-coupled inverter storage cell, with access transistors, as a generic technology illustration.","6 transistors","physical",doc,{"Transistors":"6 (textbook)"},"conceptual","Xilinx does not disclose this exact SRAM cell from openTPU source.");
+node("fet","logicgate","CMOS MOSFET","An idealized transistor switches conduction through its gate. This is not a transistor extracted from Kintex-7.","Textbook MOSFET","physical",doc,{"Approximate scale":"tens of nm"},"conceptual");
+node("silicon","fet","Silicon lattice","A semiconductor crystal and dopant control carrier behavior. Illustrated symbolically.","Si crystal","physical",doc,{},"conceptual");
+node("atom","silicon","Silicon atom","A silicon atom has 14 protons and 14 electrons when neutral. The illustration is deliberately schematic.","Atomic structure","physical",doc,{"Atomic number":"14"},"conceptual");
+node("nucleus","atom","Atomic nucleus","Protons and neutrons bound inside a nucleus. No openTPU implementation detail exists at this scale.","Nuclear scale","physical",doc,{},"conceptual");
+node("quarks","nucleus","Quarks in nucleons","A proton's valence quark content is uud; this is a physics education endpoint, not a chip design.","u u d","physical",doc,{"Proton":"2 up + 1 down"},"conceptual","Deep physics does not provide direct circuit-level performance evidence.");
+node("ddrchip","ddr0","DDR3 memory device","Off-chip DRAM storage and interface; physical vendor package layout is not reconstructed.","DDR3 package","physical","docs/litedram.md",{},"conceptual");
+node("dramBank","ddrchip","DRAM bank","DRAM controller groups rows and columns across banks. No exact vendor row address floorplan is inferred.","DRAM bank","memory","docs/litedram.md");
+node("dramRow","dramBank","DRAM row","A row of capacitor cells accessed through wordlines and sense amplifiers. Explanatory representation.","Wordline + sense","physical","docs/litedram.md",{},"conceptual");
+node("dramCell","dramRow","1T1C DRAM cell","A textbook storage capacitor charged/discharged through one access transistor.","One transistor + capacitor","physical","docs/litedram.md",{"Cell":"1T1C"},"conceptual","Not a photomicrograph or cell extraction of this DDR3 part.");
+
+for(let i=0;i<8;i++){
+ node("vlane"+i,"vpuLane","Lane "+i,"A 32-bit FP32 slice of vector data; "+(i<2?"this lane also handles longer composite functions.":"simple arithmetic operations take this lane."),i<2?"Long FP32 lane":"Simple FP32 lane","compute",vpu,{"Lane":String(i),"Composite":i<2?"yes":"no"},"documented");
+ node("vlane"+i+"pipe","vlane"+i,"FP32 slot","Register and combinational stages implement the exact configured FP32 function with clock enable.","Mul / add stage","compute",fpipe);
+}
+for(const [id,name,brief,notes] of [
+ ["quantread","TMEM read","Read FP32 activation rows through the memory arbiter.","One or more words per grant"],
+ ["quantmax","Block analysis","Compute activation magnitude and group scaling information; exact method from QACT RTL.","Sub-block metadata"],
+ ["quantround","INT8 quantizer","Convert group values to bounded INT8 representations using selected offsets/scales.","Rounding and limits"],
+ ["quantwrite","ACT RAM write","Write quantized bytes to stationary ACT RAM and produce separate 64-bit scale records.","Delayed write path"]
+])node(id,"quant",name,brief,notes,"compute","rtl/vpu/otpu_quant.sv");
+for(const [id,name,brief] of [
+ ["hazard","Memory footprint checks","At dispatch, RAW/WAR/WAW conflicts with older commands are recorded."],
+ ["ready","Oldest ready issue","The oldest ready instruction for a free unit may start independently of other busy units."],
+ ["waitcounts","WAITC alternative","Optional wait-count entries replace repeated full footprint comparison in supported builds."]
+])node(id,"scoreboard",name,brief,name,"control",seq);
+for(const [id,name,desc] of [
+ ["nand","NAND gate","Y = NOT(A AND B); a textbook CMOS realization has four transistors."],
+ ["xor","XOR gate","Y = A XOR B; standard Boolean arithmetic bit primitive."],
+ ["fulladd","One-bit full adder","Sum = A XOR B XOR CIN, carry = majority(A,B,CIN)."],
+ ["mux","2:1 multiplexer","Y = sel ? B : A, usually mapped into LUTs or dedicated mux resources."]
+])node(id,"logicgate",name,desc,name,"physical",doc,{},"conceptual","This is a textbook logic circuit, not an extracted FPGA cell.");
+
+const PATHNODES=()=>DATA.size;
+
+const ST=(id,title,caption,src,kind="documented",tags=[])=>({id,title,caption,src:src||DATA.get(id)?.src,kind,tags});
+const FLOWS=[
+ {key:"1",name:"Boot / load",summary:"How a compiled openTPU program arrives in IMEM and starts the first instruction.",steps:[
+ ST("host","Compile the program","The host compiles ISA commands and prepares the model image before any compute work is issued.","opentpu/compiler.py"),
+ ST("hostpcie","Send over PCIe","XDMA transfers bytes and host commands into the board, which negotiates a concrete link width.",top),
+ ST("shell","The FPGA shell","Host BAR0 control, LiteDRAM configuration and data paths are wired in the board wrapper.",top),
+ ST("dma","Program loader","The slice's loader copies instruction chunks from external DRAM into IMEM while the compute core is held in reset.",sl),
+ ST("imem","Instruction memory","A synchronous RAM stores ISA instructions. The first fetch has one additional initial pipeline cycle.",seq),
+ ST("dispatch","Start issuing","The sequencer dispatches dependency-checked commands to independent engines.",seq)
+ ]},
+ {key:"2",name:"DDR stream",summary:"Why 64-byte beats, two channels and local memory matter more than adding arithmetic.",steps:[
+ ST("drammap","Map a byte address","A 128-byte weight chunk is split into two 64-byte physical channel beats. CHASH can alter which half goes to which channel.",nat),
+ ST("ddrbridge","Cross clock domains","Each DDR channel arbitrates accelerator and XDMA commands, keeping read-order tags and FIFO credits.",bridge),
+ ST("bankctrl","Schedule memory requests","Port A scales, port B weight streams and scalar write traffic share the native adapter with backpressure.",nat),
+ ST("weights","Prefetch into FIFOs","Scale and weight FIFOs let the MXU issuer run ahead of the consumer if dependency checks allow it.",mxu),
+ ST("stationary","Reuse activations","Stationary ACT RAM rows are reused across weight advances; this is a separate structure from TMEM.",act),
+ ST("epilogue","Write results","The post-MAC result passes scaling and conversion, then writes into local TMEM.",mxu)
+ ]},
+ {key:"3",name:"INT8 matmul",summary:"A matrix multiply travels from activation quantization through DSP48E1 chains to FP32 output.",steps:[
+ ST("quant","Quantize activation rows","QACT prepares INT8 data and block scale metadata; no full-precision vector multiply is needed here.","rtl/vpu/otpu_quant.sv"),
+ ST("actram","Keep activations stationary","The ACT RAM feeds up to four selected activation rows into the MXU per weight-chunk advance.",act),
+ ST("weights","Fetch weight chunks","Each D=128 chunk of quantized weights moves from DDR3 through stream FIFOs.",mxu),
+ ST("array","Four parallel columns","Four arithmetic columns each contain 128 logical PE positions, arranged as eight 16-position chains.",dsp,"derived",["512 MAC/cycle arithmetic ceiling"]),
+ ST("col0g0","One sixteen-PE chain","The DSP48E1 multiplier output is combined with the preceding PE's PCIN to form a systolic dot-product partial sum.",dsp),
+ ST("chend","Eight groups into one result","Each column end scales and adds the group sums through a nine-DSP cascade.",dsp),
+ ST("fpconv","Scale and store","A 48-bit integer accumulator becomes FP32 with quantization scales before TMEM writeback.",mxu)
+ ]},
+ {key:"4",name:"BitNet / TMM",summary:"Follow two-bit ternary weights and see the difference between arithmetic peak and single-token decode.",steps:[
+ ST("wpacked","Pack −1 / 0 / +1","Internal TMM codes are 00 for 0, 01 for +1, 10 for −1. Conversion from the original model representation matters.","docs/nextgen/BONSAI_4B.md"),
+ ST("wdecode","Decode through integer logic","The packed weight selection feeds the DSP-based integer datapath; the precise FPGA mapping depends on TMM mode.",dsp),
+ ST("col0g0pe0","One DSP product","A single logical PE uses DSP48E1 registers, multiplier and cascade output, not a magic ternary FLOP.",dsp),
+ ST("groupScale","Optional GSC","Bonsai's grouped scales require extra logic and a matching firmware capability and bitstream.","docs/nextgen/BONSAI_4B.md"),
+ ST("tmm","Decode bottleneck","Measured M=1 TMM reaches 127.7 MAC/cycle, while M=16 reaches 511.6 MAC/cycle. A single token does not fill the four-column datapath equally.","docs/nextgen/BITNET_COMPAT.md","measured"),
+ ST("tmem","Finish in local memory","The scaled output is written to TMEM for the next layer's vector or matrix instruction.",mem)
+ ]},
+ {key:"5",name:"FP4 weights",summary:"The same integer matrix machinery handles low-bit weight chunks with format-specific scaling.",steps:[
+ ST("dram","Load compact blocks","FP4/INT4 chunks halve the raw byte cost versus INT8, though scales and metadata still consume bandwidth.",nat,"derived"),
+ ST("weights","Two blocks per 128-byte chunk","4-bit packing can carry two blocks in one chunk, with reuse controlled by format and PAIR flags.",mxu),
+ ST("stationary","Read activation tiles","The MXU reuses INT8 activation blocks from ACT RAM.",act),
+ ST("array","Compute in DSPs","Low-bit weight codes are decoded to products in the integer array with format-specific scale interpretation.",dsp),
+ ST("fpconv","Numerical epilogue","Accumulated integer sums use FP32 scaling, not a direct native FP4 floating-point DSP operation.",mxu)
+ ]},
+ {key:"6",name:"Quantization",summary:"From FP32 TMEM to scaled INT8 stationary activation RAM.",steps:[
+ ST("tmem","Input FP32 tile","The host or previous layer has placed activations into local FP32 tensor memory.",mem),
+ ST("bankArb","Win bank access","The quantizer's TMEM reads compete with other units under the slice arbiter.",sl),
+ ST("quant","Quantize with scale","QACT applies power-of-two offset/scaling and emits INT8 data plus block metadata.","rtl/vpu/otpu_quant.sv"),
+ ST("scales","Write scale records","Each (row, block) stores a 64-bit record with the row scale and four offset fields.",act),
+ ST("storage","Prepare stationary bytes","The ACT RAM stores quantized rows so the next MM can reuse them locally.",act)
+ ]},
+ {key:"7",name:"FP32 vector",summary:"A vector operation traverses TMEM banks, FP32 arithmetic lanes and a result stage.",steps:[
+ ST("banks","Fetch contiguous words","The VPU requests lane-wide vectors from eight logical TMEM banks.",mem),
+ ST("vpuLane","Eight SIMD elements","Simple arithmetic can be issued across eight lanes, with composite operations restricted to two long lanes.",vpu),
+ ST("mul","Pipelined FP32 multiply","The multiplier rounds its FP32 result; its latency is at least two configured stages.",fpipe),
+ ST("adder","Pipelined add","An add follows the multiplier for an FMADD-like instruction, with an additional rounding; it is not an IEEE fused FMA.",fpipe),
+ ST("reduction","Optional vector reduction","RSUM, RSSQ and RDOT use interleaved partial sums and folding adders.", "rtl/vpu/otpu_vtree.sv"),
+ ST("tmem","Store vector output","Result rows return to TMEM for the next instruction.",mem)
+ ]},
+ {key:"8",name:"Attention math",summary:"How sequential vector kernels and reductions can build an attention subgraph without adding an invented hardware unit.",steps:[
+ ST("seq","Schedule the operator chain","The compiler expresses attention as ordinary MXU/VPU and memory instructions rather than a separate physical attention engine.",seq,"documented"),
+ ST("mxu","Matrix products","Query/key/value projections and dot products use MXU instructions where the model/compiler supports them.",mxu),
+ ST("reduction","Reduce scores","FP32 reduction hardware handles sums/maxima used in normalisation and related kernels.","rtl/vpu/otpu_vtree.sv"),
+ ST("composite","Elementwise functions","EXP2, RECIP and other composite functions enable common softmax-style calculations through scheduled kernels.",vpu),
+ ST("tmem","Intermediate data reuse","Intermediate matrices reside in TMEM when they fit; larger state can be streamed through DRAM.",mem)
+ ]},
+ {key:"9",name:"Bank conflict",summary:"Two engines asking for a shared TMEM bank cannot always advance in the same cycle.",steps:[
+ ST("tmem","One logical scratchpad","TMEM is explicitly shared by DMA, VPU, MXU drain and quantizer. The bank count is eight.",mem),
+ ST("bank3","Focus on bank 3","The logical bank index is the FP32 word address modulo eight. Every eighth word maps to this bank.",mem),
+ ST("bankArb","Arbitrate a collision","The slice grants an engine only if all requested bank resources can be served, otherwise it holds; specific priority and replay are RTL-defined.",sl),
+ ST("bypass","Preserve recent writes","A registered write bypass makes a read observe newly written data before physical BRAM storage catches up.",mem),
+ ST("bram","Physical implementation","TMEM_IMPL=3 uses sub-banked RAM, read replay and 2× pumping. These details matter for timing and capacity.",mem)
+ ]},
+ {key:"0",name:"Resident decode",summary:"How instruction residency and on-card token handling can remove per-token host work.",steps:[
+ ST("host","Prepare program once","Resident model execution compiles or loads reusable instruction programs and weight images beforehand.","docs/nextgen/BITNET_COMPAT.md"),
+ ST("imem","Keep instruction buckets","Program code stays in IMEM until changed; a runtime can dispatch another decode position without reassembling instructions every time.",seq),
+ ST("seq","Execute on the FPGA","The sequencer and unit commands run a full layer's compute operations while host communication is minimized.",seq),
+ ST("vpu","Select the output token","The existing VPU can compute argmax over logits on the device, avoiding full logits transfer when supported.",vpu),
+ ST("dispatch","HALT / CHAIN","The engine can chain to subsequent compiled programs while keeping model data resident.",seq),
+ ST("hostpcie","Return token IDs","A resident generation loop need only send small results to the host, rather than all intermediate tensors.","docs/nextgen/BITNET_COMPAT.md","documented","Actual speedup must be confirmed with a matching resident-capable bitstream.")
+ ]},
+ {key:"B",name:"Host ↔ PCIe",summary:"The host/card path and why external bandwidth and protocol overhead influence end-to-end decoding.",steps:[
+ ST("hostpcie","Host initiates transfer","Programs, model image and run arguments are prepared and sent over the host's PCIe interface.","opentpu/host/board.py"),
+ ST("xdma","XDMA endpoint","The FPGA XDMA block receives data and exposes control registers.",top),
+ ST("ddrbridge","Clock crossing","Asynchronous FIFOs allow accelerator and host streams to share each LiteDRAM channel.",bridge),
+ ST("drammap","Memory chunk placement","Host DRAM data must respect the exact channel interleave and CHASH mapping.",nat),
+ ST("shell","Observe completion","Counters, control and status registers report readiness and execution completion.","docs/observability.md")
+ ]},
+ {key:"M",name:"One DSP bit",summary:"The deepest source-backed arithmetic route: registers, DSP multiplier, adder and PCIN/PCOUT.",steps:[
+ ST("col0","Column 0","One of four stationary activation rows processed per integer weight advance.",mxu),
+ ST("col0g0","Sixteen-element chain","Products flow through a chain of sixteen Xilinx DSP48E1 technology primitives.",dsp),
+ ST("col0g0pe0","PE 0","Each otpu_pe selects a weight stream, multiplies by the activation and accumulates.",dsp),
+ ST("col0g0pe0areg","A/D inputs","A and D carry weight alternatives, selected by registered INMODE controls.",dsp),
+ ST("col0g0pe0breg","BREG activation","The activation enters the DSP B register, avoiding external fabric multiply.",dsp),
+ ST("col0g0pe0product","Multiply M","The DSP's product M is an actual Xilinx DSP48E1 datapath operation, not a generic LUT example.",dsp),
+ ST("col0g0pe0psum","Accumulator P","P = PCIN + M (or P = M for FIRST); sums are kept on DSP cascade paths.",dsp),
+ ST("col0g0pe0cascade","PCOUT","PCOUT carries the partial sum to the next PE. The exact cycle latency is controlled by instantiated DSP registers.",dsp),
+ ST("logicgate","Under the primitive","Below DSP48E1, gates and individual MOSFETs can be shown as textbook circuit theory, not as a recovered Xilinx cell layout.",doc,"conceptual")
+ ]}
+];
+const TOUR=[
+ ["The whole machine","rack","The host, PCIe and FPGA form one accelerator system. Commands and weights must reach the card before computation begins."],
+ ["The physical board","pciecard","The Inspur YPCB-00338 puts Kintex-7 compute beside two 2 GiB DDR3 channels."],
+ ["The FPGA silicon","fpga","One Xilinx 7-series FPGA implements an explicit accelerator, not a RISC-V multicore CPU."],
+ ["Memory channels","dram","The external memory path interleaves 64-byte beats across two DDR3 controllers."],
+ ["The compute slice","slice","The openTPU slice contains seven principal interacting units and their memory interfaces."],
+ ["Instruction scheduling","seq","A scoreboard allows independent instructions to overlap, while dependencies preserve correctness."],
+ ["Data movement","dma","Moving data is a first-class hardware workload: the DMA shares DDR resources with the MXU."],
+ ["Shared tensor SRAM","tmem","256 KiB of logical FP32 TMEM is divided into eight banks with arbitration and bypass."],
+ ["Local activation tiles","actram","Quantized INT8 activations are stored stationary so matrix arithmetic can reuse them."],
+ ["The matrix unit","mxu","D=128, MCOLS=4 — four physical dot-product columns and their accumulation machinery."],
+ ["One column","col0","One stationary activation row spans eight chains of sixteen DSP48E1 PE positions."],
+ ["One chain","col0g0","The dedicated DSP48E1 PCIN/PCOUT cascade reduces partial sums without a separate full-width fabric adder at every PE."],
+ ["One processing element","col0g0pe0","A and D select weights; B carries the activation; M multiplies and P accumulates."],
+ ["Ternary arithmetic","tmm","BitNet reuses the integer datapath; on-board performance depends on row count, not theoretical peak alone."],
+ ["FP32 vector lanes","vpu","Eight FP32 lanes with two longer composite-function lanes complement the integer MXU."],
+ ["Pipeline and reductions","fops","FP32 multiply and add are separate rounded operations. A reduction tree handles vector sums."],
+ ["Physical logic","bitlogic","The RTL ends at mapped FPGA primitives. Going down to transistor cells becomes an explicitly labelled textbook explanation."],
+ ["Evidence and limits","hostlens","Real instruction timing, stalls and traces belong to otpu-lens and board reports, not an artistic animation."]
+].map(([title,id,caption])=>({title,id,caption}));
+
+let view="rack",selected="rack",mode="explore",flow=0,step=0,tour=0,follow=true,speed=1,timer=null,playing=false;
+let panX=0,panY=0,zoom=1,pointer=null,suppressClick=false;
+const svgRoot=$("diagram"),camera=$("camera"),overlay=$("overlay");
+const PLAY_DELAY=2100;
+const badgeFor=n=>n.status==="measured"?"Measured":n.status==="derived"?"Derived":n.status==="conceptual"?"Textbook / inferred":"RTL / documented";
+const scaleOf=id=>{
+ const n=id||"";
+ if(n==="rack")return"Computer · metre scale";
+ if(n==="pciecard")return"PCIe card · centimetre scale";
+ if(n==="fpga")return"FPGA die · millimetre scale (logical drawing)";
+ if(n==="logicgate"||n==="fet")return"Logic / nanometre-scale textbook";
+ if(n==="silicon")return"Crystal lattice · ~0.5 nm";
+ if(n==="atom")return"Atomic scale · ~0.1 nm";
+ if(n==="nucleus")return"Nucleus · femtometres";
+ if(n==="quarks")return"Subnuclear scale · not a chip feature";
+ return"RTL logical drawing · not a floorplan";
+};
+const ancestors=id=>{let a=[],n=DATA.get(id);while(n){a.unshift(n);n=DATA.get(n.parent)}return a};
+function say(msg){const t=$("toast");t.textContent=msg;t.style.display="block";clearTimeout(say.timeout);say.timeout=setTimeout(()=>{t.style.display="none"},2100)}
+function uiState(){
+ const p=new URLSearchParams();
+ p.set("view",view);if(mode==="flow"){p.set("flow",FLOWS[flow].key);p.set("step",String(step+1))}
+ if(mode==="tour"){p.set("tour",String(tour+1))}
+ const h="#"+p.toString();
+ if(location.hash!==h)history.replaceState(null,"",h);
+}
+function readState(){
+ const p=new URLSearchParams(location.hash.replace(/^#/,""));
+ const v=p.get("view");if(v&&DATA.has(v))view=v;
+ const fl=FLOWS.findIndex(x=>x.key===p.get("flow"));
+ if(fl>=0){mode="flow";flow=fl;step=Math.min(FLOWS[fl].steps.length-1,Math.max(0,(+p.get("step")||1)-1));}
+ else if(p.has("tour")){mode="tour";tour=Math.min(TOUR.length-1,Math.max(0,(+p.get("tour")||1)-1));}
+}
+function resetCamera(){zoom=1;panX=0;panY=0;applyCamera()}
+function applyCamera(){camera.setAttribute("transform","translate("+panX+" "+panY+") scale("+zoom+")")}
+const currentFlowStep=()=>mode==="flow"?FLOWS[flow].steps[step]:null;
+function navigate(id,fromStage=false){
+ if(!DATA.has(id))return;
+ view=id;selected=id;resetCamera();draw();
+ if(!fromStage)uiState();
+}
+function choose(id){if(!DATA.has(id))return;selected=id;inspect(id);mark();const n=DATA.get(id);$("selection-pill").hidden=n.children.length===0;$("selection-pill").textContent="Zoom into "+n.name+" ↳";$("selection-pill").onclick=()=>navigate(id);$("node-actions").replaceChildren();
+ if(id!==view){const b=html("button","", "Zoom into "+n.short+" ↳");b.onclick=()=>navigate(id);$("node-actions").appendChild(b);}
+ if(n.parent){const b=html("button","", "↑ Parent");b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b);}
+}
+function sourceLink(file,label){
+ const a=html("a","",label||file);a.href=SOURCE+file;a.target="_blank";a.rel="noopener noreferrer";return a;
+}
+function inspect(id){
+ const n=DATA.get(id);if(!n)return;
+ $("node-kicker").textContent=badgeFor(n).toUpperCase()+" · "+n.type.toUpperCase();
+ $("node-title").textContent=n.name;$("node-description").textContent=n.desc;
+ const facts=$("node-facts");facts.replaceChildren();
+ for(const [k,val] of Object.entries(n.facts)){const row=html("div","fact");row.appendChild(html("span","",k));row.appendChild(html("b","",val));facts.appendChild(row)}
+ $("node-note").textContent=n.note||"All measurements and capacities are bound to the linked target, version or dated test. Click a block to inspect; double-click to zoom inside.";
+ const s=$("node-sources");s.replaceChildren();if(n.src)s.appendChild(sourceLink(n.src));
+ for(const ex of n.extra)s.appendChild(sourceLink(ex));
+ $("provenance").textContent=badgeFor(n);$("node-count").textContent=n.children.length?n.children.length+" sub-parts":"finest documented part";
+ $("node-actions").replaceChildren();
+ if(id!==view){const b=html("button","", "Go into "+n.short+" ↳");b.onclick=()=>navigate(id);$("node-actions").appendChild(b)}
+ if(n.parent){const b=html("button","", "↑ Parent");b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b)}
+}
+function drawFrame(g,n){
+ E("rect",{x:20,y:16,width:1080,height:686,rx:18,fill:"#0e1e2d",stroke:"#3971a2","stroke-width":2},g);
+ E("rect",{x:38,y:32,width:1044,height:89,rx:11,fill:"url(#chip-grad)",stroke:"#5a8eb7","stroke-width":1.5},g);
+ text(g,56,64,n.name,29,"#f6f7fa",750);
+ const sub=n.short+" · "+n.children.length+" sub-parts";
+ text(g,56,94,sub,15,"#a5c6dc");
+ const k=n.status==="conceptual"?"TEXTBOOK":n.status==="measured"?"MEASURED":n.status==="derived"?"DERIVED":"RTL / CONFIG";
+ E("rect",{x:885,y:42,width:175,height:29,rx:14,fill:"#1d3c4c",stroke:"#64869f"},g);
+ text(g,972,62,k,12,"#cfe5f4",700).setAttribute("text-anchor","middle");
+}
+function classify(id){const n=DATA.get(id);return n.type==="physical"?"physical":n.type==="control"?"control":n.type==="memory"?"memory":"compute"}
+function makePart(g,id,x,y,w,h,opts={}){
+ const n=DATA.get(id);
+ const gg=E("g",{"class":"part "+classify(id)+(selected===id?" selected":""),role:"button",tabindex:0,"aria-label":n.name},g);
+ const shape=E("rect",{class:"shape",x,y,width:w,height:h,rx:10},gg);
+ if(opts.highlight)shape.setAttribute("stroke","#f4bd62");
+ const title=E("title",{},gg);title.textContent=n.desc;
+ const narrow=w<195,small=h<72;
+ const titleSize=narrow?15:18;
+ const chars=narrow?20:Math.max(18,Math.floor(w/10));
+ const cap=n.name.length>chars?n.name.slice(0,chars-1)+"…":n.name;
+ text(gg,x+13,y+Math.min(30,h/2),cap,titleSize,"#f4f8fb",720);
+ if(!small){
+  const desc=n.short||n.desc;
+  const sub=desc.length>Math.max(20,Math.floor(w/8))?desc.slice(0,Math.max(20,Math.floor(w/8))-1)+"…":desc;
+  text(gg,x+13,y+52,sub,12,"#b7cadb");
+  if(h>95)text(gg,x+13,y+h-15,(n.children.length?n.children.length+" deeper levels ↳":"see source ↗"),11,"#70c9df");
+ }
+ gg.addEventListener("click",ev=>{if(!suppressClick){choose(id)}ev.stopPropagation()});
+ gg.addEventListener("dblclick",ev=>{navigate(id);ev.stopPropagation()});
+ gg.addEventListener("keydown",ev=>{if(ev.key==="Enter"){ev.preventDefault();navigate(id)}else if(ev.key===" "){ev.preventDefault();choose(id)}});
+ return gg;
+}
+
+function line(g,x1,y1,x2,y2,color="#5a89ad",thick=3){
+ return E("path",{d:"M"+x1+" "+y1+" L"+x2+" "+y2,stroke:color,"stroke-width":thick,fill:"none"},g);
+}
+function point(g,x,y,r=5,color="#76a3c9"){E("circle",{cx:x,cy:y,r,fill:color},g)}
+function bus(g,x,y,w,label,color="#7ba9c9"){
+ E("rect",{x,y,width:w,height:23,rx:5,stroke:color,fill:"#173047"},g);
+ text(g,x+w/2,y+16,label,12,"#e5eff8",600).setAttribute("text-anchor","middle");
+}
+function watermark(g,label="Illustrative logical drawing · not a placed FPGA floorplan"){
+ text(g,560,691,label,11,"#829eb2").setAttribute("text-anchor","middle");
+}
+function specialized(g,n){
+ const id=n.id;
+ if(id==="rack"){
+  makePart(g,"host",65,193,405,376);
+  makePart(g,"pciecard",646,193,404,376);
+  line(g,470,350,646,350,"#e3a75c",8);
+  bus(g,492,310,132,"PCIe", "#c59a60");
+  bus(g,400,602,320,"Compiler → DMA → results");
+  watermark(g,"Two real machines / components, positioned for explanation only");
+  return true;
+ }
+ if(id==="pciecard"){
+  E("rect",{x:70,y:171,width:976,height:457,rx:20,fill:"#123b35",stroke:"#3ea681","stroke-width":3},g);
+  for(let i=0;i<16;i++)E("rect",{x:210+i*34,y:618,width:22,height:23,fill:"#b59a4d",rx:2},g);
+  makePart(g,"fpga",258,253,528,252);
+  makePart(g,"ddr0",98,224,150,155);
+  makePart(g,"ddr1",798,224,218,155);
+  makePart(g,"powers",98,400,150,134);
+  bus(g,310,551,414,"PCIe XDMA Gen2 x8 endpoint");
+  watermark(g,"Board component placement is schematic, not a board-photo or PCB drawing");
+  return true;
+ }
+ if(id==="fpga"){
+  E("rect",{x:80,y:170,width:964,height:458,rx:18,fill:"#132f4b",stroke:"#4f88bd","stroke-width":3},g);
+  makePart(g,"shell",101,197,238,320);
+  makePart(g,"slice",348,197,482,320);
+  makePart(g,"bitlogic",839,197,182,320);
+  bus(g,195,550,725,"Shared FPGA clock · arbitration · routing");
+  watermark(g,"Die geometry is illustrative; original physical placement is not provided by openTPU RTL");
+  return true;
+ }
+ if(id==="slice"){
+  const plan=[
+   ["seq",56,181,325,130],["dma",399,181,328,130],["tmem",745,181,321,130],
+   ["mxu",56,387,326,150],["vpu",399,387,328,150],["quant",744,387,322,150],
+   ["actram",55,559,312,95],["collective",397,559,324,95]
+  ];
+  bus(g,72,328,975,"TMEM / DRAM arbitration and unit dependency handshakes","#b29af0");
+  for(const [part,x,y,w,h] of plan){
+   makePart(g,part,x,y,w,h);
+   if(y===181)line(g,x+w/2,y+h,x+w/2,328,"#6389aa");
+   if(y===387)line(g,x+w/2,351,x+w/2,y,"#6389aa");
+  }
+  watermark(g,"All units execute concurrently if dependencies and memory grants allow");
+  return true;
+ }
+ if(id==="mxu"){
+  makePart(g,"weights",62,191,457,108);makePart(g,"stationary",609,191,448,108);
+  line(g,295,299,295,328,"#edb36e",4);line(g,824,299,824,328,"#5dccaa",4);
+  bus(g,146,328,831,"WEIGHT STREAM + STATIONARY ACTIVATIONS", "#7caaca");
+  makePart(g,"array",141,368,830,135);
+  line(g,559,503,559,536,"#76b9d5",4);
+  makePart(g,"epilogue",141,537,390,111);makePart(g,"tmm",579,537,392,111);
+  watermark(g,"D=128 · MCOLS=4 · int8 arithmetic peak 512 MAC/cycle");
+  return true;
+ }
+ if(id==="array"){
+  bus(g,56,160,1010,"ONE WEIGHT CHUNK STREAMED ACROSS ALL FOUR COLUMNS", "#d4a165");
+  for(let c=0;c<4;c++){
+   const x=60+c*254;
+   makePart(g,"col"+c,x,208,238,384);
+   for(let i=0;i<8;i++){
+    E("rect",{x:x+16,y:288+i*30,width:206,height:23,rx:4,fill:i%2?"#285f80":"#1d425e",stroke:"#4085b6"},g);
+    text(g,x+119,305+i*30,"16 DSP chain · group "+i,12,"#dcebf7").setAttribute("text-anchor","middle");
+   }
+  }
+  watermark(g,"Eight chains per column · sixteen DSP48E1 positions per chain · 512 product positions total");
+  return true;
+ }
+ if(/^col[0-3]$/.test(id)){
+  const num=Number(id.slice(3));
+  bus(g,66,166,988,"Column "+num+" · 128 INT8 products, grouped into eight PCIN/PCOUT cascades","#91bae1");
+  for(let i=0;i<8;i++){
+    const x=66+(i%4)*250,y=211+Math.floor(i/4)*196;
+    const gn=id+"g"+i;makePart(g,gn,x,y,232,167);
+    for(let j=0;j<16;j++)E("rect",{x:x+13+(j%8)*26,y:y+82+Math.floor(j/8)*28,width:19,height:18,rx:2,fill:"#266b86",stroke:"#67a8d0"},g);
+  }
+  bus(g,248,630,624,"16-products/group → 8 group sums → column end");
+  return true;
+ }
+ if(/^col[0-3]g[0-7]$/.test(id)){
+  const p=id;
+  bus(g,95,171,930,"DSP48E1 chain: each PE multiplies INT8, then adds PCIN to M");
+  for(let i=0;i<16;i++){
+   const x=72+(i%8)*124,y=225+Math.floor(i/8)*201;
+   makePart(g,p+"pe"+i,x,y,115,175);
+   if(i%8<7)line(g,x+115,y+86,x+124,y+86,"#f3b75c",3);
+   if(i===7)line(g,1067,310,1067,510,"#f3b75c",4);
+  }
+  bus(g,195,645,730,"PCIN → product + accumulate → PCOUT");
+  return true;
+ }
+ if(/pe\d+$/.test(id)&&id.includes("col")){
+  const placements=[
+    ["areg",69,193,299,105],["inmode",424,193,292,105],
+    ["breg",769,193,278,105],["product",414,356,308,121],
+    ["psum",146,542,333,95],["cascade",647,542,337,95]
+  ];
+  for(const [suffix,x,y,w,h] of placements)makePart(g,id+suffix,x,y,w,h);
+  line(g,215,298,483,356,"#eca953",4);line(g,569,298,569,356,"#eca953",4);line(g,902,298,662,356,"#eca953",4);
+  line(g,555,477,318,542,"#d7b47a",4);line(g,479,590,647,590,"#d7b47a",4);
+  bus(g,384,657,358,"DSP48E1 multiplier + accumulator");
+  return true;
+ }
+ if(id==="tmem"){
+  makePart(g,"bankArb",78,182,444,116);makePart(g,"bypass",591,182,440,116);
+  bus(g,90,325,940,"TMEM logical bank = word address % 8","#57c8ab");
+  makePart(g,"banks",80,393,454,174);makePart(g,"bram",591,393,438,174);
+  bus(g,230,603,665,"65,536 FP32 words × 4 bytes = 256 KiB");
+  watermark(g,"Memory requests are resource-limited; not a cache automatically fetching DDR3 weights");
+  return true;
+ }
+ if(id==="banks"){
+  bus(g,80,169,960,"8 logical TMEM banks · each 8,192 32-bit words","#3cbe96");
+  for(let i=0;i<8;i++){
+   const x=84+(i%4)*242,y=215+Math.floor(i/4)*186;
+   makePart(g,"bank"+i,x,y,221,160);
+   for(let j=0;j<12;j++)E("rect",{x:x+13+j*16,y:y+75,width:13,height:52,rx:2,fill:j%3===0?"#267764":"#21594c",stroke:"#319a83"},g);
+  }
+  bus(g,190,627,740,"bank = word address mod LANES = address mod 8");
+  return true;
+ }
+ if(id==="vpu"){
+  bus(g,93,161,923,"One FP32 word per VPU lane for simple vector operations","#7bb4e7");
+  makePart(g,"vpuLane",83,230,452,242);makePart(g,"fops",589,230,448,242);
+  for(let i=0;i<8;i++)E("rect",{x:103+i*53,y:328,width:44,height:60,rx:5,fill:i<2?"#36596f":"#204566",stroke:i<2?"#82cbec":"#4b96b9"},g);
+  makePart(g,"reduction",83,524,452,111);makePart(g,"composite",589,524,448,111);
+  watermark(g,"This VPU is a distinct datapath from the systolic MXU; no independent FP32 tensor FMA array is invented");
+  return true;
+ }
+ if(id==="quant"){
+  const steps=["quantread","quantmax","quantround","quantwrite"];
+  for(let i=0;i<steps.length;i++){
+    const x=80+i*255;makePart(g,steps[i],x,278,234,200);
+    if(i<3)line(g,x+234,373,x+255,373,"#e6ad67",4);
+  }
+  bus(g,155,568,820,"FP32 TMEM → scale / offset → INT8 ACT RAM");
+  return true;
+ }
+ if(id==="scoreboard"){
+  const p=["hazard","ready","waitcounts"];for(let i=0;i<3;i++)makePart(g,p[i],89+i*350,220,315,215);
+  for(let r=0;r<6;r++)for(let c=0;c<9;c++)E("rect",{x:200+c*75,y:503+r*19,width:55,height:11,rx:2,fill:(r*3+c)%5===0?"#9569bf":"#334c69",stroke:"#54769b"},g);
+  text(g,560,657,"Conceptual dependency matrix: RAW, WAR, WAW · specific content is runtime-dependent",13,"#b2c6d5").setAttribute("text-anchor","middle");
+  return true;
+ }
+ if(id==="pciecard"||id==="dram")return false;
+ return false;
+}
+
+function drawChildren(g,n){
+ const items=n.children;
+ if(!items.length){drawLeaf(g,n);return}
+ let cols=items.length<=2?items.length:items.length<=6?3:items.length<=9?3:items.length<=12?4:4;
+ const rows=Math.ceil(items.length/cols),left=55,top=177,width=1010,gapX=14,gapY=16;
+ const h=items.length>12?109:Math.min(194,Math.floor((473-(rows-1)*gapY)/rows));
+ const w=(width-(cols-1)*gapX)/cols;
+ const center=560;
+ if(items.length<=9){
+  E("line",{class:"wire",x1:center,y1:121,x2:center,y2:147},g);
+  E("line",{class:"wire",x1:left+w/2,y1:147,x2:left+width-w/2,y2:147},g);
+ }
+ items.forEach((id,i)=>{
+  const x=left+(i%cols)*(w+gapX),y=top+Math.floor(i/cols)*(h+gapY);
+  if(items.length<=9)E("line",{class:"wire",x1:x+w/2,y1:147,x2:x+w/2,y2:y},g);
+  makePart(g,id,x,y,w,h,{highlight:id===selected});
+ });
+ if(items.length===1)text(g,560,617,"Double-click the outlined block to descend one level",16,"#9ab0c3").setAttribute("text-anchor","middle");
+ // Visual bus: communication is conceptual; the exact timing is in the named RTL.
+ if(["slice","mxu","array","tmem","dram","fpga"].includes(n.id)){
+  E("rect",{x:55,y:660,width:1010,height:24,rx:5,fill:"#23374a",stroke:"#456580"},g);
+  text(g,560,677,n.id==="array"?"DSP48E1 cascades · 16 positions per group":n.id==="tmem"?"TMEM arbiter / bank routing":"Logical data and control paths · consult RTL for arbitration",12,"#b9cad6").setAttribute("text-anchor","middle");
+ }
+}
+function drawLeaf(g,n){
+ // Functional and physical terminal views — explicit schematic, never an implied physical floorplan.
+ if(n.id==="quarks"){
+  const colors=["#e28967","#7ba8df","#e28967"];
+  [["u",410],["u",710],["d",560]].forEach((p,i)=>{E("circle",{cx:p[1],cy:i===2?485:310,r:82,fill:colors[i]+"66",stroke:colors[i],"stroke-width":3},g);text(g,p[1],(i===2?485:310)+10,p[0],35,"#f1f5f9",700).setAttribute("text-anchor","middle")});
+  text(g,560,638,"Valence quarks of a proton: up · up · down (textbook)",16,"#a7c3d5").setAttribute("text-anchor","middle");
+ } else if(n.id==="atom"||n.id==="nucleus"){
+  E("circle",{cx:560,cy:404,r:82,fill:"#bf755255",stroke:"#f2b775","stroke-width":2},g);
+  text(g,560,411,"Si nucleus",19,"#ffffff",700).setAttribute("text-anchor","middle");
+  if(n.id==="atom")for(let i=0;i<14;i++){let theta=i*2*Math.PI/14;E("circle",{cx:560+220*Math.cos(theta),cy:404+181*Math.sin(theta),r:7,fill:"#8fbdff"},g)}
+  text(g,560,645,n.id==="atom"?"Neutral silicon: 14 protons, 14 electrons · schematic":"Nuclear constituents · schematic",14,"#b5c7d9").setAttribute("text-anchor","middle");
+ } else if(n.id==="dramCell"){
+  drawCell(g,"dram");
+ }else if(n.id.startsWith("cell")||n.id==="sramcell"){
+  drawCell(g,"sram");
+ }else if(n.id==="fet"||n.id==="logicgate"){
+  drawCell(g,"mos");
+ }else if(n.id.includes("product")||n.id==="mul"){
+  drawBitGrid(g,n);
+ }else if(n.id.includes("cascade")||n.id.includes("psum")||n.id==="carry"){
+  drawAdder(g);
+ }else if(n.id==="lut"){
+  drawBitGrid(g,n);
+ }else{
+  const box=E("rect",{x:170,y:210,width:780,height:365,rx:18,fill:"#192b3c",stroke:n.type==="physical"?"#c99e58":"#5b9ac2","stroke-width":2},g);
+  const splits=n.desc.match(/.{1,75}(?:\s|$)/g)||[n.desc];
+  for(let i=0;i<Math.min(5,splits.length);i++)text(g,560,310+i*29,splits[i].trim(),17,"#dceaf5").setAttribute("text-anchor","middle");
+  text(g,560,520,n.status==="conceptual"?"Textbook explanation · not an extracted hardware netlist":"RTL source linked in the details panel",13,"#e5bc7d").setAttribute("text-anchor","middle");
+ }
+}
+function drawAdder(g){
+ const names=[["A",150],["B",360],["CIN",570],["XOR / majority",780]];
+ names.forEach(q=>{E("rect",{x:q[1],y:290,width:q[0]==="XOR / majority"?180:150,height:112,rx:10,fill:"#1c3449",stroke:"#6ba8d1","stroke-width":2},g);text(g,q[1]+(q[0]==="XOR / majority"?90:75),345,q[0],q[0]==="XOR / majority"?16:22,"#fff",700).setAttribute("text-anchor","middle")});
+ E("path",{d:"M300 345H360 M510 345H570 M720 345H780",class:"wire"},g);
+ text(g,560,560,"SUM = A ⊕ B ⊕ CIN · COUT = AB + ACIN + BCIN",17,"#ded9cb").setAttribute("text-anchor","middle");
+}
+function drawBitGrid(g,n){
+ text(g,560,205,"16 × 16 conceptual arithmetic bitfield",19,"#dbeffc",700).setAttribute("text-anchor","middle");
+ for(let r=0;r<16;r++)for(let c=0;c<16;c++){E("rect",{x:265+c*36,y:226+r*23,width:29,height:17,rx:2,fill:(r+c)%5===0?"#bf7942":(r+c)%3===0?"#295e79":"#17344d",stroke:"#5185a1","stroke-width":.5},g)}
+ text(g,560,644,n.id==="lut"?"LUT6: 6 input bits select one of 64 configuration values":"Conceptual datapath bits; DSP48E1 internal gate topology is not public here",13,"#b9c8d7").setAttribute("text-anchor","middle");
+}
+function drawCell(g,what){
+ const names=what==="dram"?["BITLINE","ACCESS MOS","CAPACITOR"]:what==="sram"?["BIT / BIT̅","ACCESS MOS","CROSS-COUPLED INV."]:["GATE","SOURCE / DRAIN","CHANNEL"];
+ text(g,560,209,what==="dram"?"1T1C DRAM storage cell":what==="sram"?"6T SRAM textbook cell":"Ideal CMOS transistor and switch",19,"#f5cf91",700).setAttribute("text-anchor","middle");
+ names.forEach((s,i)=>{
+  const x=170+i*275;E("rect",{x,y:300,width:225,height:175,rx:12,fill:"#2d281f",stroke:"#d4a568","stroke-width":2},g);
+  text(g,x+112,358,s,16,"#efdbba",700).setAttribute("text-anchor","middle");
+  if(i<2)E("line",{class:"wire",x1:x+225,y1:388,x2:x+275,y2:388},g);
+ });
+ text(g,560,553,"Functional semiconductor model — source RTL contains no transistor extraction",14,"#b4bfc7").setAttribute("text-anchor","middle");
+}
+function mark(){
+ const c=DATA.get(selected);$("scene-status").textContent=c?c.name:"";
+ $("minimap").textContent=ancestors(view).map(n=>n.short).slice(-5).join(" › ");
+ // For deep focus the outline is already drawn by makePart; when on current node, highlight heading.
+ const os=$("overlay");os.replaceChildren();
+ if(mode==="flow"||mode==="tour"){
+  const key=mode==="flow"?FLOWS[flow].steps[step].id:TOUR[tour].id;
+  const match=key===view||DATA.get(key)?.parent===view;
+  if(match){
+    E("rect",{class:"focus-ring",x:32,y:26,width:1057,height:97,rx:15},os);
+    if(mode==="flow"){
+      E("path",{class:"trace-edge",d:"M160 145H960", "marker-end":"url(#flow-arrow)"},os);
+    }
+  }
+ }
+}
+function draw(){
+ const n=DATA.get(view);if(!n)return;
+ camera.replaceChildren();
+ const g=E("g",{},camera);
+ drawFrame(g,n);if(!specialized(g,n))drawChildren(g,n);
+ $("scene-scale").textContent=scaleOf(view);
+ $("breadcrumbs").replaceChildren();
+ ancestors(view).forEach((n,i)=>{
+  if(i)$("breadcrumbs").appendChild(html("span","muted","›"));
+  const b=html("button","crumb",n.short);
+  b.onclick=()=>navigate(n.id);$("breadcrumbs").appendChild(b);
+ });
+ $("btn-up").disabled=!n.parent;
+ $("selection-pill").hidden=true;
+ inspect(selected= view);
+ $("node-actions").replaceChildren();
+ if(n.parent){let b=html("button","", "↑ Back to "+DATA.get(n.parent).name);b.onclick=()=>navigate(n.parent);$("node-actions").appendChild(b)}
+ for(const ch of n.children.slice(0,7)){const b=html("button","", "Explore "+DATA.get(ch).short);b.onclick=()=>navigate(ch);$("node-actions").appendChild(b)}
+ applyCamera();mark();
+}
+function showStage(){
+ let id,cap,title,src,kind="documented",tags=[];
+ if(mode==="flow"){
+  const item=FLOWS[flow].steps[step];id=item.id;title=item.title;cap=item.caption;src=item.src;kind=item.kind;tags=item.tags;
+  $("cap-label").textContent="FLOW "+FLOWS[flow].key+" · "+FLOWS[flow].name.toUpperCase()+" · "+(step+1)+"/"+FLOWS[flow].steps.length;
+  $("caption").textContent=cap;
+  $("cap-extra").textContent=FLOWS[flow].summary+" · Animation is illustrative, not measured timing.";
+ }else if(mode==="tour"){
+  const item=TOUR[tour];id=item.id;title=item.title;cap=item.caption;src=DATA.get(id).src;kind=DATA.get(id).status;
+  $("cap-label").textContent="GUIDED TOUR · SLIDE "+(tour+1)+" / "+TOUR.length;
+  $("caption").textContent=cap;$("cap-extra").textContent="Use ← / → to explore 18 chapters; T to toggle tour.";
+ }else{
+  $("cap-label").textContent="EXPLORE";$("caption").textContent="Click a component for sourced details. Double-click or press Enter to zoom into it. Select a flow to see hardware data movement.";$("cap-extra").textContent="Space: play · ← →: steps · +/-: hierarchy zoom · F: present · P: panel";
+  $("stage-details").hidden=true;
+  renderSteps();mark();return;
+ }
+ $("stage-details").hidden=false;
+ $("flow-stage-title").textContent=title;$("flow-stage-description").textContent=cap;
+ const a=$("flow-stage-source");a.href=SOURCE+src;a.textContent="Source: "+src;
+ const tagDiv=$("flow-stage-tags");tagDiv.replaceChildren();
+ [kind,...tags].forEach(t=>tagDiv.append(html("span","",t)));
+ if(follow)navigate(id,true);else{selected=id;inspect(id);}
+ $("tour-dots").replaceChildren();
+ if(mode==="tour")TOUR.forEach((t,i)=>{let b=html("button","tour-dot"+(i===tour?" on":""),"");b.setAttribute("aria-label","Slide "+(i+1));b.title=t.title;b.onclick=()=>{tour=i;showStage()};$("tour-dots").appendChild(b)});
+ renderSteps();mark();uiState();
+}
+function renderSteps(){
+ document.querySelectorAll(".flow-btn").forEach(b=>b.classList.toggle("active",mode==="flow"&&b.dataset.key===FLOWS[flow].key));
+ const box=$("stage-buttons");box.replaceChildren();
+ const items=mode==="flow"?FLOWS[flow].steps:mode==="tour"?TOUR:[];
+ items.forEach((item,i)=>{
+  const current=mode==="flow"?step:tour;
+  const b=html("button","stage-chip"+(i===current?" current":""),(i+1)+". "+item.title);
+  b.title=item.title;b.onclick=()=>{if(mode==="flow")step=i;else tour=i;showStage()};
+  box.appendChild(b);
+  if(i===current&&typeof b.scrollIntoView==="function")b.scrollIntoView({block:"nearest",inline:"nearest"});
+ });
+ $("btn-prev").disabled=!items.length;$("btn-next").disabled=!items.length;
+ $("btn-play").textContent=playing?"Ⅱ Pause":"▶ Play";
+ $("btn-tour").textContent=mode==="tour"?"Exit tour":"Tour";
+}
+function stop(){if(timer!==null){clearInterval(timer);timer=null}playing=false;renderSteps()}
+function move(delta){
+ if(mode==="explore"){if(delta>0){const n=DATA.get(view);if(n.children.length)navigate(n.children[0])}else{const n=DATA.get(view);if(n.parent)navigate(n.parent)}return}
+ if(mode==="flow"){const lim=FLOWS[flow].steps.length;step=Math.min(lim-1,Math.max(0,step+delta))}
+ else tour=Math.min(TOUR.length-1,Math.max(0,tour+delta));
+ showStage();
+}
+function play(){
+ if(playing){stop();return}
+ if(mode==="explore"){startFlow(0);return}
+ playing=true;
+ const tick=()=>{
+  const index=mode==="flow"?step:tour,lim=mode==="flow"?FLOWS[flow].steps.length:TOUR.length;
+  if(index>=lim-1){stop();return}
+  move(1);
+ };
+ timer=setInterval(tick,PLAY_DELAY/speed);renderSteps();
+}
+function startFlow(i){stop();mode="flow";flow=i;step=0;$("tour-dots").replaceChildren();showStage()}
+function toggleTour(){stop();if(mode==="tour"){mode="explore";showStage();uiState()}else{mode="tour";tour=0;showStage()}}
+function flowButtons(){
+ FLOWS.forEach((entry,i)=>{
+  const b=html("button","flow-btn");b.dataset.key=entry.key;b.title=entry.summary;
+  b.appendChild(html("span","key",entry.key));b.appendChild(html("span","",entry.name));
+  b.onclick=()=>startFlow(i);$("flow-nav").appendChild(b);
+ });
+}
+function search(){
+ const inp=$("node-search"),p=$("search-results");p.replaceChildren();
+ const q=inp.value.trim().toLowerCase();p.hidden=!q;
+ if(!q)return;
+ const matches=[...DATA.values()].filter(n=>(n.name+" "+n.id+" "+n.src).toLowerCase().includes(q)).slice(0,30);
+ matches.forEach(n=>{const b=html("button","",n.name);b.title=n.id;b.onclick=()=>{navigate(n.id);inp.value="";p.hidden=true};p.appendChild(b)});
+ if(!matches.length)p.appendChild(html("div","muted","No hardware node found"));
+}
+flowButtons();readState();draw();showStage();
+$("btn-up").onclick=()=>{let p=DATA.get(view).parent;if(p)navigate(p)};
+$("btn-home").onclick=()=>navigate("rack");
+$("btn-zin").onclick=()=>{zoom=Math.min(3.5,zoom*1.25);applyCamera()};
+$("btn-zout").onclick=()=>{zoom=Math.max(.5,zoom/1.25);applyCamera()};
+$("btn-prev").onclick=()=>move(-1);$("btn-next").onclick=()=>move(1);
+$("btn-play").onclick=play;
+$("btn-speed").onclick=()=>{speed=speed===1?2:speed===2?0.5:1;$("btn-speed").textContent=speed+"×";if(playing){stop();play()}};
+$("btn-follow").onclick=()=>{follow=!follow;$("btn-follow").classList.toggle("on",follow);$("btn-follow").textContent=follow?"Follow":"Manual";};
+$("btn-tour").onclick=toggleTour;
+$("btn-panel").onclick=()=>document.body.classList.toggle("panel-hidden");
+$("btn-panel-close").onclick=()=>document.body.classList.add("panel-hidden");
+$("btn-present").onclick=()=>{
+ if(document.fullscreenElement){document.exitFullscreen?.()}else{document.documentElement.requestFullscreen?.().catch(()=>say("Fullscreen unavailable in this browser"))}
+};
+$("node-search").addEventListener("input",search);
+$("btn-copy").onclick=async()=>{uiState();try{await navigator.clipboard.writeText(location.href);say("Link copied")}catch(e){say("Copy URL from the address bar")}};
+const wrap=$("svg-wrap");
+svgRoot.addEventListener("wheel",ev=>{ev.preventDefault();const factor=ev.deltaY<0?1.13:.88;zoom=Math.max(.5,Math.min(3.5,zoom*factor));applyCamera()},{passive:false});
+svgRoot.addEventListener("pointerdown",e=>{if(e.button!==0)return;pointer={x:e.clientX,y:e.clientY,panX,panY};suppressClick=false;wrap.classList.add("dragging");svgRoot.setPointerCapture?.(e.pointerId)});
+svgRoot.addEventListener("pointermove",e=>{
+ if(!pointer)return;
+ const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
+ if(Math.abs(dx)+Math.abs(dy)>6)suppressClick=true;
+ const w=svgRoot.getBoundingClientRect().width||1120,s=1120/w;
+ panX=pointer.panX+dx*s;panY=pointer.panY+dy*s;applyCamera();
+});
+const done=e=>{pointer=null;wrap.classList.remove("dragging");try{svgRoot.releasePointerCapture?.(e.pointerId)}catch(err){}setTimeout(()=>suppressClick=false,0)};
+svgRoot.addEventListener("pointerup",done);svgRoot.addEventListener("pointercancel",done);
+window.addEventListener("hashchange",()=>{const oldView=view,oldMode=mode;readState();if(oldView!==view||oldMode!==mode){draw();showStage()}});
+document.addEventListener("keydown",e=>{
+ if(["INPUT","TEXTAREA","SELECT"].includes(e.target?.tagName)||e.ctrlKey||e.altKey||e.metaKey)return;
+ const key=e.key.toLowerCase();
+ if(key===" "){e.preventDefault();play()}else if(e.key==="ArrowRight"){e.preventDefault();move(1)}else if(e.key==="ArrowLeft"){e.preventDefault();move(-1)}
+ else if(key==="backspace"||key==="-"){e.preventDefault();const p=DATA.get(view).parent;if(p)navigate(p)}
+ else if(key==="+"){const n=DATA.get(selected);if(n)navigate(selected)}
+ else if(key==="t"){toggleTour()}else if(key==="p"){document.body.classList.toggle("panel-hidden")}
+ else if(key==="c"){$("btn-follow").click()}else if(key==="f"){$("btn-present").click()}
+ else if(key==="s"){$("btn-speed").click()}
+ else{const ix=FLOWS.findIndex(f=>f.key.toLowerCase()===key);if(ix>=0)startFlow(ix)}
+});
+
+const PROFILE={data:null,items:[],index:0,timer:null};
+const UNIT_TO_ID={DMA:"dma",MXU:"mxu",QUANT:"quant",VPU:"vpu",COLL:"collective"};
+function profileStop(){if(PROFILE.timer!==null){clearInterval(PROFILE.timer);PROFILE.timer=null;$("pf-play").textContent="▶ Play starts"}}
+function profileAt(index){
+ if(!PROFILE.data)return;
+ const items=PROFILE.items;
+ PROFILE.index=Math.min(Math.max(0,index),Math.max(0,items.length-1));
+ $("pf-pos").value=PROFILE.index;$("pf-pos-label").textContent=items.length?PROFILE.index+1+" / "+items.length:"0 / 0";
+ const ev=$("pf-event");ev.replaceChildren();
+ if(!items.length){ev.textContent="This profile has no per-instruction events (e.g. board counter snapshots). Use the source otpu-lens summary for aggregate metrics.";return}
+ const row=items[PROFILE.index],p=PROFILE.data;
+ const unit=Array.isArray(p.units)?p.units[Number(row[3])]:String(row[3]);
+ const op=String(row[4]||"unknown");
+ const start=Number(row[9]),end=Number(row[10]),mhz=Number(p.clock_mhz)||0;
+ const srcLabel=Array.isArray(p.sources)&&p.sources[row[11]]?JSON.stringify(p.sources[row[11]]):"source index "+row[11];
+ const head=html("div","row");head.appendChild(html("b","",unit+" · "+op));
+ head.appendChild(html("span","muted","slice "+row[0]+" · instruction "+row[1]+" · PC "+row[2]));
+ ev.append(head);
+ const p1=html("p","",String(row[5]||""));ev.appendChild(p1);
+ ev.appendChild(html("p","", "start cycle "+start+", end "+end+" (duration "+Math.max(0,end-start)+" cycles)"+
+   (mhz?" · start "+(start/mhz).toFixed(2)+" µs, duration "+((end-start)/mhz).toFixed(2)+" µs":"")));
+ ev.appendChild(html("p","muted small","Dispatch "+row[6]+" · ready "+row[7]+" · release "+row[8]+" · "+srcLabel));
+ const id=UNIT_TO_ID[unit];
+ if(id){stop();mode="explore";showStage();navigate(id);choose(id);$("scene-status").textContent="PROFILE EVENT: "+unit+" "+op+" @ cycle "+start;}
+}
+function loadProfile(p){
+ if(!p||typeof p!=="object")throw Error("No profile object");
+ if(p.format==="openTPU-profile"&&Array.isArray(p.profiles)){
+  if(p.version>1)throw Error("Future .otpuprof schema version "+p.version+" not supported");
+  if(!p.profiles.length)throw Error("File contains no profiles");
+  p=p.profiles[0];
+ }else if(p.version>1&&p.format==="openTPU-profile"){throw Error("Unsupported format version")}
+ if(!Number.isFinite(Number(p.cycles))||!Array.isArray(p.instrs))throw Error("Not an openTPU profile: expected cycles and instrs array");
+ PROFILE.data=p;
+ PROFILE.items=p.instrs.filter(r=>Array.isArray(r)&&Number.isFinite(Number(r[9]))&&Number(r[9])>=0).sort((a,b)=>Number(a[9])-Number(b[9]));
+ PROFILE.index=0;$("profile-empty").hidden=true;$("profile-view").hidden=false;
+ $("pf-name").textContent=String(p.name||"Unnamed workload");$("pf-kind").textContent=String(p.kind||"unknown").toUpperCase();
+ $("pf-cycles").textContent=Number(p.cycles).toLocaleString();$("pf-clock").textContent=p.clock_mhz+" MHz";
+ $("pf-pos").max=Math.max(0,PROFILE.items.length-1);$("pf-pos").value=0;
+ profileAt(0);
+}
+$("profile-file").addEventListener("change",async ev=>{
+ profileStop();
+ const file=ev.target.files?.[0];if(!file)return;
+ try{
+  if(file.size>65_000_000)throw Error("Compressed profile is too large for this browser viewer (65 MB limit)");
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let raw;
+  if(bytes[0]===0x1f&&bytes[1]===0x8b){
+   if(typeof DecompressionStream==="undefined")throw Error("This browser cannot decompress gzip natively. Export an uncompressed JSON profile or use otpu-lens.");
+   const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+   raw=await new Response(stream).text();
+  }else raw=new TextDecoder().decode(bytes);
+  if(raw.length>120_000_000)throw Error("Uncompressed profile exceeds 120 MB");
+  loadProfile(JSON.parse(raw));say("Loaded "+PROFILE.items.length+" real instruction events");
+ }catch(error){$("profile-empty").hidden=false;$("profile-empty").textContent="Could not load the profile: "+(error?.message||String(error));$("profile-view").hidden=true;say("Profile parse failed");}
+});
+$("pf-next").onclick=()=>profileAt(PROFILE.index+1);
+$("pf-back").onclick=()=>profileAt(PROFILE.index-1);
+$("pf-pos").addEventListener("input",()=>profileAt(Math.floor(Number($("pf-pos").value)||0)));
+$("pf-play").onclick=()=>{
+ if(PROFILE.timer!==null){profileStop();return}
+ if(!PROFILE.items.length)return;
+ PROFILE.timer=setInterval(()=>{if(PROFILE.index>=PROFILE.items.length-1){profileStop();return}profileAt(PROFILE.index+1)},750);
+ $("pf-play").textContent="Ⅱ Pause real starts";
+};
+
+window.__openTPUAtlasChecks={
+ version:"2.0",nodes:PATHNODES(),flows:FLOWS.length,tour:TOUR.length,
+ view:()=>view,mode:()=>mode,selected:()=>selected,
+ goto:id=>navigate(id),
+ playFlow:key=>{const i=FLOWS.findIndex(f=>f.key===key);if(i<0)throw Error("Unknown flow");startFlow(i)},
+ status:()=>({node:view,stage:step,flow:FLOWS[flow].name,steps:FLOWS[flow].steps.length}),
+ getNode:id=>{const n=DATA.get(id);return n?{id:n.id,name:n.name,parent:n.parent,children:n.children.length,source:n.src}:null}
+};
+})();
+
+</script>
 </body>
 </html>
