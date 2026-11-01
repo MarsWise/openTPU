@@ -7,7 +7,9 @@ projections of the prefix K / V, the action head and the update) run on the devi
 tensors in the card's DRAM. The host writes the preprocessed image(s) (the policy's
 resize / pad / [-1, 1] normalization), the state, the noise and the language token ids'
 embedding rows' addresses (the tokenizer's ids: a device copy of each table row), launches the
-programs and reads the actions.
+programs and reads the actions. With device_noise (Config.VRAND) the host writes a seed and the
+device draws the flow's initial noise (kernels/randn.py; VLA.noise(seed) the same values on the
+host, bit for bit): FPGA-only.
 
 build(policy, cfg, n_lang) -> VLA; VLA.image(...), VLA.programs(), VLA.actions(img).
 """
@@ -46,6 +48,12 @@ class VLA:
         self.enc = g.compile(enc_ops)
         self.step = [g.compile(o) for o in step_ops]
         self.steps, self.chunk, self.A = steps, chunk, A
+        self.seed = None                       # device_noise: the seed's word
+
+    def noise(self, seed: int) -> np.ndarray:
+        """device_noise: the initial noise [chunk, A] the device draws from `seed`."""
+        from .kernels.randn import seeded_reference
+        return seeded_reference(self.chunk, self.A, seed, 0)
 
     def programs(self) -> list:
         out = list(self.enc)
@@ -53,9 +61,9 @@ class VLA:
             out += s
         return out
 
-    def image(self, images, state, noise) -> np.ndarray:
+    def image(self, images, state, noise, seed: int | None = None) -> np.ndarray:
         """images: [C, H, W] each (the policy's preprocessed pixels); state [max_state_dim];
-        noise [chunk, max_action_dim]."""
+        noise [chunk, max_action_dim], or with device_noise None and the `seed`."""
         g = self.g
         img = g.image()
         f = img.view(np.float32)
@@ -65,6 +73,11 @@ class VLA:
                 o = (t.addr + 4 * ((t.border + h) * t.rs + t.border * t.C)) // 4
                 f[o:o + t.W * t.C] = x[h].reshape(-1)
         g.put(img, self.state, np.asarray(state, np.float32).reshape(1, -1))
+        if self.seed is not None:
+            if seed is None or noise is not None:
+                raise ValueError("device_noise: a seed, and no host noise")
+            img.view(np.uint32)[self.seed.addr // 4] = seed & 0xFFFFFFFF     # (raw)
+            return img
         g.put(img, self.x, np.asarray(noise, np.float32).reshape(self.chunk, self.A))
         return img
 
@@ -72,10 +85,12 @@ class VLA:
         return self.g.read(img, self.x)
 
 
-def build(policy, cfg, lang_tokens, steps: int | None = None) -> VLA:
+def build(policy, cfg, lang_tokens, steps: int | None = None,
+          device_noise: bool = False) -> VLA:
     """policy: a LeRobot SmolVLAPolicy (B = 1, every image and language token valid: no
     padding); lang_tokens: the instruction's ids (their embedding rows are copied on the
-    device, the ids are compiled into the copies' addresses)."""
+    device, the ids are compiled into the copies' addresses). device_noise (Config.VRAND): the
+    initial noise drawn on the device from a seed (VLA.image's seed)."""
     m = policy.model
     pc = m.config
     vwe = m.vlm_with_expert
@@ -236,6 +251,16 @@ def build(policy, cfg, lang_tokens, steps: int | None = None) -> VLA:
     eH, eKVH = expert.config.num_attention_heads, expert.config.num_key_value_heads
     edh = expert.config.head_dim
     xt = g.tensor(chunk, A)
+    seed = None
+    if device_noise:
+        from .kernels.randn import seeded_normal_rows
+        from .rand import counters
+        if not getattr(cfg, "VRAND", False):
+            raise ValueError("device_noise needs Config.VRAND (VOP RAND)")
+        seed = g.tensor(1, 1)
+        enc_ops.append(("noise", seeded_normal_rows,
+                        dict(c=g.vec(counters(chunk * A)), seed=seed.rows(), y=xt.rows(),
+                             M=chunk, N=A, key=0)))
     dt = -1.0 / steps
     frac = np.linspace(0.0, 1.0, Ce // 2, dtype=np.float64)
     period = pc.min_period * (pc.max_period / pc.min_period) ** frac
@@ -299,4 +324,6 @@ def build(policy, cfg, lang_tokens, steps: int | None = None) -> VLA:
         g.axpy(xt, vt, dt, name="euler")
         step_ops.append(g.ops)
     g.ops = []
-    return VLA(g, imgs, None, state, xt, enc_ops, step_ops, steps, chunk, A)
+    vla = VLA(g, imgs, None, state, xt, enc_ops, step_ops, steps, chunk, A)
+    vla.seed = seed
+    return vla

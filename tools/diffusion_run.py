@@ -107,6 +107,10 @@ def main():
     ap.add_argument("--device-ops", action="store_true",
                     help="GroupNorm, Mish, ReLU, spatial softmax and large adds / products on "
                          "the device too")
+    ap.add_argument("--device-noise", action="store_true",
+                    help="with --resident: the initial and per-step noise drawn on the device "
+                         "from --seed (VOP RAND, a VRAND bitstream); the reference is the "
+                         "policy's float loop given those noises")
     ap.add_argument("--strict-fpga-only", action="store_true",
                     help="reject this hybrid runner until all numerical operations are on the FPGA")
     a = ap.parse_args()
@@ -189,9 +193,6 @@ def run_resident(a, pol, cfg, b, noise):
     steps = dm.num_inference_steps
     with torch.no_grad():
         gc = dm._prepare_global_conditioning(b)[0].numpy()     # (the float reference's)
-    t0 = time.time()
-    ref, zs = DR.reference_noise(pol, gc, noise[0].numpy(), steps, seed=a.seed + 1)
-    t_ref = time.time() - t0
     board = None
     if a.backend == "board":
         from opentpu.host.board import Board, XdmaTransport, device_config
@@ -200,12 +201,27 @@ def run_resident(a, pol, cfg, b, noise):
     else:
         c = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
                          TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    dn = getattr(a, "device_noise", False)
+    if dn and not getattr(c, "VRAND", False):
+        if board is not None:
+            raise SystemExit("--device-noise: the bitstream has no VOP RAND (CAPS2 bit10)")
+        import dataclasses
+        c = dataclasses.replace(c, VRAND=True)
     t0 = time.time()
-    loop = DR.build(pol, c, steps, encode=True)
+    loop = DR.build(pol, c, steps, encode=True, device_noise=dn)
     progs = loop.programs()
     t_c = time.time() - t0
-    img = loop.image(None, noise[0].numpy(), zs, images=b["observation.images"][0, :, 0].numpy(),
-                     states=b["observation.state"][0].numpy())
+    t0 = time.time()
+    if dn:                                   # the device's noises, the float loop given them
+        z0, zs = loop.noises(a.seed + 1)
+        ref = DR.reference_given(pol, gc, z0, zs, steps)
+    else:
+        ref, zs = DR.reference_noise(pol, gc, noise[0].numpy(), steps, seed=a.seed + 1)
+    t_ref = time.time() - t0
+    kw = dict(images=b["observation.images"][0, :, 0].numpy(),
+              states=b["observation.state"][0].numpy())
+    img = loop.image(None, None, None, seed=a.seed + 1, **kw) if dn else \
+        loop.image(None, noise[0].numpy(), zs, **kw)
     print(f"resident policy: {len(progs)} programs ({len(loop.enc_progs)} encoder, "
           f"{len(loop.common) + 2} a step x {steps}), DRAM image {len(img) / 2**20:.1f} MiB, "
           f"compiled in {t_c:.1f}s")
@@ -231,7 +247,7 @@ def run_resident(a, pol, cfg, b, noise):
     print(f"device run {t_dev:.1f}s ({st}), float run {t_ref:.2f}s")
     print(f"actions [{r.shape[0]} x {r.shape[1]}] vs float32: rel L2 {rel:.4f}, max |d| "
           f"{float(np.abs(g - r).max()):.4f}; host: inputs written, actions read, nothing "
-          f"computed")
+          f"computed{' (the noise drawn on the device from the seed)' if dn else ''}")
     return 0
 
 

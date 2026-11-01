@@ -96,6 +96,31 @@ def test_diffusion_policy_denoising_loop_resident():
     assert rel(loop.actions(img), ref) < 0.02
 
 
+def test_diffusion_policy_noise_on_the_device():
+    """FPGA-only: the host writes a seed, the device draws the initial noise and each step's
+    (device_noise: VOP RAND, Box-Muller); the actions against the policy's own float loop
+    given those noises (Loop.noises: the device's values, bit for bit)."""
+    pytest.importorskip("lerobot")
+    pytest.importorskip("diffusers")
+    import dataclasses
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from diffusion_run import tiny_policy
+    from opentpu import diffusion_resident as DR
+    pol, pc = tiny_policy(0)
+    dm = pol.diffusion
+    rng = np.random.default_rng(0)
+    gcd = dm.unet.down_modules[0][0].cond_encoder[1].in_features - \
+        dm.unet.diffusion_step_encoder[0].dim
+    gc = rng.normal(size=gcd).astype(np.float32)
+    loop = DR.build(pol, dataclasses.replace(cfg(), VRAND=True), 3, device_noise=True)
+    img, _ = RG.run_isa(loop.g.cfg, loop.programs(), loop.image(gc, None, None, seed=7))
+    z0, zs = loop.noises(7)
+    ref = DR.reference_given(pol, gc, z0, zs, 3)
+    assert rel(loop.actions(img), ref) < 0.02
+
+
 def _graph_2d():
     torch.manual_seed(5)
     conv = torch.nn.Conv2d(3, 16, 3, 2, 1)
@@ -202,6 +227,29 @@ def test_smolvla_resident_tiny():
                                        noise=noise.clone())[0].numpy()
     vla = SR.build(pol, cfg(), toks[0].numpy())
     img = vla.image([i[0].numpy() for i in imgs], state[0].numpy(), noise[0].numpy())
+    img, _ = RG.run_isa(vla.g.cfg, vla.programs(), img)
+    assert rel(vla.actions(img), ref) < 0.03
+
+
+def test_smolvla_noise_on_the_device():
+    """FPGA-only SmolVLA: the host writes a seed, the device draws the flow's initial noise
+    (device_noise); the actions against sample_actions given that noise (VLA.noise)."""
+    pytest.importorskip("lerobot")
+    import dataclasses
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from smolvla_run import inputs, tiny_policy
+    from opentpu import smolvla_resident as SR
+    pol, pc = tiny_policy(0)
+    imgs, masks, toks, lmask, state, _ = inputs(pc, 0, 1000)
+    vla = SR.build(pol, dataclasses.replace(cfg(), VRAND=True), toks[0].numpy(),
+                   device_noise=True)
+    noise = torch.as_tensor(vla.noise(11))[None]
+    with torch.no_grad():
+        ref = pol.model.sample_actions(imgs, masks, toks, lmask, state,
+                                       noise=noise.clone())[0].numpy()
+    img = vla.image([i[0].numpy() for i in imgs], state[0].numpy(), None, seed=11)
     img, _ = RG.run_isa(vla.g.cfg, vla.programs(), img)
     assert rel(vla.actions(img), ref) < 0.03
 

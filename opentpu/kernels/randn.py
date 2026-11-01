@@ -81,3 +81,31 @@ def uniform_kernel(c, y, N: int, key: int):
         n = min(1024, N - n0)
         t = ol.load(c[n0:n0 + n])
         ol.store(y[n0:n0 + n], ol.rand(t, key))
+
+
+def seeded_normal(counters, seed, key: int = 0):
+    """normal() under the key = the raw bits of the one-word tile `seed` (the host's seed,
+    written as an input) + key: an RLD raw into a scratch register."""
+    from ..compiler import current
+    b = current()
+    r = b.scratch()
+    b.rld(r, seed, raw=True, comment="the noise's key: the seed")
+    z = normal(counters, key, r)
+    b.unscratch(r)
+    return z
+
+
+@ol.jit
+def seeded_normal_rows(c, seed, y, M: int, N: int, key: int):
+    """y [M, N] = standard normals of the counter words c [M * N] (rand.counters) under the key
+    seed's bits + key: diffusion's noise, a draw per step (key = the step) from one host seed."""
+    s = ol.load(seed[0:1])
+    for m in range(M):
+        t = ol.load(c[m * N:(m + 1) * N])
+        ol.store(y[m], seeded_normal(t, s, key))
+
+
+def seeded_reference(M: int, N: int, seed: int, key: int) -> np.ndarray:
+    """seeded_normal_rows' values: reference(rand.counters(M * N) bits, seed + key)."""
+    ctr = RN.bits(RN.counters(M * N))
+    return reference(ctr, (seed + key) & 0xFFFFFFFF).reshape(M, N)

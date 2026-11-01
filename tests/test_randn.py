@@ -59,3 +59,37 @@ def test_normal_kernel_rtl(have_verilator):
     isa = launch(RD.normal_kernel, _cfg(), **args).outputs["y"]
     rtl = launch(RD.normal_kernel, _cfg(), backend="rtl", **args).outputs["y"]
     np.testing.assert_array_equal(rtl.view(np.uint32), isa.view(np.uint32))
+
+
+@pytest.mark.parametrize("M,N,key", [(3, 7, 0), (16, 2, 5)])
+def test_seeded_normal_rows(M, N, key):
+    """Diffusion's noise from one host seed (a raw word): the key is the seed's bits in a
+    register (RLD raw) plus the step's key; the device's rows equal seeded_reference."""
+    seed = 0xDEADBEEF
+    got = launch(RD.seeded_normal_rows, _cfg(), c=Input(_ctr(M * N)),
+                 seed=Input(np.array([seed], np.uint32).view(np.float32)),
+                 y=Output((M, N)), M=M, N=N, key=key).outputs["y"]
+    np.testing.assert_array_equal(got.view(np.uint32),
+                                  RD.seeded_reference(M, N, seed, key).view(np.uint32))
+
+
+def test_resident_noise_from_a_raw_seed():
+    """The resident loops' noise (diffusion_resident device_noise): a graph op over a DRAM tensor,
+    the seed written raw into the image (a small seed is no denormal, which an fp32 input would
+    flush), the rows equal to seeded_reference for every step's key."""
+    from opentpu import resident as RG
+    T, A, seed = 16, 2, 5
+    g = RG.Graph(_cfg())
+    s = g.tensor(1, 1)
+    ctr = g.vec(RN.counters(T * A))
+    outs = [g.tensor(T, A) for _ in range(3)]
+    for k, y in enumerate(outs):
+        g.op(f"noise{k}", RD.seeded_normal_rows, c=ctr, seed=s.rows(), y=y.rows(), M=T, N=A,
+             key=k)
+    progs = g.compile()
+    img = g.image()
+    img.view(np.uint32)[s.addr // 4] = seed
+    img, _ = RG.run_isa(_cfg(), progs, img)
+    for k, y in enumerate(outs):
+        np.testing.assert_array_equal(g.read(img, y).view(np.uint32),
+                                      RD.seeded_reference(T, A, seed, k).view(np.uint32))

@@ -4,7 +4,10 @@ concatenations), the timestep embedding and its MLP, the condition encoders and 
 of every step run on the device over tensors that stay in the card's DRAM. The host writes the
 inputs once -- the global condition (the observation encoder's output), the initial noise, the
 timesteps and the scheduler's per-step variance noise (drawn as diffusers draws it: inputs, as a
-seed is) -- launches the programs and reads the final actions.
+seed is) -- launches the programs and reads the final actions. With device_noise (Config.VRAND)
+the host writes a seed instead and the device draws the initial noise and each step's
+(kernels/randn.py: Box-Muller over VOP RAND, key = the seed + the step), FPGA-only:
+Loop.noises(seed) gives the same values on the host, bit for bit, for a reference run.
 
 build(policy, cfg) -> Loop; Loop.run_isa(...) / Loop.run_board(...).
 """
@@ -28,18 +31,32 @@ class Loop:
         self.noises, self.step_progs, self.common = noises, step_progs, common
         self.coeffs, self.A, self.T, self.E = coeffs, A, T, E
         self.enc_progs, self.enc_in = [], []         # (with the observation encoders)
+        self.seed = None                             # device_noise: the seed's word
+        self.noise_progs = []                        # ... and the initial noise's program
+
+    def noises(self, seed: int) -> tuple[np.ndarray, list]:
+        """device_noise: (the initial noise [T, A], each step's variance noise) the device
+        draws from `seed`, bit for bit (randn.seeded_reference: key seed + 0, seed + 1 + i);
+        the steps whose noise scale is 0 draw none (zeros)."""
+        from .kernels.randn import seeded_reference
+        z0 = seeded_reference(self.T, self.A, seed, 0)
+        zs = [seeded_reference(self.T, self.A, seed, 1 + i) if c["noise_scale"] > 0
+              else np.zeros((self.T, self.A), np.float32) for i, c in enumerate(self.coeffs)]
+        return z0, zs
 
     def programs(self) -> list:
         """Every program of the loop in order: per step its timestep embedding, the shared
         U-Net, its DDPM update."""
-        out = list(self.enc_progs)
+        out = list(self.enc_progs) + list(self.noise_progs)
         for pre, post in self.step_progs:
             out += pre + self.common + post
         return out
 
-    def image(self, global_cond, noise0, step_noise, images=None, states=None) -> np.ndarray:
+    def image(self, global_cond, noise0, step_noise, images=None, states=None,
+              seed: int | None = None) -> np.ndarray:
         """global_cond (no encoders), or the observation's images ([S][C, H, W], normalized)
-        and states ([S][sd]): the encoders compute the rest of the global condition."""
+        and states ([S][sd]): the encoders compute the rest of the global condition.
+        device_noise: `seed` (the noises are the device's: pass None for noise0, step_noise)."""
         g = self.g
         img = g.image()
         if self.enc_in:
@@ -51,8 +68,14 @@ class Loop:
         else:
             g.put(img, self.gfeat.cols(self.E, self.gfeat.C),
                   np.asarray(global_cond).reshape(1, -1))
-        g.put(img, self.sample, np.asarray(noise0).reshape(self.T, self.A))
         g.put(img, self.times, np.asarray([c["t"] for c in self.coeffs], np.float32)[:, None])
+        if self.seed is not None:
+            if seed is None or noise0 is not None or step_noise is not None:
+                raise ValueError("device_noise: a seed, and no host noise")
+            w = img.view(np.uint32)                   # (raw: a small seed is no denormal)
+            w[(self.seed.addr + 4 * self.seed.pad * self.seed.rs) // 4] = seed & 0xFFFFFFFF
+            return img
+        g.put(img, self.sample, np.asarray(noise0).reshape(self.T, self.A))
         for nt, z in zip(self.noises, step_noise):
             g.put(img, nt, np.asarray(z).reshape(self.T, self.A))
         return img
@@ -61,11 +84,14 @@ class Loop:
         return self.g.read(img, self.sample)
 
 
-def build(policy, cfg, steps: int | None = None, encode: bool = False) -> Loop:
+def build(policy, cfg, steps: int | None = None, encode: bool = False,
+          device_noise: bool = False) -> Loop:
     """The resident loop of `policy` (a LeRobot DiffusionPolicy, B = 1); with `encode` also its
-    observation encoders (images -> features, beside the states, into the global condition)."""
+    observation encoders (images -> features, beside the states, into the global condition);
+    with `device_noise` (Config.VRAND) the noises drawn on the device from a seed."""
     from .kernels import eltwise as E
     from .kernels.ddpm import ddpm_epsilon_rows
+    from .kernels.randn import seeded_normal_rows
     dm = policy.diffusion
     un = dm.unet
     sch = dm.noise_scheduler
@@ -86,6 +112,13 @@ def build(policy, cfg, steps: int | None = None, encode: bool = False) -> Loop:
     gfeat = g.tensor(1, Edim + gcd)
     times = g.tensor(steps, 1)
     noises = [g.tensor(T, A) for _ in range(steps)]
+    seed = ctr = None
+    if device_noise:
+        from .rand import counters
+        if not getattr(cfg, "VRAND", False):
+            raise ValueError("device_noise needs Config.VRAND (VOP RAND)")
+        seed = g.tensor(1, 1)
+        ctr = g.vec(counters(T * A))
 
     enc_ops, enc_in = [], []
     if encode:
@@ -184,6 +217,10 @@ def build(policy, cfg, steps: int | None = None, encode: bool = False) -> Loop:
                   noise_scale=float(sch._get_variance(t).sqrt()) if t > 0 else 0.0,
                   clip_range=float(c.clip_sample_range) if c.clip_sample else 3.0e38)
         coeffs.append(dict(t=float(t), **k_))
+        if device_noise and k_["noise_scale"] > 0:
+            pre_ops[i].append(("noise", seeded_normal_rows,
+                               dict(c=ctr, seed=seed.rows(), y=noises[i].rows(), M=T, N=A,
+                                    key=1 + i)))
         post_ops.append([("ddpm", ddpm_epsilon_rows,
                           dict(sample=sample.rows(), epsilon=eps.rows(), noise=noises[i].rows(),
                                y=sample.rows(), M=T, N=A, **k_))])
@@ -191,6 +228,11 @@ def build(policy, cfg, steps: int | None = None, encode: bool = False) -> Loop:
     step_progs = [(g.compile(p), g.compile(q)) for p, q in zip(pre_ops, post_ops)]
     loop = Loop(g, sample, gfeat, times, noises, step_progs, common_progs, coeffs, A, T, Edim)
     loop.enc_progs, loop.enc_in = g.compile(enc_ops), enc_in
+    if device_noise:
+        loop.seed = seed
+        loop.noise_progs = g.compile([("noise0", seeded_normal_rows,
+                                       dict(c=ctr, seed=seed.rows(), y=sample.rows(), M=T, N=A,
+                                            key=0))])
     return loop
 
 
@@ -229,6 +271,28 @@ def reference_noise(policy, global_cond, noise0, steps: int, seed: int):
             zs[i] = drawn[j][0].numpy()
             j += 1
     return out[0].numpy(), zs
+
+
+def reference_given(policy, global_cond, noise0, step_noise, steps: int) -> np.ndarray:
+    """The policy's own float32 loop with the given variance noises (step_noise[i] for each
+    timestep that draws one, t > 0): the reference of a device_noise run (Loop.noises)."""
+    import torch
+    from diffusers.schedulers import scheduling_ddpm as SD
+    dm = policy.diffusion
+    dm.num_inference_steps = steps
+    dm.noise_scheduler.set_timesteps(steps)
+    ts = [int(t) for t in dm.noise_scheduler.timesteps.tolist()]
+    given = [torch.as_tensor(np.asarray(z, np.float32))[None]
+             for t, z in zip(ts, step_noise) if t > 0]
+    orig = SD.randn_tensor
+    SD.randn_tensor = lambda *a, **k: given.pop(0).clone()
+    try:
+        with torch.no_grad():
+            out = dm.conditional_sample(1, global_cond=torch.as_tensor(global_cond)[None],
+                                        noise=torch.as_tensor(noise0)[None].clone())
+    finally:
+        SD.randn_tensor = orig
+    return out[0].numpy()
 
 
 def encoder(g, enc, H: int, W: int, out_vec: Tensor, name: str = "rgb"):
