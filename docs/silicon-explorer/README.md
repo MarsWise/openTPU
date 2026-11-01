@@ -26,6 +26,8 @@ GitHub's ordinary source viewer does not execute HTML. To make a public page, co
 7. **Benchmarks** — device and wall decode and measured DDR traffic from README; separate BitNet measured results and unverified research work.
 8. **RTL sources** — pinned deep links to the implementation and verification documents.
 
+The separate [Deep Silicon Atlas](deep.html) extends these views with 512 selectable INT8 PE positions, DSP48E1 input/product/accumulator details, deep zoom to logical memory and processor internals, a full-adder and CMOS NAND educational microscope, a LUT6 truth-table calculator, configurable switching-energy equation, ternary arithmetic, and DRAM interleaving formulas.
+
 All diagrams are **logical**, not Vivado routed placement, and all interconnect paths are illustrative rather than an RTL-simulation output.
 
 ## The source snapshot
@@ -92,3 +94,14 @@ This is an independently authored visualization, **not** a hardware accelerator 
 - The UI contains a conceptual instruction flow navigator, not a fake trace; the existing `otpu-lens` profile viewer remains the authoritative cycle activity viewer.
 - Source links in the page are pinned to commit `55b975c14346cc692f1765729d750d79e8bc0b04`, not the moving feature branch.
 - Deep HTML is dependency-free. It works locally without a service worker, network, third-party scripts or backend. It is not yet deployed through GitHub Pages.
+
+## Test the deep site
+
+Run from the repository root:
+
+```sh
+python3 docs/silicon-explorer/check.py
+node docs/silicon-explorer/smoke.mjs
+```
+
+The Python check validates source/target consistency, UI element IDs and referenced files. When Node is installed it also runs the zero-dependency frontend smoke test. The smoke test exercises page startup, deep navigation to an individual DSP multiplier, signed INT8 arithmetic, invalid ternary weights, bank address decoding, LUT truth-table evaluation and a full-adder. It **does not** replace visual testing in Chrome/Firefox, accessibility audit, source-level simulation, FPGA board measurements or Vivado timing.
