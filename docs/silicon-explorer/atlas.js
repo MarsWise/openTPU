@@ -141,3 +141,122 @@ node("dramBank","ddrchip","DRAM bank","DRAM controller groups rows and columns a
 node("dramRow","dramBank","DRAM row","A row of capacitor cells accessed through wordlines and sense amplifiers. Explanatory representation.","Wordline + sense","physical","docs/litedram.md",{},"conceptual");
 node("dramCell","dramRow","1T1C DRAM cell","A textbook storage capacitor charged/discharged through one access transistor.","One transistor + capacitor","physical","docs/litedram.md",{"Cell":"1T1C"},"conceptual","Not a photomicrograph or cell extraction of this DDR3 part.");
 const PATHNODES=()=>DATA.size;
+
+const ST=(id,title,caption,src,kind="documented",tags=[])=>({id,title,caption,src:src||DATA.get(id)?.src,kind,tags});
+const FLOWS=[
+ {key:"1",name:"Boot / load",summary:"How a compiled openTPU program arrives in IMEM and starts the first instruction.",steps:[
+ ST("host","Compile the program","The host compiles ISA commands and prepares the model image before any compute work is issued.","opentpu/compiler.py"),
+ ST("hostpcie","Send over PCIe","XDMA transfers bytes and host commands into the board, which negotiates a concrete link width.",top),
+ ST("shell","The FPGA shell","Host BAR0 control, LiteDRAM configuration and data paths are wired in the board wrapper.",top),
+ ST("dma","Program loader","The slice's loader copies instruction chunks from external DRAM into IMEM while the compute core is held in reset.",sl),
+ ST("imem","Instruction memory","A synchronous RAM stores ISA instructions. The first fetch has one additional initial pipeline cycle.",seq),
+ ST("dispatch","Start issuing","The sequencer dispatches dependency-checked commands to independent engines.",seq)
+ ]},
+ {key:"2",name:"DDR stream",summary:"Why 64-byte beats, two channels and local memory matter more than adding arithmetic.",steps:[
+ ST("drammap","Map a byte address","A 128-byte weight chunk is split into two 64-byte physical channel beats. CHASH can alter which half goes to which channel.",nat),
+ ST("ddrbridge","Cross clock domains","Each DDR channel arbitrates accelerator and XDMA commands, keeping read-order tags and FIFO credits.",bridge),
+ ST("bankctrl","Schedule memory requests","Port A scales, port B weight streams and scalar write traffic share the native adapter with backpressure.",nat),
+ ST("weights","Prefetch into FIFOs","Scale and weight FIFOs let the MXU issuer run ahead of the consumer if dependency checks allow it.",mxu),
+ ST("stationary","Reuse activations","Stationary ACT RAM rows are reused across weight advances; this is a separate structure from TMEM.",act),
+ ST("epilogue","Write results","The post-MAC result passes scaling and conversion, then writes into local TMEM.",mxu)
+ ]},
+ {key:"3",name:"INT8 matmul",summary:"A matrix multiply travels from activation quantization through DSP48E1 chains to FP32 output.",steps:[
+ ST("quant","Quantize activation rows","QACT prepares INT8 data and block scale metadata; no full-precision vector multiply is needed here.","rtl/vpu/otpu_quant.sv"),
+ ST("actram","Keep activations stationary","The ACT RAM feeds up to four selected activation rows into the MXU per weight-chunk advance.",act),
+ ST("weights","Fetch weight chunks","Each D=128 chunk of quantized weights moves from DDR3 through stream FIFOs.",mxu),
+ ST("array","Four parallel columns","Four arithmetic columns each contain 128 logical PE positions, arranged as eight 16-position chains.",dsp,"derived",["512 MAC/cycle arithmetic ceiling"]),
+ ST("col0g0","One sixteen-PE chain","The DSP48E1 multiplier output is combined with the preceding PE's PCIN to form a systolic dot-product partial sum.",dsp),
+ ST("chend","Eight groups into one result","Each column end scales and adds the group sums through a nine-DSP cascade.",dsp),
+ ST("fpconv","Scale and store","A 48-bit integer accumulator becomes FP32 with quantization scales before TMEM writeback.",mxu)
+ ]},
+ {key:"4",name:"BitNet / TMM",summary:"Follow two-bit ternary weights and see the difference between arithmetic peak and single-token decode.",steps:[
+ ST("wpacked","Pack −1 / 0 / +1","Internal TMM codes are 00 for 0, 01 for +1, 10 for −1. Conversion from the original model representation matters.","docs/nextgen/BONSAI_4B.md"),
+ ST("wdecode","Decode through integer logic","The packed weight selection feeds the DSP-based integer datapath; the precise FPGA mapping depends on TMM mode.",dsp),
+ ST("col0g0pe0","One DSP product","A single logical PE uses DSP48E1 registers, multiplier and cascade output, not a magic ternary FLOP.",dsp),
+ ST("groupScale","Optional GSC","Bonsai's grouped scales require extra logic and a matching firmware capability and bitstream.","docs/nextgen/BONSAI_4B.md"),
+ ST("tmm","Decode bottleneck","Measured M=1 TMM reaches 127.7 MAC/cycle, while M=16 reaches 511.6 MAC/cycle. A single token does not fill the four-column datapath equally.","docs/nextgen/BITNET_COMPAT.md","measured"),
+ ST("tmem","Finish in local memory","The scaled output is written to TMEM for the next layer's vector or matrix instruction.",mem)
+ ]},
+ {key:"5",name:"FP4 weights",summary:"The same integer matrix machinery handles low-bit weight chunks with format-specific scaling.",steps:[
+ ST("dram","Load compact blocks","FP4/INT4 chunks halve the raw byte cost versus INT8, though scales and metadata still consume bandwidth.",nat,"derived"),
+ ST("weights","Two blocks per 128-byte chunk","4-bit packing can carry two blocks in one chunk, with reuse controlled by format and PAIR flags.",mxu),
+ ST("stationary","Read activation tiles","The MXU reuses INT8 activation blocks from ACT RAM.",act),
+ ST("array","Compute in DSPs","Low-bit weight codes are decoded to products in the integer array with format-specific scale interpretation.",dsp),
+ ST("fpconv","Numerical epilogue","Accumulated integer sums use FP32 scaling, not a direct native FP4 floating-point DSP operation.",mxu)
+ ]},
+ {key:"6",name:"Quantization",summary:"From FP32 TMEM to scaled INT8 stationary activation RAM.",steps:[
+ ST("tmem","Input FP32 tile","The host or previous layer has placed activations into local FP32 tensor memory.",mem),
+ ST("bankArb","Win bank access","The quantizer's TMEM reads compete with other units under the slice arbiter.",sl),
+ ST("quant","Quantize with scale","QACT applies power-of-two offset/scaling and emits INT8 data plus block metadata.","rtl/vpu/otpu_quant.sv"),
+ ST("scales","Write scale records","Each (row, block) stores a 64-bit record with the row scale and four offset fields.",act),
+ ST("storage","Prepare stationary bytes","The ACT RAM stores quantized rows so the next MM can reuse them locally.",act)
+ ]},
+ {key:"7",name:"FP32 vector",summary:"A vector operation traverses TMEM banks, FP32 arithmetic lanes and a result stage.",steps:[
+ ST("banks","Fetch contiguous words","The VPU requests lane-wide vectors from eight logical TMEM banks.",mem),
+ ST("vpuLane","Eight SIMD elements","Simple arithmetic can be issued across eight lanes, with composite operations restricted to two long lanes.",vpu),
+ ST("mul","Pipelined FP32 multiply","The multiplier rounds its FP32 result; its latency is at least two configured stages.",fpipe),
+ ST("adder","Pipelined add","An add follows the multiplier for an FMADD-like instruction, with an additional rounding; it is not an IEEE fused FMA.",fpipe),
+ ST("reduction","Optional vector reduction","RSUM, RSSQ and RDOT use interleaved partial sums and folding adders.", "rtl/vpu/otpu_vtree.sv"),
+ ST("tmem","Store vector output","Result rows return to TMEM for the next instruction.",mem)
+ ]},
+ {key:"8",name:"Attention math",summary:"How sequential vector kernels and reductions can build an attention subgraph without adding an invented hardware unit.",steps:[
+ ST("seq","Schedule the operator chain","The compiler expresses attention as ordinary MXU/VPU and memory instructions rather than a separate physical attention engine.",seq,"documented"),
+ ST("mxu","Matrix products","Query/key/value projections and dot products use MXU instructions where the model/compiler supports them.",mxu),
+ ST("reduction","Reduce scores","FP32 reduction hardware handles sums/maxima used in normalisation and related kernels.","rtl/vpu/otpu_vtree.sv"),
+ ST("composite","Elementwise functions","EXP2, RECIP and other composite functions enable common softmax-style calculations through scheduled kernels.",vpu),
+ ST("tmem","Intermediate data reuse","Intermediate matrices reside in TMEM when they fit; larger state can be streamed through DRAM.",mem)
+ ]},
+ {key:"9",name:"Bank conflict",summary:"Two engines asking for a shared TMEM bank cannot always advance in the same cycle.",steps:[
+ ST("tmem","One logical scratchpad","TMEM is explicitly shared by DMA, VPU, MXU drain and quantizer. The bank count is eight.",mem),
+ ST("bank3","Focus on bank 3","The logical bank index is the FP32 word address modulo eight. Every eighth word maps to this bank.",mem),
+ ST("bankArb","Arbitrate a collision","The slice grants an engine only if all requested bank resources can be served, otherwise it holds; specific priority and replay are RTL-defined.",sl),
+ ST("bypass","Preserve recent writes","A registered write bypass makes a read observe newly written data before physical BRAM storage catches up.",mem),
+ ST("bram","Physical implementation","TMEM_IMPL=3 uses sub-banked RAM, read replay and 2× pumping. These details matter for timing and capacity.",mem)
+ ]},
+ {key:"0",name:"Resident decode",summary:"How instruction residency and on-card token handling can remove per-token host work.",steps:[
+ ST("host","Prepare program once","Resident model execution compiles or loads reusable instruction programs and weight images beforehand.","docs/nextgen/BITNET_COMPAT.md"),
+ ST("imem","Keep instruction buckets","Program code stays in IMEM until changed; a runtime can dispatch another decode position without reassembling instructions every time.",seq),
+ ST("seq","Execute on the FPGA","The sequencer and unit commands run a full layer's compute operations while host communication is minimized.",seq),
+ ST("vpu","Select the output token","The existing VPU can compute argmax over logits on the device, avoiding full logits transfer when supported.",vpu),
+ ST("dispatch","HALT / CHAIN","The engine can chain to subsequent compiled programs while keeping model data resident.",seq),
+ ST("hostpcie","Return token IDs","A resident generation loop need only send small results to the host, rather than all intermediate tensors.","docs/nextgen/BITNET_COMPAT.md","documented","Actual speedup must be confirmed with a matching resident-capable bitstream.")
+ ]},
+ {key:"B",name:"Host ↔ PCIe",summary:"The host/card path and why external bandwidth and protocol overhead influence end-to-end decoding.",steps:[
+ ST("hostpcie","Host initiates transfer","Programs, model image and run arguments are prepared and sent over the host's PCIe interface.","opentpu/host/board.py"),
+ ST("xdma","XDMA endpoint","The FPGA XDMA block receives data and exposes control registers.",top),
+ ST("ddrbridge","Clock crossing","Asynchronous FIFOs allow accelerator and host streams to share each LiteDRAM channel.",bridge),
+ ST("drammap","Memory chunk placement","Host DRAM data must respect the exact channel interleave and CHASH mapping.",nat),
+ ST("shell","Observe completion","Counters, control and status registers report readiness and execution completion.","docs/observability.md")
+ ]},
+ {key:"M",name:"One DSP bit",summary:"The deepest source-backed arithmetic route: registers, DSP multiplier, adder and PCIN/PCOUT.",steps:[
+ ST("col0","Column 0","One of four stationary activation rows processed per integer weight advance.",mxu),
+ ST("col0g0","Sixteen-element chain","Products flow through a chain of sixteen Xilinx DSP48E1 technology primitives.",dsp),
+ ST("col0g0pe0","PE 0","Each otpu_pe selects a weight stream, multiplies by the activation and accumulates.",dsp),
+ ST("col0g0pe0areg","A/D inputs","A and D carry weight alternatives, selected by registered INMODE controls.",dsp),
+ ST("col0g0pe0breg","BREG activation","The activation enters the DSP B register, avoiding external fabric multiply.",dsp),
+ ST("col0g0pe0product","Multiply M","The DSP's product M is an actual Xilinx DSP48E1 datapath operation, not a generic LUT example.",dsp),
+ ST("col0g0pe0psum","Accumulator P","P = PCIN + M (or P = M for FIRST); sums are kept on DSP cascade paths.",dsp),
+ ST("col0g0pe0cascade","PCOUT","PCOUT carries the partial sum to the next PE. The exact cycle latency is controlled by instantiated DSP registers.",dsp),
+ ST("logicgate","Under the primitive","Below DSP48E1, gates and individual MOSFETs can be shown as textbook circuit theory, not as a recovered Xilinx cell layout.",doc,"conceptual")
+ ]}
+];
+const TOUR=[
+ ["The whole machine","rack","The host, PCIe and FPGA form one accelerator system. Commands and weights must reach the card before computation begins."],
+ ["The physical board","pciecard","The Inspur YPCB-00338 puts Kintex-7 compute beside two 2 GiB DDR3 channels."],
+ ["The FPGA silicon","fpga","One Xilinx 7-series FPGA implements an explicit accelerator, not a RISC-V multicore CPU."],
+ ["Memory channels","dram","The external memory path interleaves 64-byte beats across two DDR3 controllers."],
+ ["The compute slice","slice","The openTPU slice contains seven principal interacting units and their memory interfaces."],
+ ["Instruction scheduling","seq","A scoreboard allows independent instructions to overlap, while dependencies preserve correctness."],
+ ["Data movement","dma","Moving data is a first-class hardware workload: the DMA shares DDR resources with the MXU."],
+ ["Shared tensor SRAM","tmem","256 KiB of logical FP32 TMEM is divided into eight banks with arbitration and bypass."],
+ ["Local activation tiles","actram","Quantized INT8 activations are stored stationary so matrix arithmetic can reuse them."],
+ ["The matrix unit","mxu","D=128, MCOLS=4 — four physical dot-product columns and their accumulation machinery."],
+ ["One column","col0","One stationary activation row spans eight chains of sixteen DSP48E1 PE positions."],
+ ["One chain","col0g0","The dedicated DSP48E1 PCIN/PCOUT cascade reduces partial sums without a separate full-width fabric adder at every PE."],
+ ["One processing element","col0g0pe0","A and D select weights; B carries the activation; M multiplies and P accumulates."],
+ ["Ternary arithmetic","tmm","BitNet reuses the integer datapath; on-board performance depends on row count, not theoretical peak alone."],
+ ["FP32 vector lanes","vpu","Eight FP32 lanes with two longer composite-function lanes complement the integer MXU."],
+ ["Pipeline and reductions","fops","FP32 multiply and add are separate rounded operations. A reduction tree handles vector sums."],
+ ["Physical logic","bitlogic","The RTL ends at mapped FPGA primitives. Going down to transistor cells becomes an explicitly labelled textbook explanation."],
+ ["Evidence and limits","hostlens","Real instruction timing, stalls and traces belong to otpu-lens and board reports, not an artistic animation."]
+].map(([title,id,caption])=>({title,id,caption}));
