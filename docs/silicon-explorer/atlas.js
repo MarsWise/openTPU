@@ -768,6 +768,74 @@ document.addEventListener("keydown",e=>{
  else if(key==="s"){$("btn-speed").click()}
  else{const ix=FLOWS.findIndex(f=>f.key.toLowerCase()===key);if(ix>=0)startFlow(ix)}
 });
+
+const PROFILE={data:null,items:[],index:0,timer:null};
+const UNIT_TO_ID={DMA:"dma",MXU:"mxu",QUANT:"quant",VPU:"vpu",COLL:"collective"};
+function profileStop(){if(PROFILE.timer!==null){clearInterval(PROFILE.timer);PROFILE.timer=null;$("pf-play").textContent="▶ Play starts"}}
+function profileAt(index){
+ if(!PROFILE.data)return;
+ const items=PROFILE.items;
+ PROFILE.index=Math.min(Math.max(0,index),Math.max(0,items.length-1));
+ $("pf-pos").value=PROFILE.index;$("pf-pos-label").textContent=items.length?PROFILE.index+1+" / "+items.length:"0 / 0";
+ const ev=$("pf-event");ev.replaceChildren();
+ if(!items.length){ev.textContent="This profile has no per-instruction events (e.g. board counter snapshots). Use the source otpu-lens summary for aggregate metrics.";return}
+ const row=items[PROFILE.index],p=PROFILE.data;
+ const unit=Array.isArray(p.units)?p.units[Number(row[3])]:String(row[3]);
+ const op=String(row[4]||"unknown");
+ const start=Number(row[9]),end=Number(row[10]),mhz=Number(p.clock_mhz)||0;
+ const srcLabel=Array.isArray(p.sources)&&p.sources[row[11]]?JSON.stringify(p.sources[row[11]]):"source index "+row[11];
+ const head=html("div","row");head.appendChild(html("b","",unit+" · "+op));
+ head.appendChild(html("span","muted","slice "+row[0]+" · instruction "+row[1]+" · PC "+row[2]));
+ ev.append(head);
+ const p1=html("p","",String(row[5]||""));ev.appendChild(p1);
+ ev.appendChild(html("p","", "start cycle "+start+", end "+end+" (duration "+Math.max(0,end-start)+" cycles)"+
+   (mhz?" · start "+(start/mhz).toFixed(2)+" µs, duration "+((end-start)/mhz).toFixed(2)+" µs":"")));
+ ev.appendChild(html("p","muted small","Dispatch "+row[6]+" · ready "+row[7]+" · release "+row[8]+" · "+srcLabel));
+ const id=UNIT_TO_ID[unit];
+ if(id){stop();mode="explore";showStage();navigate(id);choose(id);$("scene-status").textContent="PROFILE EVENT: "+unit+" "+op+" @ cycle "+start;}
+}
+function loadProfile(p){
+ if(!p||typeof p!=="object")throw Error("No profile object");
+ if(p.format==="openTPU-profile"&&Array.isArray(p.profiles)){
+  if(p.version>1)throw Error("Future .otpuprof schema version "+p.version+" not supported");
+  if(!p.profiles.length)throw Error("File contains no profiles");
+  p=p.profiles[0];
+ }else if(p.version>1&&p.format==="openTPU-profile"){throw Error("Unsupported format version")}
+ if(!Number.isFinite(Number(p.cycles))||!Array.isArray(p.instrs))throw Error("Not an openTPU profile: expected cycles and instrs array");
+ PROFILE.data=p;
+ PROFILE.items=p.instrs.filter(r=>Array.isArray(r)&&Number.isFinite(Number(r[9]))&&Number(r[9])>=0).sort((a,b)=>Number(a[9])-Number(b[9]));
+ PROFILE.index=0;$("profile-empty").hidden=true;$("profile-view").hidden=false;
+ $("pf-name").textContent=String(p.name||"Unnamed workload");$("pf-kind").textContent=String(p.kind||"unknown").toUpperCase();
+ $("pf-cycles").textContent=Number(p.cycles).toLocaleString();$("pf-clock").textContent=p.clock_mhz+" MHz";
+ $("pf-pos").max=Math.max(0,PROFILE.items.length-1);$("pf-pos").value=0;
+ profileAt(0);
+}
+$("profile-file").addEventListener("change",async ev=>{
+ profileStop();
+ const file=ev.target.files?.[0];if(!file)return;
+ try{
+  if(file.size>65_000_000)throw Error("Compressed profile is too large for this browser viewer (65 MB limit)");
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let raw;
+  if(bytes[0]===0x1f&&bytes[1]===0x8b){
+   if(typeof DecompressionStream==="undefined")throw Error("This browser cannot decompress gzip natively. Export an uncompressed JSON profile or use otpu-lens.");
+   const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+   raw=await new Response(stream).text();
+  }else raw=new TextDecoder().decode(bytes);
+  if(raw.length>120_000_000)throw Error("Uncompressed profile exceeds 120 MB");
+  loadProfile(JSON.parse(raw));say("Loaded "+PROFILE.items.length+" real instruction events");
+ }catch(error){$("profile-empty").hidden=false;$("profile-empty").textContent="Could not load the profile: "+(error?.message||String(error));$("profile-view").hidden=true;say("Profile parse failed");}
+});
+$("pf-next").onclick=()=>profileAt(PROFILE.index+1);
+$("pf-back").onclick=()=>profileAt(PROFILE.index-1);
+$("pf-pos").addEventListener("input",()=>profileAt(Math.floor(Number($("pf-pos").value)||0)));
+$("pf-play").onclick=()=>{
+ if(PROFILE.timer!==null){profileStop();return}
+ if(!PROFILE.items.length)return;
+ PROFILE.timer=setInterval(()=>{if(PROFILE.index>=PROFILE.items.length-1){profileStop();return}profileAt(PROFILE.index+1)},750);
+ $("pf-play").textContent="Ⅱ Pause real starts";
+};
+
 window.__openTPUAtlasChecks={
  version:"2.0",nodes:PATHNODES(),flows:FLOWS.length,tour:TOUR.length,
  view:()=>view,mode:()=>mode,selected:()=>selected,
