@@ -110,6 +110,10 @@ def main():
                          "vision, connector, prefix layers and every Euler step of the expert "
                          "on the device; the host writes the preprocessed images, state, "
                          "noise and the instruction's token rows, and reads the actions")
+    ap.add_argument("--device-noise", action="store_true",
+                    help="with --resident: the flow's initial noise drawn on the device from "
+                         "--seed (VOP RAND, a VRAND bitstream); the reference is sample_actions "
+                         "given that noise")
     ap.add_argument("--host-attention", action="store_true",
                     help="the attention products on the host (stage 1)")
     a = ap.parse_args()
@@ -190,10 +194,27 @@ def run_resident(a, pol, x, ref, t_ref):
     else:
         c = board_config(MCOLS=8, TMEM_WORDS=131072, PAIR=True, TPAIR=True, TQUAD=True,
                          TFN=True, DSTEP=True, STREAM=True, DRAM_BYTES=1 << 30)
+    dn = getattr(a, "device_noise", False)
+    if dn and not getattr(c, "VRAND", False):
+        if board is not None:
+            raise SystemExit("--device-noise: the bitstream has no VOP RAND (CAPS2 bit10)")
+        import dataclasses
+        c = dataclasses.replace(c, VRAND=True)
     t0 = time.time()
-    vla = SR.build(pol, c, toks[0].numpy())
+    vla = SR.build(pol, c, toks[0].numpy(), device_noise=dn)
     progs = vla.programs()
-    img = vla.image([i[0].numpy() for i in imgs], state[0].numpy(), noise[0].numpy())
+    pix = [i[0].numpy() for i in imgs]
+    if dn:                                   # the device's noise; the float run given it
+        import torch
+        z = torch.as_tensor(vla.noise(a.seed + 1))[None]
+        t1 = time.time()
+        with torch.no_grad():
+            ref = pol.model.sample_actions(imgs, masks, toks, lmask, state,
+                                           noise=z.clone())[0].numpy()
+        t_ref = time.time() - t1
+        img = vla.image(pix, state[0].numpy(), None, seed=a.seed + 1)
+    else:
+        img = vla.image(pix, state[0].numpy(), noise[0].numpy())
     print(f"resident policy: {len(progs)} programs ({len(vla.enc)} prefix, {len(vla.step[0])} "
           f"a step x {vla.steps}), DRAM image {len(img) / 2**20:.1f} MiB, compiled in "
           f"{time.time() - t0:.1f}s")
@@ -212,7 +233,8 @@ def run_resident(a, pol, x, ref, t_ref):
     print(f"device run {time.time() - t0:.1f}s ({st}), float run {t_ref:.2f}s")
     print(f"actions [{ref.shape[0]} x {ref.shape[1]}] vs float32: rel L2 {rel:.4f}, max |d| "
           f"{float(np.abs(got - ref).max()):.4f} (range {float(np.abs(ref).max()):.3f}); host: "
-          f"inputs written, actions read, nothing computed")
+          f"inputs written, actions read, nothing computed"
+          f"{' (the noise drawn on the device from the seed)' if dn else ''}")
     return 0
 
 
