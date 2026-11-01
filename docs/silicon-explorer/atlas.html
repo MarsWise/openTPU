@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Explore openTPU as an interactive hierarchy: board, FPGA, systolic MXU, DSP48E1, SRAM and logic, with measured and conceptual data paths.">
+<title>Inside openTPU — interactive architecture and dataflows</title>
+<link rel="stylesheet" href="./atlas.css">
+<script src="./atlas.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#stage">Skip to architecture</a>
+<header class="site-head">
+ <div class="brand">
+  <div class="brand-top"><span class="brand-mark">oTPU</span><span class="brand-eyebrow">A hardware-first inference accelerator, interactively</span></div>
+  <h1>Inside <span>openTPU</span></h1>
+  <p class="tagline">From a $50 FPGA card to one DSP48E1 multiply-add. Every block has a path inward, a dataflow story and its RTL source.</p>
+ </div>
+ <div class="flow-nav" id="flow-nav" aria-label="Interactive dataflow demonstrations"></div>
+</header>
+
+<div class="workspace">
+ <main class="main-stage" id="stage">
+  <div class="scene-tools">
+   <button id="btn-up" class="tool">↑ Zoom out</button>
+   <nav id="breadcrumbs" class="breadcrumbs" aria-label="Architecture hierarchy"></nav>
+   <span class="scene-scale" id="scene-scale">Logical view</span>
+   <button id="btn-zout" class="square" title="Zoom out view">−</button>
+   <button id="btn-zin" class="square" title="Zoom in view">+</button>
+   <button id="btn-home" class="square" title="Back to board">⌂</button>
+  </div>
+  <div class="svg-wrap" id="svg-wrap">
+   <svg id="diagram" viewBox="0 0 1120 720" xmlns="http://www.w3.org/2000/svg" role="group" tabindex="0" aria-label="Interactive architecture diagram. Select a part for explanation. Double-click or press Enter to zoom inside.">
+    <defs>
+      <pattern id="grid-pattern" patternUnits="userSpaceOnUse" width="25" height="25"><circle cx="2" cy="2" r="0.7" fill="#25445f"/></pattern>
+      <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#f4bd62"/></marker>
+      <linearGradient id="chip-grad" x2="1" y2="1"><stop offset="0" stop-color="#1d3653"/><stop offset="1" stop-color="#122434"/></linearGradient>
+    </defs>
+    <rect width="1120" height="720" fill="#0b151f"/>
+    <rect width="1120" height="720" fill="url(#grid-pattern)"/>
+    <g id="camera"></g>
+    <g id="overlay"></g>
+   </svg>
+   <div class="scene-hint" id="hint">Click to inspect · Double-click to go inside · Scroll/pinch to zoom · Drag to pan</div>
+   <button class="selection-pill" id="selection-pill" hidden>Zoom into selected part ↳</button>
+   <div class="mini-map" id="minimap" aria-hidden="true">FPGA → RTL → cell</div>
+  </div>
+  <div class="stage-footer">
+    <span class="legend-item"><i class="lg-compute"></i> compute</span>
+    <span class="legend-item"><i class="lg-memory"></i> memory</span>
+    <span class="legend-item"><i class="lg-control"></i> control</span>
+    <span class="legend-item"><i class="lg-physical"></i> physical / conceptual</span>
+    <span class="scene-status" id="scene-status" aria-live="polite"></span>
+  </div>
+ </main>
+ <aside id="inspector" class="inspector" aria-label="Details and sources">
+  <div class="inspector-scroll">
+    <div class="inspector-head"><span class="micro-label">INSPECTOR</span><button id="btn-panel-close" aria-label="Hide inspector" class="square">×</button></div>
+    <div id="inspector-main">
+      <div class="inspector-kicker" id="node-kicker">ATLAS · SOURCE-VERIFIED</div>
+      <h2 id="node-title">Kintex-7 FPGA</h2>
+      <p id="node-description">Select any part of the diagram for its function, parameters and RTL reference.</p>
+      <div class="node-facts" id="node-facts"></div>
+      <div class="inspector-note" id="node-note"></div>
+      <div class="zoom-actions" id="node-actions"></div>
+      <h3>Implementation / evidence</h3>
+      <div id="node-sources" class="sources"></div>
+    </div>
+    <div id="stage-details" class="stage-details" hidden>
+     <div class="micro-label">DATAFLOW STAGE</div>
+     <h3 id="flow-stage-title"></h3>
+     <p id="flow-stage-description"></p>
+     <div id="flow-stage-tags" class="flow-stage-tags"></div>
+     <a id="flow-stage-source" target="_blank" rel="noopener noreferrer">View source</a>
+    </div>
+  </div>
+  <div class="inspector-foot">
+   <div class="row"><span class="provenance" id="provenance">Documented / source-linked</span><span id="node-count" class="muted"></span></div>
+   <label for="node-search" class="micro-label">Find a hardware block</label>
+   <input id="node-search" type="search" placeholder="Search: TMM, DSP, bank 3…" autocomplete="off">
+   <div id="search-results" class="search-results" hidden></div>
+  </div>
+ </aside>
+</div>
+
+<section class="player" id="player" aria-label="Data flow animation and guided tour">
+ <div class="player-row">
+  <button class="player-primary" id="btn-play" title="Space">▶ Play</button>
+  <button class="tool" id="btn-speed" title="Playback speed (S)">1×</button>
+  <button class="square" id="btn-prev" title="Previous stage (Left arrow)">←</button>
+  <div class="stages" id="stage-buttons" role="group" aria-label="Stages"></div>
+  <button class="square" id="btn-next" title="Next stage (Right arrow)">→</button>
+  <button class="tool toggle on" id="btn-follow" title="Follow stages with the camera (C)">Follow</button>
+  <button class="player-primary secondary" id="btn-tour" title="18-slide guided tour (T)">Tour</button>
+  <button class="tool" id="btn-present" title="Full screen (F)">Present</button>
+  <button class="tool" id="btn-panel" title="Show or hide details (P)">Panel</button>
+ </div>
+ <div class="player-caption">
+  <div class="cap-title"><span id="cap-label">EXPLORE</span><div class="tour-dots" id="tour-dots"></div></div>
+  <p id="caption" aria-live="polite">Pick a dataflow, click a block, or start the guided tour.</p>
+  <div class="cap-bottom"><span id="cap-extra">Space pause · ←/→ next stage · +/− zoom · T tour · F fullscreen</span><button id="btn-copy" class="plain" title="Copy shareable link">Copy link</button></div>
+ </div>
+</section>
+
+<section class="below">
+ <div class="below-intro">
+   <h2>What this project actually documents</h2>
+   <p>The board is a Xilinx Kintex-7 XC7K480T with two 2 GiB DDR3 channels. Its core combines a scoreboard sequencer, DMA, INT8/FP4/ternary matrix datapaths, FP32 vector units, local tensor memory and a quantizer. This page is <strong>not</strong> a fabricated chip layout or a transistor extraction: source-backed block diagrams and textbook-level CMOS/physical views are marked separately.</p>
+ </div>
+ <div class="below-grid">
+   <article><h3>01 · Architecture, not guesses</h3><p>Board configuration, the RTL module hierarchy and exact memory mapping are linked directly to a pinned source revision. Unsupported placements are clearly designated illustrative.</p></article>
+   <article><h3>02 · Real performance, separated</h3><p>BitNet's measured throughput is not the MXU arithmetic peak. Model-dependent DDR traffic, PCIe overhead and INT8/FP4/TMM format differences are never presented as interchangeable.</p></article>
+   <article><h3>03 · Deep physical zoom</h3><p>The MXU's actual DSP48E1 primitives can be followed to M, P and PCIN/PCOUT. Below that, Boolean gates, SRAM cells, transistors and atomic structures are explanatory models, not recovered Xilinx schematics.</p></article>
+ </div>
+ <div class="measurement">
+   <h2>Measured and derived: separate evidence</h2>
+   <table>
+     <thead><tr><th>Workload or limit</th><th>Value</th><th>Evidence</th></tr></thead>
+     <tbody>
+       <tr><td>BitNet b1.58 2B4T, 30-layer on-device decode</td><td>145.8 ms / token</td><td><span class="tag measured">Measured, dated board test</span></td></tr>
+       <tr><td>Same BitNet test including the host</td><td>271.5 ms / token</td><td><span class="tag measured">Measured, host-driven test</span></td></tr>
+       <tr><td>Ternary TMM M=1</td><td>127.7 MAC / cycle</td><td><span class="tag measured">Measured on board</span></td></tr>
+       <tr><td>Ternary TMM M=16</td><td>511.6 MAC / cycle</td><td><span class="tag measured">Measured on board</span></td></tr>
+       <tr><td>INT8 MXU m4 arithmetic ceiling</td><td>512 MAC / cycle</td><td><span class="tag derived">D × MCOLS</span></td></tr>
+       <tr><td>DDR3 peak bandwidth, two channels</td><td>17.056 GB/s</td><td><span class="tag derived">2 × 8 B × 1,066 MT/s</span></td></tr>
+     </tbody>
+   </table>
+   <p class="muted small">Measured BitNet values are from <a target="_blank" rel="noopener noreferrer" href="https://github.com/MarsWise/openTPU/blob/55b975c14346cc692f1765729d750d79e8bc0b04/docs/nextgen/BITNET_COMPAT.md">the 2026-10-20 FPGA run</a>; they do not guarantee the speed of a newer image. Counts and clocks are from <a target="_blank" rel="noopener noreferrer" href="https://github.com/MarsWise/openTPU/blob/55b975c14346cc692f1765729d750d79e8bc0b04/targets/ypcb-00338.toml">the target file</a>.</p>
+ </div>
+ <div class="footnotes">
+   <h2>Evidence, limits, and scale</h2>
+   <p>The source diagrams are logical and interactive. Xilinx implementation results, exact BRAM/DSP placement, post-route wire lengths and gate-level switching are not accessible through the source alone. The physical scale continuation uses public semiconductor concepts and estimates and is labelled <em>textbook</em> wherever it stops describing verified openTPU RTL. No performance animations are claimed to be measurements: the actual timeline belongs to <a target="_blank" rel="noopener noreferrer" href="https://github.com/MarsWise/openTPU/blob/55b975c14346cc692f1765729d750d79e8bc0b04/docs/lens.md">otpu-lens</a>.</p>
+   <p class="muted small">Independent openTPU educational visualization. Inspired by the depth and interactive storytelling of the original <a href="https://spacesheep.dev/@yaroslavvb/et-soc1-chip-diagram" target="_blank" rel="noopener noreferrer">ET-SoC-1 interactive research</a>; no source HTML, artwork or imagery has been copied.</p>
+ </div>
+</section>
+<footer><span>openTPU Atlas · Source revision <code>55b975c14346</code> · Independent visualization</span><a href="./deep.html">Previous prototype (archived)</a></footer>
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
