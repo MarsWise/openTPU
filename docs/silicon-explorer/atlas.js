@@ -140,6 +140,29 @@ node("ddrchip","ddr0","DDR3 memory device","Off-chip DRAM storage and interface;
 node("dramBank","ddrchip","DRAM bank","DRAM controller groups rows and columns across banks. No exact vendor row address floorplan is inferred.","DRAM bank","memory","docs/litedram.md");
 node("dramRow","dramBank","DRAM row","A row of capacitor cells accessed through wordlines and sense amplifiers. Explanatory representation.","Wordline + sense","physical","docs/litedram.md",{},"conceptual");
 node("dramCell","dramRow","1T1C DRAM cell","A textbook storage capacitor charged/discharged through one access transistor.","One transistor + capacitor","physical","docs/litedram.md",{"Cell":"1T1C"},"conceptual","Not a photomicrograph or cell extraction of this DDR3 part.");
+
+for(let i=0;i<8;i++){
+ node("vlane"+i,"vpuLane","Lane "+i,"A 32-bit FP32 slice of vector data; "+(i<2?"this lane also handles longer composite functions.":"simple arithmetic operations take this lane."),i<2?"Long FP32 lane":"Simple FP32 lane","compute",vpu,{"Lane":String(i),"Composite":i<2?"yes":"no"},"documented");
+ node("vlane"+i+"pipe","vlane"+i,"FP32 slot","Register and combinational stages implement the exact configured FP32 function with clock enable.","Mul / add stage","compute",fpipe);
+}
+for(const [id,name,brief,notes] of [
+ ["quantread","TMEM read","Read FP32 activation rows through the memory arbiter.","One or more words per grant"],
+ ["quantmax","Block analysis","Compute activation magnitude and group scaling information; exact method from QACT RTL.","Sub-block metadata"],
+ ["quantround","INT8 quantizer","Convert group values to bounded INT8 representations using selected offsets/scales.","Rounding and limits"],
+ ["quantwrite","ACT RAM write","Write quantized bytes to stationary ACT RAM and produce separate 64-bit scale records.","Delayed write path"]
+])node(id,"quant",name,brief,notes,"compute","rtl/vpu/otpu_quant.sv");
+for(const [id,name,brief] of [
+ ["hazard","Memory footprint checks","At dispatch, RAW/WAR/WAW conflicts with older commands are recorded."],
+ ["ready","Oldest ready issue","The oldest ready instruction for a free unit may start independently of other busy units."],
+ ["waitcounts","WAITC alternative","Optional wait-count entries replace repeated full footprint comparison in supported builds."]
+])node(id,"scoreboard",name,brief,name,"control",seq);
+for(const [id,name,desc] of [
+ ["nand","NAND gate","Y = NOT(A AND B); a textbook CMOS realization has four transistors."],
+ ["xor","XOR gate","Y = A XOR B; standard Boolean arithmetic bit primitive."],
+ ["fulladd","One-bit full adder","Sum = A XOR B XOR CIN, carry = majority(A,B,CIN)."],
+ ["mux","2:1 multiplexer","Y = sel ? B : A, usually mapped into LUTs or dedicated mux resources."]
+])node(id,"logicgate",name,desc,name,"physical",doc,{},"conceptual","This is a textbook logic circuit, not an extracted FPGA cell.");
+
 const PATHNODES=()=>DATA.size;
 
 const ST=(id,title,caption,src,kind="documented",tags=[])=>({id,title,caption,src:src||DATA.get(id)?.src,kind,tags});
@@ -356,6 +379,167 @@ function makePart(g,id,x,y,w,h,opts={}){
  gg.addEventListener("keydown",ev=>{if(ev.key==="Enter"){ev.preventDefault();navigate(id)}else if(ev.key===" "){ev.preventDefault();choose(id)}});
  return gg;
 }
+
+function line(g,x1,y1,x2,y2,color="#5a89ad",thick=3){
+ return E("path",{d:"M"+x1+" "+y1+" L"+x2+" "+y2,stroke:color,"stroke-width":thick,fill:"none"},g);
+}
+function point(g,x,y,r=5,color="#76a3c9"){E("circle",{cx:x,cy:y,r,fill:color},g)}
+function bus(g,x,y,w,label,color="#7ba9c9"){
+ E("rect",{x,y,width:w,height:23,rx:5,stroke:color,fill:"#173047"},g);
+ text(g,x+w/2,y+16,label,12,"#e5eff8",600).setAttribute("text-anchor","middle");
+}
+function watermark(g,label="Illustrative logical drawing · not a placed FPGA floorplan"){
+ text(g,560,691,label,11,"#829eb2").setAttribute("text-anchor","middle");
+}
+function specialized(g,n){
+ const id=n.id;
+ if(id==="rack"){
+  makePart(g,"host",65,193,405,376);
+  makePart(g,"pciecard",646,193,404,376);
+  line(g,470,350,646,350,"#e3a75c",8);
+  bus(g,492,310,132,"PCIe", "#c59a60");
+  bus(g,400,602,320,"Compiler → DMA → results");
+  watermark(g,"Two real machines / components, positioned for explanation only");
+  return true;
+ }
+ if(id==="pciecard"){
+  E("rect",{x:70,y:171,width:976,height:457,rx:20,fill:"#123b35",stroke:"#3ea681","stroke-width":3},g);
+  for(let i=0;i<16;i++)E("rect",{x:210+i*34,y:618,width:22,height:23,fill:"#b59a4d",rx:2},g);
+  makePart(g,"fpga",258,253,528,252);
+  makePart(g,"ddr0",98,224,150,155);
+  makePart(g,"ddr1",798,224,218,155);
+  makePart(g,"powers",98,400,150,134);
+  bus(g,310,551,414,"PCIe XDMA Gen2 x8 endpoint");
+  watermark(g,"Board component placement is schematic, not a board-photo or PCB drawing");
+  return true;
+ }
+ if(id==="fpga"){
+  E("rect",{x:80,y:170,width:964,height:458,rx:18,fill:"#132f4b",stroke:"#4f88bd","stroke-width":3},g);
+  makePart(g,"shell",101,197,238,320);
+  makePart(g,"slice",348,197,482,320);
+  makePart(g,"bitlogic",839,197,182,320);
+  bus(g,195,550,725,"Shared FPGA clock · arbitration · routing");
+  watermark(g,"Die geometry is illustrative; original physical placement is not provided by openTPU RTL");
+  return true;
+ }
+ if(id==="slice"){
+  const plan=[
+   ["seq",56,181,325,130],["dma",399,181,328,130],["tmem",745,181,321,130],
+   ["mxu",56,387,326,150],["vpu",399,387,328,150],["quant",744,387,322,150],
+   ["actram",55,559,312,95],["collective",397,559,324,95]
+  ];
+  bus(g,72,328,975,"TMEM / DRAM arbitration and unit dependency handshakes","#b29af0");
+  for(const [part,x,y,w,h] of plan){
+   makePart(g,part,x,y,w,h);
+   if(y===181)line(g,x+w/2,y+h,x+w/2,328,"#6389aa");
+   if(y===387)line(g,x+w/2,351,x+w/2,y,"#6389aa");
+  }
+  watermark(g,"All units execute concurrently if dependencies and memory grants allow");
+  return true;
+ }
+ if(id==="mxu"){
+  makePart(g,"weights",62,191,457,108);makePart(g,"stationary",609,191,448,108);
+  line(g,295,299,295,328,"#edb36e",4);line(g,824,299,824,328,"#5dccaa",4);
+  bus(g,146,328,831,"WEIGHT STREAM + STATIONARY ACTIVATIONS", "#7caaca");
+  makePart(g,"array",141,368,830,135);
+  line(g,559,503,559,536,"#76b9d5",4);
+  makePart(g,"epilogue",141,537,390,111);makePart(g,"tmm",579,537,392,111);
+  watermark(g,"D=128 · MCOLS=4 · int8 arithmetic peak 512 MAC/cycle");
+  return true;
+ }
+ if(id==="array"){
+  bus(g,56,160,1010,"ONE WEIGHT CHUNK STREAMED ACROSS ALL FOUR COLUMNS", "#d4a165");
+  for(let c=0;c<4;c++){
+   const x=60+c*254;
+   makePart(g,"col"+c,x,208,238,384);
+   for(let i=0;i<8;i++){
+    E("rect",{x:x+16,y:288+i*30,width:206,height:23,rx:4,fill:i%2?"#285f80":"#1d425e",stroke:"#4085b6"},g);
+    text(g,x+119,305+i*30,"16 DSP chain · group "+i,12,"#dcebf7").setAttribute("text-anchor","middle");
+   }
+  }
+  watermark(g,"Eight chains per column · sixteen DSP48E1 positions per chain · 512 product positions total");
+  return true;
+ }
+ if(/^col[0-3]$/.test(id)){
+  const num=Number(id.slice(3));
+  bus(g,66,166,988,"Column "+num+" · 128 INT8 products, grouped into eight PCIN/PCOUT cascades","#91bae1");
+  for(let i=0;i<8;i++){
+    const x=66+(i%4)*250,y=211+Math.floor(i/4)*196;
+    const gn=id+"g"+i;makePart(g,gn,x,y,232,167);
+    for(let j=0;j<16;j++)E("rect",{x:x+13+(j%8)*26,y:y+82+Math.floor(j/8)*28,width:19,height:18,rx:2,fill:"#266b86",stroke:"#67a8d0"},g);
+  }
+  bus(g,248,630,624,"16-products/group → 8 group sums → column end");
+  return true;
+ }
+ if(/^col[0-3]g[0-7]$/.test(id)){
+  const p=id;
+  bus(g,95,171,930,"DSP48E1 chain: each PE multiplies INT8, then adds PCIN to M");
+  for(let i=0;i<16;i++){
+   const x=72+(i%8)*124,y=225+Math.floor(i/8)*201;
+   makePart(g,p+"pe"+i,x,y,115,175);
+   if(i%8<7)line(g,x+115,y+86,x+124,y+86,"#f3b75c",3);
+   if(i===7)line(g,1067,310,1067,510,"#f3b75c",4);
+  }
+  bus(g,195,645,730,"PCIN → product + accumulate → PCOUT");
+  return true;
+ }
+ if(/pe\d+$/.test(id)&&id.includes("col")){
+  const placements=[
+    ["areg",69,193,299,105],["inmode",424,193,292,105],
+    ["breg",769,193,278,105],["product",414,356,308,121],
+    ["psum",146,542,333,95],["cascade",647,542,337,95]
+  ];
+  for(const [suffix,x,y,w,h] of placements)makePart(g,id+suffix,x,y,w,h);
+  line(g,215,298,483,356,"#eca953",4);line(g,569,298,569,356,"#eca953",4);line(g,902,298,662,356,"#eca953",4);
+  line(g,555,477,318,542,"#d7b47a",4);line(g,479,590,647,590,"#d7b47a",4);
+  bus(g,384,657,358,"DSP48E1 multiplier + accumulator");
+  return true;
+ }
+ if(id==="tmem"){
+  makePart(g,"bankArb",78,182,444,116);makePart(g,"bypass",591,182,440,116);
+  bus(g,90,325,940,"TMEM logical bank = word address % 8","#57c8ab");
+  makePart(g,"banks",80,393,454,174);makePart(g,"bram",591,393,438,174);
+  bus(g,230,603,665,"65,536 FP32 words × 4 bytes = 256 KiB");
+  watermark(g,"Memory requests are resource-limited; not a cache automatically fetching DDR3 weights");
+  return true;
+ }
+ if(id==="banks"){
+  bus(g,80,169,960,"8 logical TMEM banks · each 8,192 32-bit words","#3cbe96");
+  for(let i=0;i<8;i++){
+   const x=84+(i%4)*242,y=215+Math.floor(i/4)*186;
+   makePart(g,"bank"+i,x,y,221,160);
+   for(let j=0;j<12;j++)E("rect",{x:x+13+j*16,y:y+75,width:13,height:52,rx:2,fill:j%3===0?"#267764":"#21594c",stroke:"#319a83"},g);
+  }
+  bus(g,190,627,740,"bank = word address mod LANES = address mod 8");
+  return true;
+ }
+ if(id==="vpu"){
+  bus(g,93,161,923,"One FP32 word per VPU lane for simple vector operations","#7bb4e7");
+  makePart(g,"vpuLane",83,230,452,242);makePart(g,"fops",589,230,448,242);
+  for(let i=0;i<8;i++)E("rect",{x:103+i*53,y:328,width:44,height:60,rx:5,fill:i<2?"#36596f":"#204566",stroke:i<2?"#82cbec":"#4b96b9"},g);
+  makePart(g,"reduction",83,524,452,111);makePart(g,"composite",589,524,448,111);
+  watermark(g,"This VPU is a distinct datapath from the systolic MXU; no independent FP32 tensor FMA array is invented");
+  return true;
+ }
+ if(id==="quant"){
+  const steps=["quantread","quantmax","quantround","quantwrite"];
+  for(let i=0;i<steps.length;i++){
+    const x=80+i*255;makePart(g,steps[i],x,278,234,200);
+    if(i<3)line(g,x+234,373,x+255,373,"#e6ad67",4);
+  }
+  bus(g,155,568,820,"FP32 TMEM → scale / offset → INT8 ACT RAM");
+  return true;
+ }
+ if(id==="scoreboard"){
+  const p=["hazard","ready","waitcounts"];for(let i=0;i<3;i++)makePart(g,p[i],89+i*350,220,315,215);
+  for(let r=0;r<6;r++)for(let c=0;c<9;c++)E("rect",{x:200+c*75,y:503+r*19,width:55,height:11,rx:2,fill:(r*3+c)%5===0?"#9569bf":"#334c69",stroke:"#54769b"},g);
+  text(g,560,657,"Conceptual dependency matrix: RAW, WAR, WAW · specific content is runtime-dependent",13,"#b2c6d5").setAttribute("text-anchor","middle");
+  return true;
+ }
+ if(id==="pciecard"||id==="dram")return false;
+ return false;
+}
+
 function drawChildren(g,n){
  const items=n.children;
  if(!items.length){drawLeaf(g,n);return}
@@ -451,7 +635,7 @@ function draw(){
  const n=DATA.get(view);if(!n)return;
  camera.replaceChildren();
  const g=E("g",{},camera);
- drawFrame(g,n);drawChildren(g,n);
+ drawFrame(g,n);if(!specialized(g,n))drawChildren(g,n);
  $("scene-scale").textContent=scaleOf(view);
  $("breadcrumbs").replaceChildren();
  ancestors(view).forEach((n,i)=>{
