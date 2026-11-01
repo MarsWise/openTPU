@@ -1,0 +1,35 @@
+name: openTPU Atlas verification
+
+on:
+  push:
+    branches:
+      - docs/opentpu-atlas-v2
+    paths:
+      - 'docs/silicon-explorer/**'
+      - '.github/workflows/atlas-verification.yml'
+  pull_request:
+    paths:
+      - 'docs/silicon-explorer/**'
+      - '.github/workflows/atlas-verification.yml'
+  workflow_dispatch:
+
+jobs:
+  static-and-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout atlas branch
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate standalone bundle, target config and RTL source links
+        run: python3 docs/silicon-explorer/verify_atlas.py
+      - name: Test twelve flows, tour, hierarchy and profile replay
+        run: node docs/silicon-explorer/atlas.test.mjs
