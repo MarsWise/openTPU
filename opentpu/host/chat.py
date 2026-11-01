@@ -587,6 +587,12 @@ class Chat:
             return "", turn
         self._next = None
         k = _common(ids, self.fed)
+        # activation steering (Engine.set_steering): context fed under another profile or scale
+        # is not this one's -- the turn restarts (its key is the KV cache's: steering.py)
+        sk = getattr(self.eng, "steer_key", None)
+        if sk != getattr(self, "_steer_fed", None):
+            k = 0
+            self._steer_fed = sk
         if k < len(self.fed):               # rendered otherwise than fed: from the common part
             had = len(self.fed)
             turn.restarted = self._rollback(k) == 0 and had > 0
@@ -1087,6 +1093,17 @@ def main(argv=None):
                          "device's loop; greedy only (sampling's uniforms come from the "
                          "host until the device has an RNG), no --mtp (its prefill picks the "
                          "first token on the host)")
+    ap.add_argument("--steer", default=None, metavar="VECTORS.npy",
+                    help="activation steering (Qwen3 / Llama-likes): a [layers, hidden] float "
+                         "array, one vector a layer, applied on the card after each layer's "
+                         "attention and MLP (kernels/steering.py); with --steer-* scales")
+    ap.add_argument("--steer-attn", type=float, default=0.0,
+                    help="--steer: the vector added after the attention, times this")
+    ap.add_argument("--steer-mlp", type=float, default=1.0,
+                    help="--steer: the vector added after the MLP, times this (default 1)")
+    ap.add_argument("--steer-proj", type=float, default=0.0,
+                    help="--steer: the projection onto the vector, times this, at both points "
+                         "(-1 with unit vectors removes the direction)")
     ap.add_argument("--host-first-token", action="store_true",
                     help="pick each reply's first token on the host from the prefill's "
                          "logits (the earlier behaviour; by default the device's decode loop "
@@ -1224,11 +1241,17 @@ def main(argv=None):
         else:
             if bitnet:
                 from opentpu.llm.bitnet import Weights as BitNetWeights
+            skw = {"steering": True} if a.steer else {}
+            if a.steer:
+                import inspect
+                if "steering" not in inspect.signature(spec.image).parameters:
+                    raise SystemExit("otpu-chat: --steer: this model family has no steering "
+                                     "yet (Qwen3 and the Llama-likes have)")
             eng = Engine(spec, BitNetWeights(path) if bitnet else load_weights(path), cap=a.cap,
                          cfg=cfg, backend=backend,
                          wformat=wformat, head_format=a.head_format,
                          resident=not a.per_position, prog_cache=not a.no_prog_cache,
-                         prompt_runs=not a.no_prompt_runs, snapshots=SNAPSHOTS)
+                         prompt_runs=not a.no_prompt_runs, snapshots=SNAPSHOTS, **skw)
     except (ConfigMismatch, ST.PoolError) as e:
         raise SystemExit(f"otpu-chat: {e}") from None
     weights = weights_label(eng.image, wformat)
@@ -1255,6 +1278,13 @@ def main(argv=None):
         print("otpu-chat: --mtp: these sampling settings stay on the host; plain decode",
               flush=True)
     chat.host_first = a.host_first_token
+    if a.steer:
+        try:
+            key = eng.set_steering(np.load(a.steer), s_attn=a.steer_attn, p_attn=a.steer_proj,
+                                   s_mlp=a.steer_mlp, p_mlp=a.steer_proj)
+        except (ValueError, AttributeError, TypeError) as e:
+            raise SystemExit(f"otpu-chat: --steer: {e}") from None
+        print(f"steering: profile {key or 'off (every scale 0)'}, on the card", flush=True)
     if a.strict_fpga or a.strict_fpga_only:
         from opentpu.llm import placement as PL
         sampled = not getattr(pick, "greedy", False)

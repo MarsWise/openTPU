@@ -319,6 +319,7 @@ class QTensor:
     grq: bool = False  # TMM GRQ block-major layout: rs / srs are the K planes' strides
     cq: int = 0        # TMM CQ (Config.TCQ): codes of `cq` bits through `lut` (opentpu/cq.py)
     lut: tuple | None = None
+    dense: bool = False  # TMM T5 (Config.TD5): five trits a byte, five blocks a chunk (trits.py)
 
     @staticmethod
     def weight(data, scale, n: int, k: int, fmt: str, D: int, grq: bool = False,
@@ -407,6 +408,25 @@ class QTensor:
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), stride, srs, D, wf=I.W8,
                        ternary=True, binary=bits == 1, gsc=True, cq=bits, lut=q)
 
+    @staticmethod
+    def dense_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
+                     srs: int | None = None, gsc: bool = True) -> "QTensor":
+        """Descriptor of an [n, k] TMM T5 matrix (trits.pack's rows: ceil(KB / 5) D-byte chunks
+        a row) with GSC's fp32 scale per (row, D-block) (srs bytes a row; T5 is GSC only)."""
+        if not gsc:
+            raise CompileError("TMM T5 (dense trits) takes group scales (GSC) only")
+        if n <= 0 or k <= 0 or k % D or D % 4:
+            raise CompileError(f"TMM T5 weight ({n}, {k}): K a multiple of D = {D}")
+        row_bytes = -(-(k // D) // 5) * D
+        stride = row_bytes if rs is None else rs
+        srs = (4 * (k // D) if gsc else 4) if srs is None else srs
+        if stride % D or stride < row_bytes or srs % 4 or srs < (4 * (k // D) if gsc else 4):
+            raise CompileError("TMM T5: D-aligned rows of ceil(KB / 5) chunks, the scales")
+        if gsc and D != 128:
+            raise CompileError("TMM T5 GSC needs D = 128")
+        return QTensor(Affine.of(data), Affine.of(scale), (n, k), stride, srs, D, wf=I.W8,
+                       rsc=not gsc, ternary=True, gsc=gsc, dense=True)
+
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
         pad an MM operand to whole D-blocks: the caller weights them 0). In a tiled matrix
@@ -454,7 +474,7 @@ class QTensor:
                            hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
                            hblock=self.hblock)
         if self.ternary:
-            bpc = 8 if self.binary else 2 if self.cq >= 3 else 4      # blocks a chunk
+            bpc = 5 if self.dense else 8 if self.binary else 2 if self.cq >= 3 else 4
             data = self.data + r0 * self.rs + c0.div_exact(bpc * self.D) * self.D
         elif self.wf == I.W8:
             data = self.data + r0 * self.rs + c0
@@ -476,7 +496,7 @@ class QTensor:
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
                        rsc=self.rsc, ternary=self.ternary, binary=self.binary, gsc=self.gsc,
                        hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
-                       hblock=self.hblock, cq=self.cq, lut=self.lut)
+                       hblock=self.hblock, cq=self.cq, lut=self.lut, dense=self.dense)
 
 
 VT_TILE = 256          # V^T cache tile (tokens): the attention block (qwen3.ATTN_BLOCK)
@@ -2144,6 +2164,8 @@ class Builder:
             raise CompileError("dot: binary weights require Config.TBIN / new firmware")
         if w.binary and w.gsc and not self.cfg.TBGSC:
             raise CompileError("dot: binary group scales require Config.TBGSC / new firmware")
+        if w.dense and not getattr(self.cfg, "TD5", False):
+            raise CompileError("dot: TMM T5 (dense trits) requires Config.TD5 / new firmware")
         if w.cq and not getattr(self.cfg, "TCQ", False):
             raise CompileError("dot: TMM CQ weights require Config.TCQ / new firmware")
         if w.cq:                                # the LUT the TMM CQs below decode with
@@ -2168,7 +2190,8 @@ class Builder:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
-            chunk_blocks = 8 if w.binary else 1 if w.grq else 2 if w.cq >= 3 else 4
+            chunk_blocks = 5 if w.dense else 8 if w.binary else 1 if w.grq else 2 if w.cq >= 3 \
+                else 4
             if w.ternary and k0 % chunk_blocks:
                 raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ranges "
                                    f"must start on a {chunk_blocks}-block boundary")
@@ -2181,19 +2204,22 @@ class Builder:
             m0 = 0
             for ab, mc in st.chunks:
                 if w.ternary:
-                    tquad = not w.gsc and not w.binary and st.quad and getattr(self.cfg, "TQUAD", False)
-                    tpair = not w.gsc and not w.binary and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
+                    tquad = not w.gsc and not w.binary and not w.dense and st.quad and \
+                        getattr(self.cfg, "TQUAD", False)
+                    tpair = not w.gsc and not w.binary and not w.dense and not tquad and \
+                        st.pair and getattr(self.cfg, "TPAIR", False)
                     ins = I.tmm(sa + (k0 * w.rs if w.grq else (k0 // chunk_blocks) * self.cfg.D),
                                 ssa + (k0 * w.srs if w.grq else 4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
                                 w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc, binary=w.binary,
-                                grq=w.grq,
+                                grq=w.grq, dense=w.dense,
                                 pair=tpair, quad=tquad,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
                                 comment=f"tmm {M}x{K} . {N}x{K}^T" + (f" cq{w.cq}" if w.cq else "")
+                                + (" t5" if w.dense else "")
                                 + (" grq" if w.grq else "") + (" pair" if tpair else "") + (" quad" if tquad else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")

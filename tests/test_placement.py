@@ -38,16 +38,22 @@ def test_per_position_inputs_are_refused(tiny):
 
 def test_first_token_and_sampling_are_stages(tiny):
     """The loop on the device: the reply's first token is the device's only when the loop
-    feeds the prompt's last token (first); sampling's uniforms and the prompt's penalty
-    factors are the host's until the device has an RNG (otpu-chat --strict-fpga-only)."""
+    feeds the prompt's last token (first); sampling's uniforms are the host's without VOP RAND
+    and the device's with it (Config.VRAND); the prompt's penalty tables are always built on
+    the device (kernels/penalty.py). otpu-chat --strict-fpga-only."""
+    import dataclasses
     W, spec = tiny
     cfg = device_config(spec, 256, rows=PREFILL_ROWS, lookup=True, S=1)
-    eng = Engine(spec, W, cap=256, cfg=cfg, resident=True)
+    eng = Engine(spec, W, cap=256, cfg=dataclasses.replace(cfg, VRAND=False), resident=True)
     where = {s: w for s, w, _ in PL.placement(eng, True)}
     assert where["first token of a reply"] == PL.DEVICE
     bad = PL.strict_errors(eng, True, first=False)
     assert len(bad) == 1 and bad[0].startswith("first token of a reply")
     bad = PL.strict_errors(eng, True, sampled=True, penalty=True)
-    assert [b.split(":")[0] for b in bad] == ["sampling uniforms",
-                                             "repetition penalty of the prompt"]
-    assert PL.strict_errors(eng, True, sampled=True, penalty=False)[0].startswith("sampling")
+    assert [b.split(":")[0] for b in bad] == ["sampling uniforms"]
+    where = {s: w for s, w, _ in PL.placement(eng, True, sampled=True, penalty=True)}
+    assert where["repetition penalty of the prompt"] == PL.DEVICE
+    eng2 = Engine(spec, W, cap=256, cfg=dataclasses.replace(cfg, VRAND=True), resident=True)
+    assert PL.strict_errors(eng2, True, sampled=True, penalty=True) == []
+    where = {s: w for s, w, _ in PL.placement(eng2, True, sampled=True)}
+    assert where["sampling uniforms"] == PL.DEVICE

@@ -340,6 +340,17 @@ carry word 4 bit 31 (CQ) and 29 (CQ4), the MXU's weight decode reading the LUT
 legacy commands drain, released in order) and completes it at once; no CQ command is in flight
 then, so a CQ TMM always decodes with the LUT of the LUTSETs before it. The LUT resets to 0.
 
+`TMM T5` (CAPS2 bit 15 / `Config.TD5`; word 4 bits 26 and 29 with bit 27 clear, GSC only, not
+GRQ/PAIR/QUAD): dense ternary weights, five trits a byte (`opentpu/trits.py`; the byte coding of
+llama.cpp's TQ1_0 and Bonsai 2's PTQ1_0, so a converter only moves bytes). A byte holds trits
+`t_0 .. t_4` (weight `t - 1`) as `q = ceil(v * 256 / 243)`, `v = sum t_n 3^(4-n)`; trit `n` is
+`((q * 3^n mod 256) * 3) >> 8`. A D-byte chunk holds five D-element blocks: byte `i` is element
+`i` of blocks `5c .. 5c + 4`, block `5c + n` in trit `n`, so a row is `ceil(KB / 5)` chunks (1.6
+weight bits a weight against the 2-bit layout's 2.0). GSC's fp32 scale per (row, D-block). The GSC
+adapter's subcommand for block `k` reads chunk `k / 5` with the trit `k mod 5` in word 4 bits 28,
+25:24 (bits 26 and 29 kept); the MXU's weight decode takes that trit of each byte. The
+sequencer's footprint reads `ceil(KB / 5) * D` bytes a row (`(KB + 4) * 205 >> 10`).
+
 #### Weight formats
 
 `WF = 0` (int8) streams int8 elements, block `k` of row `n` the `D` bytes at `sa + n*rs + k*D`.

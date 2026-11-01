@@ -1,4 +1,4 @@
-<# Build the experimental r8 m8 design (the r7 base + VOP RAND, TMM CQ, TFN atan, QST Q4, LDX) at 133.33 MHz. Never programs FPGA.
+<# Build the experimental r8 m8 design (the r7 base + VOP RAND, TMM CQ, TFN atan, QST Q4, LDX, TMM T5) at 133.33 MHz. Never programs FPGA.
    Prepare creates the Vivado project; Synth runs synthesis and structural
    checks; Build runs implementation and emits a bitstream only after the
    existing setup/hold gates pass. A successful build does not establish

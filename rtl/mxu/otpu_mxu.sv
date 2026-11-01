@@ -86,6 +86,11 @@ module otpu_tmm_gsc
   wire last_k = k + 8'd1 == held.w4[23:16];
   wire grq = !held.w4[26] && held.w4[28];
   wire cq = held.w4[27] && !held.w4[30], cq4 = cq && held.w4[29];
+  // TMM T5 (word 4 bits 26 and 29, CQ clear: dense trits, five blocks a D-byte chunk): block k
+  // is trit kq of chunk kc (k = 5 kc + kq); its subcommand: bits 26, 29, the trit in 28, 25:24
+  wire t5 = held.w4[26] && held.w4[29] && !held.w4[27] && !held.w4[30];
+  logic [7:0] kc;
+  logic [2:0] kq;
   always_comb begin
     // Unit ready cannot depend on cmd: the sequencer registers cmd after observing ready.
     // Accept GSC into held while a legacy command drains; forward its release/completion.
@@ -100,9 +105,10 @@ module otpu_tmm_gsc
       m_cmd.flags = 8'h80;                     // RSC, scale of this group alone
       m_cmd.flags[1] = held.flags[1] || k != 0; // first term: original ACC, later terms: ACC
       m_cmd.flags[2] = held.flags[2] && last_k;
-      m_cmd.w1 = held.w1 + (32'(held.w4[26] ? (k >> 3) : cq4 ? (k >> 1) : (k >> 2)) * D);
+      m_cmd.w1 = held.w1 + (32'(t5 ? kc : held.w4[26] ? (k >> 3) : cq4 ? (k >> 1) : (k >> 2)) * D);
       m_cmd.w2 = held.w2 + (32'(k) << 2);
-      m_cmd.w4 = held.w4[26] ? {cq, 3'd0, k[2], 1'b1, k[1:0], 8'd1, held.w4[15:0]} :
+      m_cmd.w4 = t5 ? {2'b00, 1'b1, kq[2], 1'b0, 1'b1, kq[1:0], 8'd1, held.w4[15:0]} :
+                 held.w4[26] ? {cq, 3'd0, k[2], 1'b1, k[1:0], 8'd1, held.w4[15:0]} :
                  cq4 ? {cq, 1'b0, 1'b1, 4'd0, k[0], 8'd1, held.w4[15:0]} :
                        {cq, 5'd0, k[1:0], 8'd1, held.w4[15:0]};
       m_cmd.w6[31:24] = held.w6[31:24] + k;
@@ -123,6 +129,8 @@ module otpu_tmm_gsc
       released <= 0;
       held <= '0;
       k <= 0;
+      kc <= '0;
+      kq <= '0;
       wb <= '0;
       sb <= '0;
       lut <= '0;
@@ -144,6 +152,8 @@ module otpu_tmm_gsc
         IDLE: if (start && gsc) begin
           held <= cmd;
           k <= 0;
+          kc <= '0;
+          kq <= '0;
           wb <= cmd.w1;
           sb <= cmd.w2;
           released <= go && unreleased == 0;
@@ -165,6 +175,8 @@ module otpu_tmm_gsc
           if (last_k) state <= IDLE;
           else begin
             k <= k + 8'd1;
+            kq <= (kq == 3'd4) ? 3'd0 : kq + 3'd1;
+            if (kq == 3'd4) kc <= kc + 8'd1;
             wb <= wb + held.w5;
             sb <= sb + held.w7;
             state <= ISSUE;
@@ -179,9 +191,9 @@ module otpu_tmm_gsc
     if (start && !rdy) $fatal(1, "TMM GSC: start without ready");
     if (start && gsc && cmd.w4[30] && (cmd.w4 != 32'h4001_0001 || cmd.w6[31:1] != 31'h0000_8000))
       $fatal(1, "TMM LUTSET: N = KB = M = 1, half ors[0]");
-    if (start && gsc && !cmd.w4[30] && (cmd.w4[29] && (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) ||
-        cmd.w4[27] && cmd.w4[28]))
-      $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; CQ not with GRQ");
+    if (start && gsc && !cmd.w4[30] && (cmd.w4[29] && !(cmd.w4[26] && !cmd.w4[27] && !cmd.w4[28]) &&
+        (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) || cmd.w4[27] && cmd.w4[28]))
+      $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; CQ not with GRQ (T5: BIN + CQ4 alone)");
     if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
         cmd.w4[31:30] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
         cmd.w4[15:0] == 0 ||
@@ -303,13 +315,16 @@ module otpu_mxu
   endfunction
   localparam logic [1:0] WF_W8 = 2'd0, WF_NV = 2'd3;
   wire cmd_ternary = cmd.op == OP_TMM;
-  wire cmd_binary = cmd_ternary && cmd.w4[26];
+  // TMM T5 (the GSC adapter's subcommands: word 4 bits 26 and 29, 27 clear; the trit in 28,
+  // 25:24): dense trits, five a byte (opentpu/trits.py)
+  wire cmd_t5 = cmd_ternary && cmd.w4[26] && cmd.w4[29] && !cmd.w4[27];
+  wire cmd_binary = cmd_ternary && cmd.w4[26] && !cmd_t5;
   // TMM QUAD (the ternary K-split by four; TMM's weight-format field is reserved, its bit4 the
   // flag): a chunk's four K blocks in one advance, column j + q*M taking block 4c + q from ACT row
   // j + q*M (QACT DUP4), 4M <= MCOLS; the four partners' integers are added before the result FIFO
   wire cmd_quad = cmd_ternary && cmd.flags[4];
   // TMM GRQ: the adapter's block-major subcommand (four output rows a chunk, one per group)
-  wire cmd_grq = cmd_ternary && !cmd_binary && cmd.w4[28];
+  wire cmd_grq = cmd_ternary && !cmd_binary && !cmd_t5 && cmd.w4[28];
   // TMM CQ (the adapter's subcommands: word 4 bit 31; bit 29 CQ4): codes through the LUT
   wire cmd_cq = cmd_ternary && cmd.w4[31];
   wire cmd_cq4 = cmd_cq && !cmd_binary && cmd.w4[29];
@@ -327,7 +342,10 @@ module otpu_mxu
                        cmd.w4[30:28] != 0 ||
                        ((cmd.w4[27] || cmd.w4[25:24] != 0) && cmd.w4[23:16] != 1)))
       $fatal(1, "otpu_mxu: invalid BIN format, flags or D alignment");
-    if (cmd_ternary && !cmd_binary && {cmd.w4[30], cmd.w4[27:24]} != 0 &&
+    if (cmd_t5 && (cmd.w4[23:16] != 1 || cmd_pair || cmd_quad || !cmd.flags[7] ||
+                   {cmd.w4[28], cmd.w4[25:24]} > 3'd4 || cmd.w4[31:30] != 0))
+      $fatal(1, "otpu_mxu: TMM T5 subcommands are RSC, KB 1, unpaired, a trit below 5");
+    if (cmd_ternary && !cmd_binary && !cmd_t5 && {cmd.w4[30], cmd.w4[27:24]} != 0 &&
         ({cmd.w4[30], cmd.w4[27:26]} != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
       $fatal(1, "otpu_mxu: quarter select requires one unpaired block");
     if (cmd_cq && (cmd.w4[23:16] != 1 || cmd_pair || cmd_quad || cmd_grq || !cmd.flags[7] ||
@@ -397,6 +415,7 @@ module otpu_mxu
     logic [15:0]      KBm1;            // KBa - 1: the last advance's ck (last_k a compare, no adder)
     logic             pair, ternary, quad, binary;
     logic             cq, cq4;         // TMM CQ: the LUT's codes (CQ4: 4-bit, the half in quarter)
+    logic             t5;              // TMM T5: dense trits (quarter: the trit, 0..4)
     logic [MCOLS-1:0] hi;              // PAIR: the columns that take the odd blocks (j >= M)
     logic [MCOLS-1:0][1:0] qs;         // the block each column reads: PAIR {0, hi}; QUAD j / M
     logic [1:0]       kr;              // QUAD: KB mod 4, the last advance's blocks (0: four)
@@ -438,9 +457,11 @@ module otpu_mxu
     cmd_e.binary = cmd_binary;
     cmd_e.cq    = cmd_cq;
     cmd_e.cq4   = cmd_cq4;
+    cmd_e.t5    = cmd_t5;
     cmd_e.quad  = cmd_quad;
     cmd_e.kr    = cmd_KB8[1:0];
-    cmd_e.quarter = cmd_binary ? {cmd.w4[27], cmd.w4[25:24]} :
+    cmd_e.quarter = cmd_t5 ? {cmd.w4[28], cmd.w4[25:24]} :
+                    cmd_binary ? {cmd.w4[27], cmd.w4[25:24]} :
                     cmd_ternary ? {1'b0, cmd.w4[25:24]} : 3'b000;
     for (int j = 0; j < MCOLS; j++) begin
       cmd_e.hi[j] = cmd_pair && 32'(j) >= 32'(cmd.w6[23:16]);
@@ -832,6 +853,7 @@ module otpu_mxu
     logic [2:0] ts;       // TMM: packed chunk's block (eight for BIN, four for ternary)
     logic       qd;       // TMM QUAD: all four (the low stream carries the raw 2-bit codes)
     logic       cq, c4;   // TMM CQ: codes through the LUT (c4: 4-bit codes, ts the half)
+    logic       t5;       // TMM T5: dense trits, ts the trit
     logic [3:0] ov;       // QUAD: the quarters in the row (not past a KB of kr mod 4 blocks)
   } cm_t;
 
@@ -872,10 +894,26 @@ module otpu_mxu
   function automatic logic [7:0] wsel(input logic [D*8-1:0] w, input int i, input logic hb,
                                       input logic [1:0] wf, input logic ternary, input logic binary,
                                       input logic [2:0] ts, input logic cq, input logic c4,
-                                      input logic [127:0] lut);
+                                      input logic [127:0] lut, input logic t5);
     int symbol;
     logic [1:0] code;
     logic [3:0] c4v;
+    logic [15:0] tm;
+    if (ternary && t5) begin                       // TMM T5: trit ts of byte i (trits.py)
+      case (ts)
+        3'd0: tm = 16'(w[8 * i +: 8]);
+        3'd1: tm = 16'(w[8 * i +: 8]) * 16'd3;
+        3'd2: tm = 16'(w[8 * i +: 8]) * 16'd9;
+        3'd3: tm = 16'(w[8 * i +: 8]) * 16'd27;
+        default: tm = 16'(w[8 * i +: 8]) * 16'd81;
+      endcase
+      tm = 16'(tm[7:0]) * 16'd3;                   // t = ((q 3^n mod 256) 3) >> 8
+      case (tm[9:8])
+        2'd0: return -8'sd1;
+        2'd1: return 8'd0;
+        default: return 8'd1;
+      endcase
+    end
     if (binary) return cq ? lut[8 * int'(w[int'(ts) * D + i]) +: 8] :
                        w[int'(ts) * D + i] ? 8'd1 : -8'sd1;
     if (ternary && c4) begin                       // TMM CQ4: nibble i of half ts
@@ -931,11 +969,12 @@ module otpu_mxu
       m0.first <= (ck == 16'd0);
       m0.h <= c_w4 && !c_pair && ck[0];
       m0.o <= c_pair && !(last_k && c_KB[0]);
-      m0.ts <= c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
+      m0.ts <= pop_e.t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
                {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
       m0.qd <= c_quad;
       m0.cq <= pop_e.cq;
       m0.c4 <= pop_e.cq4;
+      m0.t5 <= pop_e.t5;
       m0.ov <= !(last_k && pop_e.kr != 2'd0) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
     end
@@ -1068,7 +1107,7 @@ module otpu_mxu
   // The decode's controls are copies of m0's (qd, ternary, h, ts) and of wf0 / pr0, loaded with
   // their next values: each reaches the D x 16 weight bits' muxes (m0.qd alone 2104 loads in r5's
   // m8 0f9f9b1d), m0's own fields the rest of S1.
-  (* max_fanout = 64 *) logic wq_qd, wq_tn, wq_bn, wq_h, wq_pr, wq_cq, wq_c4;
+  (* max_fanout = 64 *) logic wq_qd, wq_tn, wq_bn, wq_h, wq_pr, wq_cq, wq_c4, wq_t5;
   (* max_fanout = 64 *) logic [2:0] wq_ts;
   (* max_fanout = 64 *) logic [1:0] wq_wf;
   always_ff @(posedge clk) begin
@@ -1077,8 +1116,10 @@ module otpu_mxu
     wq_bn <= pop && c_binary;
     wq_cq <= pop && pop_e.cq;
     wq_c4 <= pop && pop_e.cq4;
+    wq_t5 <= pop && pop_e.t5;
     wq_h <= pop && c_w4 && !c_pair && ck[0];
-    wq_ts <= !pop ? 3'b000 : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
+    wq_ts <= !pop ? 3'b000 : pop_e.t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter :
+             c_pair ? {1'b0, ck[0], 1'b0} :
              {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
     wq_wf <= c_wf;
     wq_pr <= c_pair;
@@ -1088,8 +1129,8 @@ module otpu_mxu
   initial wq_v = 1'b0;
   always @(posedge clk) wq_v <= 1'b1;
   always @(posedge clk)
-    if (wq_v && {wq_qd, wq_tn, wq_bn, wq_h, wq_ts, wq_wf, wq_pr, wq_cq, wq_c4} !==
-                {m0.qd, m0.ternary, m0.binary, m0.h, m0.ts, wf0, pr0, m0.cq, m0.c4})
+    if (wq_v && {wq_qd, wq_tn, wq_bn, wq_h, wq_ts, wq_wf, wq_pr, wq_cq, wq_c4, wq_t5} !==
+                {m0.qd, m0.ternary, m0.binary, m0.h, m0.ts, wf0, pr0, m0.cq, m0.c4, m0.t5})
       $fatal(1, "otpu_mxu: the weight decode's control copies are not m0's");
 `endif
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
@@ -1098,8 +1139,8 @@ module otpu_mxu
       wd[i] <= wq_qd ? {8'd0, w0[2 * (3 * D + i) +: 2], w0[2 * (2 * D + i) +: 2],
                         w0[2 * (D + i) +: 2], w0[2 * i +: 2]} :
                {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts,
-                     wq_cq, wq_c4, cq_lut),
-                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut)};
+                     wq_cq, wq_c4, cq_lut, wq_t5),
+                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut, wq_t5)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
     otpu_skew #(.W(16), .N(i % CLS)) u_w (.clk, .en(1'b1), .d(wd[i]), .q(wc[0][i]));
@@ -2179,7 +2220,7 @@ module otpu_mxu
         for (int q = 0; q < 4; q++)
           if (m0.ov[q] && w0[2 * (q * D + i) +: 2] == 2'b11)
             $fatal(1, "otpu_mxu: reserved TMM symbol at quarter %0d, element %0d", q, i);
-    if (m0.v && m0.ternary && !m0.qd && !m0.binary && !m0.cq)
+    if (m0.v && m0.ternary && !m0.qd && !m0.binary && !m0.cq && !m0.t5)
       for (int i = 0; i < D; i++) begin
         int q0;
         q0 = int'(m0.ts);

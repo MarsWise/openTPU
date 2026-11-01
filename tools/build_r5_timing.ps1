@@ -65,6 +65,7 @@ $buildEnv = @{
     OTPU_TATAN_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_QST4_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_LDX_GEN = $(if ($R8) { '1' } else { '0' })
+    OTPU_TD5_GEN = $(if ($R8) { '1' } else { '0' })
     TRACE_DEPTH = '16384'; COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'; OTPU_SYS_MARGIN = ''
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
@@ -113,8 +114,8 @@ if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupSc
     $tbin = [int][bool]$BinaryWeights
     $tbgsc = [int][bool]$BinaryGroupScales
     $vu8 = [int][bool]$UnsignedBytes
-    $r8 = [int][bool]$R8
-    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8), TGRQ=bool($gsc), VRAND=bool($r8), TCQ=bool($r8), TATAN=bool($r8), QST4=bool($r8), LDX=bool($r8))):08x}')").Trim()
+    $rb8 = [int][bool]$R8         # (not $r8: PowerShell names are case-blind, $r8 IS the switch)
+    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8), TGRQ=bool($gsc), VRAND=bool($rb8), TCQ=bool($rb8), TATAN=bool($rb8), QST4=bool($rb8), LDX=bool($rb8), TD5=bool($rb8))):08x}')").Trim()
     if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate CFG_HASH' }
 }
 $buildLabel = if ($VectorCompare -or $BinaryWeights) { 'feature-enabled experimental' } else { 'r5 timing' }

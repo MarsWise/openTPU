@@ -15,9 +15,10 @@ def placement(eng, on_card: bool, first: bool = True, sampled: bool = False,
     (Engine.generate_card: greedy or the device's sampler), else the host picks each token.
     With the loop on the device: first, the loop picks a reply's first token too (its last
     prompt token fed by the loop: chat.Chat.device_first, otpu-serve's _prefill), else the
-    host picks it from the prefill's logits; sampled, the sampler's uniforms (the host's
-    generator: the device has no RNG yet); penalty, the repetition penalty's factors of the
-    prompt's ids (written by the host; the device adds its own tokens')."""
+    host picks it from the prefill's logits; sampled, the sampler's uniforms: the device's
+    VOP RAND when the image has it (Config.VRAND: the host writes a seed only), else the
+    host's generator; penalty, the repetition penalty's tables of the prompt's ids, built on
+    the device (Engine.penalty_init, kernels/penalty.py: the host writes the ids and R)."""
     img = eng.image
     out = []
     if not getattr(eng, "device_inputs", False):
@@ -47,11 +48,16 @@ def placement(eng, on_card: bool, first: bool = True, sampled: bool = False,
                     "the loop feeds the prompt's last token and picks it" if first else
                     "the host reads the prefill's logits and picks it"))
         if sampled:
-            out.append(("sampling uniforms", HOST, "the host's random generator (no RNG on "
-                        "the device yet: V_RAND)"))
+            from .generate import device_rng
+            if device_rng(getattr(eng, "cfg", None)):
+                out.append(("sampling uniforms", DEVICE, "VOP RAND (Config.VRAND): the host "
+                            "writes the seed only"))
+            else:
+                out.append(("sampling uniforms", HOST, "the host's random generator (an image "
+                            "without VOP RAND: Config.VRAND)"))
         if sampled and penalty:
-            out.append(("repetition penalty of the prompt", HOST, "the host writes R and 1/R "
-                        "for the context's ids"))
+            out.append(("repetition penalty of the prompt", DEVICE, "the device builds the "
+                        "tables (kernels/penalty.py); the host writes the ids and R"))
     else:
         out.append(("token selection", HOST, "the host reads the logits and samples"))
     return out

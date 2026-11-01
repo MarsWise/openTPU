@@ -330,7 +330,13 @@ package otpu_pkg;
         if (n != 0 && kb != 0 && m != 0) begin
           f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
                        ((c.op == OP_TMM) ? (c.w4[28] ? ((n >> 2) * D) :     // GRQ: a plane
+                                            // T5 (BIN + CQ4, CQ clear): five blocks a chunk,
+                                            // ceil(KB / 5) = (KB + 4) * 205 >> 10 (KB < 256)
+                                            (c.w4[26] && c.w4[29] && !c.w4[27]) ?
+                                              ((((kb + 32'd4) * 32'd205) >> 10) * D) :
                                             c.w4[26] ? (((kb + 32'd7) >> 3) * D) :
+                                            // CQ4 (CQ, 4-bit codes): two blocks a chunk
+                                            (c.w4[27] && c.w4[29]) ? (((kb + 32'd1) >> 1) * D) :
                                                         (((kb + 32'd3) >> 2) * D)) : kb * D));
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a

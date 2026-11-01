@@ -42,6 +42,7 @@ class Config:
     TATAN: bool = False      # TFN atan on [0, 1] (VOP 0x2A, table 8; CAPS2 bit12)
     QST4: bool = False       # QST Q4: 4-bit ROW rows (a 4-bit K cache; CAPS2 bit13)
     LDX: bool = False        # LDX, the DMA's indexed row gather from DRAM (CAPS2 bit14)
+    TD5: bool = False        # TMM T5: dense trits, five a byte (opentpu/trits.py; CAPS2 bit15)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
@@ -102,6 +103,7 @@ def board_config(**kw) -> Config:
                 TATAN=bool(int(env.get("OTPU_TATAN", 0))),
                 QST4=bool(int(env.get("OTPU_QST4", 0))),
                 LDX=bool(int(env.get("OTPU_LDX", 0))),
+                TD5=bool(int(env.get("OTPU_TD5", 0))),
                 TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
@@ -619,9 +621,12 @@ class Slice:
         rsc, pair = bool(ins.flags & I.F_RSC), bool(ins.flags & I.F_PAIR)
         quad = bool(ins.flags & I.F_QUAD)
         gsc = bool(ins.flags & I.F_GSC)
-        binary = bool(w[3] & I.TMM_BIN)
+        dense = (w[3] & I.TMM_T5) == I.TMM_T5 and not w[3] & (I.TMM_CQ | I.TMM_LUT)
+        if dense and not getattr(cfg, "TD5", False):
+            raise SimError("TMM T5 (dense trits): needs Config.TD5")
+        binary = bool(w[3] & I.TMM_BIN) and not dense
         grq = bool(w[3] & I.TMM_GRQ)
-        cq, cq4 = bool(w[3] & I.TMM_CQ), bool(w[3] & I.TMM_CQ4)
+        cq, cq4 = bool(w[3] & I.TMM_CQ), bool(w[3] & I.TMM_CQ4) and not dense
         if w[3] & I.TMM_LUT:                       # LUTSET: eight LUT entries, no data moves
             if not cfg.TCQ or not gsc or w[3] != (1 | (1 << 16) | I.TMM_LUT) or \
                     (w[5] & 0xFFFF) > 1 or (w[5] >> 16) != 1:
@@ -632,8 +637,10 @@ class Slice:
             return
         if (cq or cq4) and (not cfg.TCQ or not gsc or grq or (cq4 and (binary or not cq))):
             raise SimError("TMM CQ: needs Config.TCQ and GSC (not GRQ); CQ4 not with BIN")
-        w3 = w[3] & ~(I.TMM_CQ | I.TMM_CQ4)
+        w3 = w[3] & ~(I.TMM_CQ | I.TMM_CQ4 | (I.TMM_BIN if dense else 0))
         quarter = (w3 >> 24) & 3 if binary else (w3 >> 24) & ~(I.TMM_GRQ >> 24)
+        if dense and (grq or pair or quad or quarter or not gsc):
+            raise SimError("TMM T5: GSC only (not GRQ, PAIR, QUAD or a quarter)")
         if grq and (not cfg.TGRQ or not gsc or binary or quarter or N % 4 or M > cfg.MCOLS or
                     w3 & 0xe0000000 or ssa % 16 or srs % 16 or srs < 4 * N):
             raise SimError("TMM GRQ: needs Config.TGRQ, ternary GSC, N % 4 == 0, M <= MCOLS "
@@ -642,7 +649,7 @@ class Slice:
             raise SimError("TMM BIN: needs Config.TBIN, without PAIR/QUAD/quarter")
         if binary and gsc and not cfg.TBGSC:
             raise SimError("TMM BIN GSC: needs Config.TBGSC")
-        if quarter and (KB != 1 or quarter > 3 or pair or quad or gsc):
+        if quarter and not dense and (KB != 1 or quarter > 3 or pair or quad or gsc):
             raise SimError("TMM: a quarter selects one block of one packed chunk")
         if gsc and (not cfg.TGSC or unit or rsc or pair or quad or ins.flags & I.F_ASCALE):
             raise SimError("TMM GSC: needs Config.TGSC and no UNIT/RSC/PAIR/QUAD/ASCALE")
@@ -662,7 +669,7 @@ class Slice:
             raise SimError("TMM: select exactly one of UNIT or RSC")
         if ins.flags & I.F_ASCALE and not (unit and accf):
             raise SimError("TMM: ASCALE needs UNIT and ACC")
-        bpc = 8 if binary else 2 if cq4 else 4      # blocks a D-byte chunk
+        bpc = 5 if dense else 8 if binary else 2 if cq4 else 4      # blocks a D-byte chunk
         row_bytes = ((KB + bpc - 1) // bpc) * D
         if grq:                                    # KB planes of N/4 chunks, of N scale words
             if sa % D or rs % D or rs < N // 4 * D or \
@@ -719,7 +726,12 @@ class Slice:
                 byte = self.dram[sa + np.arange(N)[:, None] * rs + (k // 2) * D +
                                  (k % 2) * (D // 2) + lanes[None, :] // 2]
                 codes[:] = (byte >> (4 * (lanes % 2))[None, :]) & 15
-            for lane in range(D if not cq4 else 0):
+            if dense:                              # trit (k + quarter) % 5 of byte `lane`
+                wk = k + quarter
+                byte = self.dram[sa + np.arange(N)[:, None] * rs + (wk // 5) * D +
+                                 np.arange(D)[None, :]].astype(np.uint16)
+                codes[:] = (((byte * int(3 ** (wk % 5))) & 255) * 3 >> 8).astype(np.uint8)
+            for lane in range(D if not (cq4 or dense) else 0):
                 wk = k + quarter
                 per_byte, blocks = (8, 8) if binary else (4, 4)
                 symbol = lane + (wk % blocks) * D
@@ -730,9 +742,11 @@ class Slice:
                     continue
                 byte = self.dram[sa + np.arange(N) * rs + (wk // blocks) * D + symbol // per_byte]
                 codes[:, lane] = (byte >> ((symbol % per_byte) * (1 if binary else 2))) & (1 if binary else 3)
-            if not binary and not cq and np.any(codes == 0b11):
+            if not binary and not cq and not dense and np.any(codes == 0b11):
                 raise SimError("TMM: reserved ternary code 11")
-            if cq:                                 # the codebook LUT's int8 entries
+            if dense:                              # trit t: weight t - 1
+                weights = codes.astype(np.int64) - 1
+            elif cq:                               # the codebook LUT's int8 entries
                 weights = self.cq_lut[codes].astype(np.int64)
             else:
                 weights = (np.where(codes == 1, 1, -1) if binary else

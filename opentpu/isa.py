@@ -40,6 +40,8 @@ TMM_CQ = 1 << 27                # TMM word 4, GSC: codebook codes, each the LUT'
 #                                 2-bit (the ternary layout), with BIN 1-bit, with CQ4 4-bit
 TMM_CQ4 = 1 << 29               # TMM word 4, CQ: 4-bit codes, two D-element blocks a D-byte chunk
 TMM_LUT = 1 << 30               # TMM word 4: LUTSET, eight of the codebook LUT's 16 int8 entries
+TMM_T5 = TMM_BIN | TMM_CQ4      # TMM word 4 (the pair, CQ clear): dense trits, five a byte, five
+#                                 D-element blocks a D-byte chunk (opentpu/trits.py; Config.TD5)
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
 F_Q4 = 0x4                      # QST, ROW mode, es 1: 4-bit rows (int4, S = amax/7; Config.QST4)
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
@@ -466,7 +468,7 @@ def mm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fal
 
 def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=False,
         ascale=None, rsc=False, pair=False, quad=False, ra=0, rb=0, rc=0, comment="",
-        gsc=False, binary=False, grq=False):
+        gsc=False, binary=False, grq=False, dense=False):
     """TMM: signed-int8 ACT dot packed ternary rows (00=0, 01=+1, 10=-1, 11=invalid).
 
     Four D-element K blocks share one D-byte weight chunk. Each non-unit weight row has one
@@ -510,8 +512,11 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     _check(not (pair and quad), "TMM: PAIR and QUAD are exclusive")
     _check(not binary or not (pair or quad),
            "TMM BIN: PAIR and QUAD are not supported")
+    _check(not dense or (gsc and not (binary or grq or pair or quad)),
+           "TMM T5 (dense trits): GSC only, not with BIN, GRQ, PAIR or QUAD")
     return Instr(TMM, ra=ra, rb=rb, rc=rc, flags=fl,
-                 w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0) | (TMM_GRQ if grq else 0), rs,
+                 w=_w(sa, ssa, out, n | (kb << 16) | (TMM_BIN if binary else 0) | (TMM_GRQ if grq else 0) |
+                      (TMM_T5 if dense else 0), rs,
                       ors | (m << 16) | (ab << 24), srs), comment=comment)
 
 

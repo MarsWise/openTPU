@@ -39,10 +39,18 @@ def lut(codebook) -> tuple[np.ndarray, np.float32]:
 
 def pack(codes, bits: int, D: int = 128) -> np.ndarray:
     """Packed rows [N, chunks * D] (uint8) of codes [N, K] (K a multiple of D)."""
-    c = np.asarray(codes, np.uint8)
+    c = np.asarray(codes)
+    if bits not in (1, 2, 3, 4):
+        raise ValueError(f"CQ bits {bits}: 1 .. 4")
+    if c.ndim != 2 or c.shape[1] % D:
+        raise ValueError(f"codes [N, K], K a multiple of {D}")
+    if not (np.issubdtype(c.dtype, np.integer) or np.issubdtype(c.dtype, np.bool_)) \
+            and not (np.all(np.isfinite(c)) and np.array_equal(c, np.rint(c))):
+        raise ValueError("CQ codes: integers")
+    if c.size and (c.min() < 0 or c.max() >= 1 << bits):   # (CQ3: 0..7, though 4-bit laid out)
+        raise ValueError(f"CQ{bits} codes: 0 .. {(1 << bits) - 1}")
+    c = c.astype(np.uint8)
     N, K = c.shape
-    if K % D or bits not in (1, 2, 3, 4) or np.any(c >> (4 if bits == 3 else bits)):
-        raise ValueError(f"codes [N, K % D == 0] below 2^{bits}")
     KB, bpc = K // D, blocks_a_chunk(bits)
     nch = -(-KB // bpc)
     out = np.zeros((N, nch * D), np.uint8)

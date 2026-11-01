@@ -160,3 +160,17 @@ def test_compiled_cq_linear():
         got = run(comp, imgs).outputs["y"]
         dev = x @ CQ.device_dense(codes, norms, cb).T
         assert np.linalg.norm(got - dev) / np.linalg.norm(dev) < .012, bits
+
+
+def test_cq_pack_refuses_bad_codes():
+    """Codes are checked before the byte cast (CQ3's 8, a 256 that would wrap to 0, a
+    negative, a fraction)."""
+    good = np.zeros((2, 128), np.int64)
+    for bits, bad in ((3, 8), (4, 16), (2, 4), (1, 2), (4, 256), (4, -1)):
+        c = good.copy()
+        c[1, 5] = bad
+        with pytest.raises(ValueError, match="codes"):
+            CQ.pack(c, bits)
+    with pytest.raises(ValueError, match="integers"):
+        CQ.pack(good + 0.5, 4)
+    assert CQ.pack(good.astype(np.float32) + 7, 3).shape == (2, 128)

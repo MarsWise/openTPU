@@ -46,6 +46,7 @@ from . import rope_parameters
 from . import snapshot as SN
 from ..isasim import Config, Machine, design_config
 from ..kernels.attention import Additive, Bucket, _attend_heads
+from ..kernels import steering as ST
 from ..kernels.layouts import head_parallel_attention_weights
 from ..host.offload import BackendDram, RowLayout, RowServer
 from ..kernels import mailbox as MB
@@ -142,9 +143,9 @@ class Spec:
     def image(self, cfg: Config, cap: int, batch: int = 1, rows: int = 1,
               wformat: str = "int8", head_format: str | None = None,
               lookup: bool = False, embed_host: bool | None = None,
-              formats: str | None = None) -> "Image":
+              formats: str | None = None, steering: bool = False) -> "Image":
         return Image(self, cfg, cap, batch, rows, wformat, head_format, lookup, embed_host,
-                     formats)
+                     formats, steering)
 
 
 def finite(v: np.ndarray, name: str) -> np.ndarray:
@@ -806,14 +807,15 @@ def weight_kind(n: str) -> tuple:
 
 def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "int8",
                     head_format: str | None = None, formats: str | None = None,
-                    S: int = 1) -> np.ndarray:
+                    S: int = 1, steer: tuple | None = None) -> np.ndarray:
     """float64 decode that applies openTPU's quantization points but none of its rounding: the
     weights in their MXU formats (`wformat`, `head_format`, `formats` as in Image), every MM
     input quantized as QACT does on S slices (the card's 1; the design's 2: a row scale and
     offsets per D/4; the down projection's in its F chunks, kernels.mlp.down_chunk of a slice's
     F), int8 K (per token: ROW at d = D, else an offset per D-block) and V (per token), P per
     attention block with V's per-token scales folded in (_pv), and MM's window's drops.
-    Separates quantization error from kernel bugs."""
+    Separates quantization error from kernel bugs. steer: (vectors [L, H], words) activation
+    steering after each attention and MLP (kernels/steering.py reference)."""
     d, G = spec.head_dim, spec.n_q // spec.n_kv
     Wq: dict = {}
     head = "model.embed_tokens.weight" if spec.tied else "lm_head.weight"
@@ -869,11 +871,15 @@ def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "i
                 pp = np.exp(sc - sc.max())
                 o[hq] = _pv(pp, Vq[hq // G], Vs[hq // G], D) / pp.sum()
             x = x + w(p + "self_attn.o_proj.weight") @ _fake_q(o.reshape(-1), D)
+            if steer is not None:
+                x = ST.reference(x, steer[0][i], steer[1], ST.ATTN)
             h = _fake_q(norm(x, W[p + "post_attention_layernorm.weight"]), D)
             g = w(p + "mlp.gate_proj.weight") @ h
             u = w(p + "mlp.up_proj.weight") @ h
             x = x + w(p + "mlp.down_proj.weight") @ _fake_q((g / (1 + np.exp(-g))) * u, D,
                                                              chunk(i))
+            if steer is not None:
+                x = ST.reference(x, steer[0][i], steer[1], ST.MLP)
         out.append(w(head) @ _fake_q(norm(x, W["model.norm.weight"]), D))
     return np.array(out)
 
@@ -930,7 +936,8 @@ class Image(EmbedHost):
 
     def __init__(self, spec: Spec, cfg: Config, cap: int, batch: int = 1, rows: int = 1,
                  wformat: str = "int8", head_format: str | None = None, lookup: bool = False,
-                 embed_host: bool | None = None, formats: str | None = None):
+                 embed_host: bool | None = None, formats: str | None = None,
+                 steering: bool = False):
         spec.check(cfg)
         if cap % cfg.D:
             raise ValueError("KV capacity must be a multiple of D")
@@ -1030,6 +1037,14 @@ class Image(EmbedHost):
                                     waitc=cfg.SEQ_WC) if lookup else {}
         self.choices = {"embed_host": self.embed_host,          # (the compile worker's
                         "formats": self.formats}                # image)
+        # activation steering (kernels/steering.py): a vector a layer [L, H] and four words
+        # (s_attn, p_attn, s_mlp, p_mlp) the host writes; without it nothing is compiled in
+        self.steer = None
+        if steering:
+            srow = -(-4 * H // ALIGN) * ALIGN
+            self.steer = {"vec": b.alloc(spec.layers * srow), "row": srow,
+                          "words": b.alloc(4 * ST.WORDS)}
+            self.choices["steering"] = True
         self.nbytes = b.next
         if self.nbytes > cfg.DRAM_BYTES:
             raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB per slice, "
@@ -1169,6 +1184,11 @@ class Image(EmbedHost):
         D, d, H = cfg.D, spec.head_dim, spec.hidden
         rh = spec.rope_dim // 2
 
+        ulen = {}
+        for first, unit, reps in self.runs:
+            for e in range(len(unit)):
+                ulen[first + e] = len(unit)
+
         def layer(li, it=None):
             """Descriptors of layer `li` (static), or of element li of its run's unit at
             iteration `it` (a hardware-loop variable)."""
@@ -1198,6 +1218,13 @@ class Image(EmbedHost):
                               for j, r in enumerate(heads)}, self.cap, d, D, cfg.S, sid)
                       for heads in lofs["kvs"]]
             ns.kv = ns.kvs[0]
+            ns.steer = None
+            if getattr(self, "steer", None) is not None:      # this layer's vector, the words
+                st = self.steer
+                idx = Affine.of(li) + (0 if it is None else Affine.of(it) * ulen[li])
+                ns.steer = SimpleNamespace(
+                    v=Tensor(Affine(st["vec"]) + idx * st["row"], (H,), (1,)),
+                    w=Tensor(Affine(st["words"]), (ST.WORDS,), (1,)))
             return ns
 
         return SimpleNamespace(
@@ -1539,7 +1566,9 @@ def qwen3_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
     x, c, s_ = _inputs(m, pos, tok)
     for lw in _layers(m):
         x.set(_attention(x, lw, c, s_, pos, spec, block))
+        ST.apply(x, lw, ST.ATTN)
         x.set(_mlp(x, lw, spec))
+        ST.apply(x, lw, ST.MLP)
     _lm_head(x, m, spec)
 
 
@@ -1893,7 +1922,9 @@ def qwen3_rows(m, rows, logit_rows, block: int = ATTN_BLOCK, tokens=None):
     x, c, s_ = _inputs_rows(m, rows, tokens)
     for lw in _layers(m):
         x.set(_attention_rows(x, lw, c, s_, rows, spec, block))
+        ST.apply(x, lw, ST.ATTN)
         x.set(_mlp(x, lw, spec))
+        ST.apply(x, lw, ST.MLP)
     _lm_head_rows(x, m, spec, logit_rows)
 
 
@@ -1938,12 +1969,14 @@ def _lm_head_rows(x, m, spec, logit_rows):
 # =============================================================================== engine
 def device_config(spec: Spec, cap: int, batch: int = 1, rows: int = 1, wformat: str = "int8",
                   head_format: str | None = None, lookup: bool = False,
-                  experts: int | None = None, embed_host: bool | None = None, **kw) -> Config:
+                  experts: int | None = None, embed_host: bool | None = None,
+                  steering: bool = False, **kw) -> Config:
     """The design configuration with DRAM sized for this model (power of two MiB)."""
     probe = spec.image(design_config(DRAM_BYTES=1 << 40, **kw), cap, batch, rows, wformat,
                        head_format, **({"lookup": True} if lookup and has_lookup(spec) else {}),
                        **({"experts": experts} if experts is not None else {}),
-                       **({"embed_host": embed_host} if embed_host is not None else {}))
+                       **({"embed_host": embed_host} if embed_host is not None else {}),
+                       **({"steering": True} if steering else {}))
     size = 1 << max(20, (probe.nbytes - 1).bit_length())
     return design_config(DRAM_BYTES=size, **kw)
 
@@ -2302,7 +2335,7 @@ class Engine:
                  pool_map: bool = True, prog_cache: bool | None = None,
                  prompt_runs: bool = False, layer_ahead=None, expert_major: bool = False,
                  snapshots: int = 0, batch_area: bool = False, tile_runs: bool | None = None,
-                 tile_rows: int | None = None):
+                 tile_rows: int | None = None, steering: bool = False):
         from . import prefill as PF
         if getattr(spec, "native_bonsai", False):
             # Initial native firmware path: one token per run. It preserves full Hadamard
@@ -2319,6 +2352,9 @@ class Engine:
             wkw["experts"] = experts
         if embed_host is not None:          # the int8 embedding table on the host (default: the
             wkw["embed_host"] = embed_host  # image's choice, a MoE's untied table there)
+        if steering:                        # activation steering (kernels/steering.py): its
+            wkw["steering"] = True          # vectors and words in the image
+        self.steer_key = None               # the active profile's hash (the KV key's part)
         # an int8 embedding is dequantized on the device (the image's tables), never the host
         int8_embed = getattr(spec, "embed", "f32") == "int8"
         # (batch > 1: the tables serve every sequence; sequence 0 keeps the resident decode,
@@ -2677,6 +2713,34 @@ class Engine:
         if self._snaps is not None and seq == 0:
             self._snaps.at.clear()
             self._snaps.host.clear()
+
+    def set_steering(self, vectors=None, s_attn: float = 0.0, p_attn: float = 0.0,
+                     s_mlp: float = 0.0, p_mlp: float = 0.0) -> str | None:
+        """Activation steering (an engine built with steering=True): the profile's vectors
+        [L, H] (None: keep the current ones) and the four words, written into the card's DRAM
+        (data only; nothing recompiles). Returns the profile's key (steering.profile_hash, None
+        when every word is 0: the unsteered model), which a KV cache's or session's key takes:
+        context computed under one profile is not another's."""
+        st = getattr(self.image, "steer", None)
+        if st is None:
+            raise ValueError("this engine has no steering (Engine(..., steering=True))")
+        H, L = self.spec.hidden, self.spec.layers
+        if vectors is not None:
+            v = np.asarray(vectors, np.float32)
+            if v.shape != (L, H) or not np.isfinite(v).all():
+                raise ValueError(f"steering vectors: finite [{L}, {H}], got {v.shape}")
+            rows = np.zeros((L, st["row"] // 4), np.float32)
+            rows[:, :H] = v
+            self._steer_vec = v
+            for s_ in range(self.cfg.S):
+                self.backend.write(s_, st["vec"], rows.reshape(-1))
+        w = ST.words(s_attn, p_attn, s_mlp, p_mlp)
+        for s_ in range(self.cfg.S):
+            self.backend.write(s_, st["words"], w)
+        on = bool(np.any(w != 0)) and getattr(self, "_steer_vec", None) is not None
+        self.steer_key = (ST.profile_hash(self._steer_vec) + ":" + w.tobytes().hex()) if on \
+            else None
+        return self.steer_key
 
     def step(self, token: int, on_start=None, sink=None) -> np.ndarray:
         """Feed one token at the next position; returns the logits [vocab] for the next one.

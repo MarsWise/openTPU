@@ -195,8 +195,13 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
             grq = op == I.TMM and bool(c[3] & I.TMM_GRQ)  # KB planes rs / srs apart
             p0, p1 = _p((kb if grq else n) - 1, c[4]), _p((kb if grq else n) - 1, c[6])
             p2, p3 = _p(m - 1, c[5] & 0xFFFF), _p(m, c[5] & 0xFFFF)
-            binary = op == I.TMM and bool(c[3] & I.TMM_BIN)
+            dense = op == I.TMM and (c[3] & I.TMM_T5) == I.TMM_T5 and \
+                not c[3] & (I.TMM_CQ | I.TMM_LUT)
+            binary = op == I.TMM and bool(c[3] & I.TMM_BIN) and not dense
             row_bytes = ((n >> 2) * D if grq else
+                         ((kb + 4) // 5) * D if dense else
+                         ((kb + 1) // 2) * D if op == I.TMM and c[3] & I.TMM_CQ and
+                         c[3] & I.TMM_CQ4 else
                          ((kb + (7 if binary else 3)) // (8 if binary else 4)) * D
                          if op == I.TMM else kb * D)
             rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
