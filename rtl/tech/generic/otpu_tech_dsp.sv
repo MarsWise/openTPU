@@ -16,28 +16,41 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic [7:0]         wlo,               // WREG: the weights from the next cycle on
   input  logic [7:0]         whi,
   input  logic               sel,               // the select from the next cycle on
+  input  logic               sel2,              // TMM QUAD: the quarter's high bit (with sel)
+  input  logic               quad,              // TMM QUAD: wlo holds four 2-bit codes, quarter
+                                                //   {sel2, sel} is the weight (per command)
   input  logic [47:0]        pcin,
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
   logic [7:0] br, wlr, whr;
-  logic       selr;
+  logic       selr, sel2r, quadr;
   logic signed [15:0] m;
+  logic signed [23:0] pn_r;
   wire  signed [23:0] pn = (FIRST ? 24'sd0 : $signed(pcin[23:0])) + 24'(m);
   wire  [7:0] wl = WREG ? wlr : wlo, wh = WREG ? whr : whi;
+  // TMM's weights are 0 / +1 / -1 bytes and go through the product as int8 ones do; QUAD's low
+  // stream holds four 2-bit codes, quarter {sel2, sel} decoded in front of the multiplier (the
+  // DSP's A), the high stream unused
+  wire  [1:0] tc = wl[2 * {sel2r, selr} +: 2];
+  wire  [7:0] w = quadr ? ((tc == 2'b01) ? 8'h01 : (tc == 2'b10) ? 8'hFF : 8'h00) :
+                          (selr ? wh : wl);
   always_ff @(posedge clk) if (en) begin
     br <= act;
     selr <= sel;
+    sel2r <= sel2;
+    quadr <= quad;
     wlr <= wlo;
     whr <= whi;
-    m <= 16'(int'($signed(br)) * int'($signed(selr ? wh : wl)));
+    m <= 16'(int'($signed(br)) * int'($signed(w)));
+    pn_r <= pn;
   end
   if (LAST) begin : g_comb
     assign p = pn;
   end else begin : g_preg
     always_ff @(posedge clk) if (en) p <= pn;
   end
-  assign pcout = LAST ? 48'd0 : 48'(p);              // (a chain's last cascades nowhere)
+  assign pcout = LAST ? 48'd0 : 48'(pn_r);
 endmodule
 
 

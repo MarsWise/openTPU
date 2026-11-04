@@ -75,13 +75,19 @@ CAPS2_SINCE, R_CAPS2 = 5, 0x5C
 # on a GATHER, and the host refuses to load a program with one (Board.load_program). Every
 # bitstream before version 5 has GATHER.
 CAP2_GATHER = 1
+CAP2_TPAIR = 2          # TMM PAIR: the K-split by two of ternary MMs (otpu_mxu, docs/isa.md TMM)
+CAP2_TQUAD = 4          # TMM QUAD: the K-split by four (QACT DUP4; otpu_mxu, docs/isa.md TMM)
+CAP2_TFN = 8            # the table functions (VOP 0x20..0x29 on the stream engine; opentpu/tfn.py)
+CAP2_TGSC = 16          # native ternary with fp32 scale per D-element block
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
-        return {"gather": True}
-    return {"gather": bool(v & CAP2_GATHER)}
+        return {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False}
+    return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR),
+            "tquad": bool(v & CAP2_TQUAD), "tfn": bool(v & CAP2_TFN),
+            "tgsc": bool(v & CAP2_TGSC)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

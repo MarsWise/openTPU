@@ -1,0 +1,330 @@
+import numpy as np
+import pytest
+
+from opentpu import isa as I
+from opentpu.compiler import Builder, QTensor
+from opentpu import fp32 as F
+from opentpu.fp32 import i2f, mul as fmul
+from opentpu.isasim import Config, Machine, SimError
+from opentpu.quant import pack_ternary, pack_ternary_mxu, ternary_matmul, unpack_ternary
+
+
+@pytest.mark.parametrize("count", range(10))
+def test_ternary_packing_round_trip_and_tail(count):
+    values = np.resize(np.array([-1, 0, 1], dtype=np.int8), count)
+    packed = pack_ternary(values)
+    assert packed.shape == ((count + 3) // 4,)
+    assert unpack_ternary(packed, count).tolist() == values.tolist()
+    if count % 4:
+        assert packed[-1] >> (2 * (count % 4)) == 0
+
+
+def test_ternary_packing_is_low_pair_first_and_supports_rows():
+    values = np.array([[0, 1, -1, 0, 1], [-1, -1, 0, 1, 0]], dtype=np.int8)
+    packed = pack_ternary(values)
+    assert packed.tolist() == [[0b00100100, 0b00000001], [0b01001010, 0]]
+    assert np.array_equal(unpack_ternary(packed, values.shape[-1]), values)
+
+
+@pytest.mark.parametrize("packed,count,message", [
+    (np.array([0b11], dtype=np.uint8), 1, "reserved"),
+    (np.array([0b0100], dtype=np.uint8), 1, "padding"),
+])
+def test_ternary_unpack_rejects_invalid_symbols_and_padding(packed, count, message):
+    with pytest.raises(ValueError, match=message):
+        unpack_ternary(packed, count)
+
+
+def test_ternary_unpack_rejects_inconsistent_shapes_and_types():
+    with pytest.raises(ValueError, match="length"):
+        unpack_ternary(np.array([0], dtype=np.uint8), 5)
+    with pytest.raises(TypeError, match="uint8"):
+        unpack_ternary(np.array([0], dtype=np.int8), 1)
+    with pytest.raises(ValueError, match="count"):
+        unpack_ternary(np.array([0], dtype=np.uint8), -1)
+    with pytest.raises(ValueError, match="dimension"):
+        pack_ternary(np.array(1, dtype=np.int8))
+    with pytest.raises(TypeError, match="integer"):
+        pack_ternary(np.array([0.0, 1.0]))
+    with pytest.raises(ValueError, match="must be in"):
+        pack_ternary(np.array([-2, 0, 1], dtype=np.int8))
+
+
+@pytest.mark.parametrize("k", [1, 3, 4, 5, 7, 8, 17])
+def test_ternary_matmul_matches_scalar_reference(k):
+    rng = np.random.default_rng(0x7E2 + k)
+    activations = rng.integers(-128, 128, size=(3, k), dtype=np.int8)
+    weights = rng.choice(np.array([-1, 0, 1], dtype=np.int8), size=(5, k))
+    got = ternary_matmul(activations, pack_ternary(weights))
+    expected = np.empty((3, 5), dtype=np.int64)
+    for row in range(3):
+        for col in range(5):
+            expected[row, col] = sum(int(activations[row, i]) * int(weights[col, i])
+                                     for i in range(k))
+    assert got.dtype == np.int64
+    assert np.array_equal(got, expected)
+
+
+def test_ternary_matmul_keeps_leading_batch_dimensions_and_checks_shapes():
+    activations = np.array([[[127, -128, 1], [-1, 0, 4]]], dtype=np.int16)
+    weights = np.array([[1, -1, 0], [-1, 1, 1]], dtype=np.int8)
+    result = ternary_matmul(activations, pack_ternary(weights))
+    assert result.shape == (1, 2, 2)
+    assert result.tolist() == [[[255, -254], [-1, 5]]]
+    with pytest.raises(TypeError, match="signed integer"):
+        ternary_matmul(np.array([1.0]), pack_ternary(weights))
+    with pytest.raises(ValueError, match="packed_weights"):
+        ternary_matmul(np.array([1], dtype=np.int8), pack_ternary(weights[0]))
+
+
+def test_ternary_matmul_rejects_reserved_codes_and_nonzero_padding():
+    activations = np.array([1], dtype=np.int8)
+    with pytest.raises(ValueError, match="reserved"):
+        ternary_matmul(activations, np.array([[0b11]], dtype=np.uint8))
+    with pytest.raises(ValueError, match="padding"):
+        ternary_matmul(activations, np.array([[0b0100]], dtype=np.uint8))
+
+
+def test_ternary_mxu_packing_pads_each_row_to_a_stream_chunk():
+    weights = np.array([[1, 0] * 20, [-1, 0, 1, 0] * 10], dtype=np.int8)
+    packed = pack_ternary_mxu(weights, D=8)
+    assert packed.shape == (2, 16)
+    assert np.array_equal(unpack_ternary(packed[:, :10], weights.shape[1]), weights)
+    assert np.all(packed[:, 10:] == 0)
+
+
+@pytest.mark.parametrize("unit", [False, True])
+def test_tmm_simulator_matches_grouped_integer_reference(unit):
+    rng = np.random.default_rng(0x7E2)
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=4096,
+                 LANES=4)
+    M, N, KB, ab, D, ors = 3, 5, 7, 1, cfg.D, 7
+    activations = rng.integers(-128, 128, size=(M, KB, D), dtype=np.int8)
+    offsets = rng.integers(0, 8, size=(M, KB, 4), dtype=np.uint8)
+    sa = np.array([0.25, 0.5, 1.0], dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], dtype=np.int8), size=(N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    rs, weight_addr, scale_addr, out = packed.shape[1], 128, 512, 32
+    dram = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
+    dram[weight_addr:weight_addr + packed.size] = packed.reshape(-1)
+    sw = np.ones(N, dtype=np.float32) if unit else np.linspace(0.25, 1.25, N, dtype=np.float32)
+    if not unit:
+        dram.view(np.float32)[scale_addr // 4:scale_addr // 4 + N] = sw
+
+    ins = I.tmm(weight_addr, scale_addr, out, N, KB, rs, ors, M, ab, 4,
+                unit=unit, rsc=not unit)
+    assert I.Instr.decode(ins.encode()).op == I.TMM
+    machine = Machine(cfg, [[ins, I.halt()]], [dram])
+    sl = machine.slices[0]
+    sl.act[:M, ab * D:(ab + KB) * D] = activations.reshape(M, KB * D)
+    sl.ascale[:M, ab:ab + KB] = sa[:, None]
+    sl.adoff[:M, ab:ab + KB] = offsets
+    machine.run()
+
+    acc = np.zeros((M, N), dtype=np.int64)
+    for k in range(KB):
+        for g in range(4):
+            lo, hi = g * (D // 4), (g + 1) * (D // 4)
+            dot = (activations[:, k, lo:hi].astype(np.int64) @
+                   weights[:, k * D + lo:k * D + hi].astype(np.int64).T)
+            shift = 11 - offsets[:, k, g].astype(np.int64)
+            acc += np.where(shift[:, None] >= 0,
+                            dot << np.maximum(shift[:, None], 0), 0)
+    expected = fmul(fmul(i2f(acc), sw[None, :]), fmul(sa[:, None], np.float32(2.0 ** -11)))
+    got = sl.tget(out + np.arange(M)[:, None] * ors + np.arange(N)[None, :])
+    assert np.array_equal(got.view(np.uint32), expected.view(np.uint32))
+
+
+def test_tmm_rejects_reserved_weight_symbols():
+    cfg = Config(S=1, D=8, MCOLS=2, ACT_BLOCKS=2, TMEM_WORDS=64, DRAM_BYTES=1024, LANES=2)
+    weights = pack_ternary_mxu(np.zeros((1, 8), dtype=np.int8), cfg.D)
+    weights[0, 0] = 0b11
+    dram = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
+    dram[64:64 + weights.shape[1]] = weights[0]
+    machine = Machine(cfg, [[I.tmm(64, 0, 0, 1, 1, 8, 1, 1, 0, 0, unit=True),
+                             I.halt()]], [dram])
+    with pytest.raises(SimError, match="reserved ternary code"):
+        machine.run()
+
+
+def test_tmm_ascale_and_rmax_use_final_output_values():
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=2, TMEM_WORDS=256, DRAM_BYTES=4096,
+                 LANES=4)
+    M, N, D, out, ors, alpha_at, weight_at = 3, 4, cfg.D, 64, 6, 24, 128
+    packed = pack_ternary_mxu(np.zeros((N, D), dtype=np.int8), D)
+    dram = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
+    dram[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    ins = I.tmm(weight_at, alpha_at, out, N, 1, D, ors, M, 0, 4,
+                unit=True, acc=True, rmax=True, ascale=alpha_at)
+    machine = Machine(cfg, [[ins, I.halt()]], [dram])
+    sl = machine.slices[0]
+
+    old = np.array([[-2.0, -2.0, -3.0, -4.0],
+                    [-1.0, -3.0, 0.0, 2.0],
+                    [0.0, -0.0, 0.0, -0.0]], dtype=np.float32)
+    alpha = np.array([2.0, -1.0, -3.0], dtype=np.float32)
+    rows = out + np.arange(M)[:, None] * ors
+    sl.tput(rows + np.arange(N)[None, :], old)
+    sl.tput(alpha_at + np.arange(M), alpha)
+    sl.act[:M, :D] = 0
+    sl.ascale[:M, 0] = 1.0
+    sl.adoff[:M, 0] = 0
+
+    machine.run()
+
+    expected = F.add(F.mul(old, alpha[:, None]), np.zeros_like(old))
+    got = sl.tget(rows + np.arange(N)[None, :])
+    maxima = sl.tget(out + M * ors + np.arange(M))
+    assert np.array_equal(got.view(np.uint32), expected.view(np.uint32))
+    assert np.array_equal(maxima.view(np.uint32), F.chain_max(expected).view(np.uint32))
+    assert maxima[0] == -4.0
+    assert maxima[1] == 3.0
+    assert maxima[2] == 0.0
+
+
+@pytest.mark.parametrize("unit,acc", [(False, True), (True, False)])
+def test_tmm_ascale_requires_unit_and_acc(unit, acc):
+    with pytest.raises(ValueError, match="ASCALE needs UNIT and ACC"):
+        I.tmm(0, 0, 0, 1, 1, 8, 1, 1, 0, 4, unit=unit, acc=acc,
+              ascale=16, rsc=not unit)
+
+
+def test_tmm_isa_accepts_maximum_kb_and_rejects_overflow():
+    ins = I.tmm(0, 0, 0, 1, 255, 8, 1, 1, 0, 4, unit=True)
+    assert (ins.w[3] >> 16) & 0xFF == 255
+    with pytest.raises(ValueError, match="kb 256"):
+        I.tmm(0, 0, 0, 1, 256, 8, 1, 1, 0, 4, unit=True)
+
+
+def test_compiler_dot_lowers_ternary_weight_descriptor_to_tmm():
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=4096,
+                 LANES=4)
+    builder = Builder(cfg, 0)
+    activations = builder.alloc((3, 7 * cfg.D))
+    weights = QTensor.ternary_weight(0x1000, None, 5, 7 * cfg.D, cfg.D)
+    builder.dot(activations, weights)
+    assert [ins.op for ins in builder.root].count(I.TMM) == 1
+    tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+    assert (tmm.w[3] & 0xFFFF, (tmm.w[3] >> 16) & 0xFF) == (5, 7)
+    assert tmm.flags & I.F_UNIT
+
+
+def test_compiler_dot_lowers_scaled_ternary_weight_with_rsc():
+    """A ternary descriptor with row scales lowers to TMM RSC (not UNIT): BitNet's projections
+    (their weight_scale a row scale). Before the fix the lowering dropped RSC and I.tmm refused."""
+    cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4)
+    builder = Builder(cfg, 0)
+    activations = builder.alloc((3, 7 * cfg.D))
+    weights = QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D)
+    builder.dot(activations, weights)
+    tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+    assert not tmm.flags & I.F_UNIT and tmm.flags & I.F_RSC
+
+
+def test_tmm_pair_is_tmm_bit_for_bit_on_the_isa():
+    """TMM PAIR (Config.TPAIR, the K-split by two): the ACT rows DUP'd into rows M..2M-1, the odd
+    K blocks from those; the sums are the same exact integers, so every output, RMAX and ACC
+    included, is plain TMM's bit for bit (odd KB, unit and row-scaled weights)."""
+    from opentpu.isasim import Machine, SimError
+    cfg = Config(S=1, D=32, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16, DRAM_BYTES=1 << 20)
+    D = cfg.D
+    for M, N, KB, unit, acc in [(1, 7, 5, False, False), (2, 9, 4, True, True),
+                                (1, 5, 1, False, True), (2, 6, 7, False, False)]:
+        rng = np.random.default_rng(M * 100 + KB)
+        x = rng.standard_normal((M, KB * D), dtype=np.float32)
+        w = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(w, D)
+        wa, sa, oa, ia, ors = 0x40000, 0x60000, 4096, 0x70000, N + 1
+        img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+        img[:x.nbytes] = x.view(np.uint8).reshape(-1)
+        img[wa:wa + packed.size] = packed.reshape(-1)
+        img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+        init = rng.standard_normal((M, ors), dtype=np.float32)
+        img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+        outs = []
+        for pair in (False, True):
+            prog = [I.ld(0, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+                I.qact(0, M, 0, KB, KB * D, dup=pair),
+                I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4,
+                      unit=unit, rsc=not unit, acc=acc, rmax=True, pair=pair), I.halt()]
+            m = Machine(cfg, [prog], [img.copy()]).run()
+            outs.append(m.slices[0].tmem[oa:oa + M * ors + M].copy())
+        assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
+    bad = [I.qact(0, 3, 0, 1, D),
+           I.tmm(wa, sa, oa, 2, 1, D, 3, 3, 0, 4, rsc=True, pair=True), I.halt()]
+    with pytest.raises(SimError, match="2\\*M"):
+        Machine(cfg, [bad], [img.copy()]).run()
+
+
+def test_compiler_emits_tmm_pair_with_tpair():
+    """With PAIR and TPAIR a ternary dot of M <= MCOLS/2 rows lowers to TMM PAIR on DUP'd ACT
+    rows; without TPAIR (a bitstream before it) to plain TMM."""
+    for tpair in (False, True):
+        cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4,
+                     PAIR=True, TPAIR=tpair)
+        builder = Builder(cfg, 0)
+        activations = builder.alloc((1, 7 * cfg.D))
+        builder.dot(activations, QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D))
+        tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+        qact = next(ins for ins in builder.root if ins.op == I.QACT)
+        assert bool(tmm.flags & I.F_PAIR) == tpair and qact.flags & I.F_DUP
+
+
+def test_tmm_quad_is_tmm_bit_for_bit_on_the_isa():
+    """TMM QUAD (Config.TQUAD, the K-split by four): the ACT rows DUP4'd into rows M..4M-1,
+    block 4c + q from row j + q M; the same exact integer sums, so every output, RMAX and ACC
+    included, is plain TMM's bit for bit (KB not a multiple of four, unit and row scales)."""
+    from opentpu.isasim import Machine, SimError
+    cfg = Config(S=1, D=32, MCOLS=8, ACT_ROWS=8, ACT_BLOCKS=16, DRAM_BYTES=1 << 20)
+    D = cfg.D
+    for M, N, KB, unit, acc in [(1, 7, 5, False, False), (2, 9, 4, True, True),
+                                (1, 5, 1, False, True), (2, 6, 7, False, False),
+                                (1, 4, 10, True, False), (2, 3, 3, False, True)]:
+        rng = np.random.default_rng(M * 100 + KB + 7)
+        x = rng.standard_normal((M, KB * D), dtype=np.float32)
+        w = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(w, D)
+        wa, sa, oa, ia, ors = 0x40000, 0x60000, 4096, 0x70000, N + 1
+        img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+        img[:x.nbytes] = x.view(np.uint8).reshape(-1)
+        img[wa:wa + packed.size] = packed.reshape(-1)
+        img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+        init = rng.standard_normal((M, ors), dtype=np.float32)
+        img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+        outs = []
+        for mode in ("plain", "pair", "quad"):
+            prog = [I.ld(0, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+                I.qact(0, M, 0, KB, KB * D, dup=mode != "plain", dup4=mode == "quad"),
+                I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4,
+                      unit=unit, rsc=not unit, acc=acc, rmax=True, pair=mode == "pair",
+                      quad=mode == "quad"), I.halt()]
+            m = Machine(cfg, [prog], [img.copy()]).run()
+            outs.append(m.slices[0].tmem[oa:oa + M * ors + M].copy())
+        assert np.array_equal(outs[0].view(np.uint32), outs[1].view(np.uint32))
+        assert np.array_equal(outs[0].view(np.uint32), outs[2].view(np.uint32))
+    bad = [I.qact(0, 3, 0, 1, D, dup4=True), I.halt()]
+    with pytest.raises(SimError, match="ACT RAM bounds"):
+        Machine(cfg, [bad], [img.copy()]).run()
+    bad = [I.qact(0, 3, 0, 1, D),
+           I.tmm(wa, sa, oa, 2, 1, D, 3, 3, 0, 4, rsc=True, quad=True), I.halt()]
+    with pytest.raises(SimError, match="4\\*M"):
+        Machine(cfg, [bad], [img.copy()]).run()
+    with pytest.raises(Exception, match="exclusive"):
+        I.tmm(wa, sa, oa, 2, 1, D, 3, 1, 0, 4, rsc=True, quad=True, pair=True)
+
+
+def test_compiler_emits_tmm_quad_with_tquad():
+    """With TQUAD a ternary dot of M <= MCOLS/4 rows lowers to TMM QUAD on DUP4'd ACT rows; of
+    MCOLS/4 < M <= MCOLS/2 rows to TMM PAIR (with TPAIR); without TQUAD as before."""
+    for tquad, rows, want in ((False, 1, "pair"), (True, 1, "quad"), (True, 2, "pair"),
+                              (True, 3, "plain")):
+        cfg = Config(S=1, D=8, MCOLS=4, ACT_BLOCKS=8, TMEM_WORDS=256, DRAM_BYTES=8192, LANES=4,
+                     PAIR=True, TPAIR=True, TQUAD=tquad)
+        builder = Builder(cfg, 0)
+        activations = builder.alloc((rows, 7 * cfg.D))
+        builder.dot(activations, QTensor.ternary_weight(0x1000, 0x1800, 5, 7 * cfg.D, cfg.D))
+        tmm = next(ins for ins in builder.root if ins.op == I.TMM)
+        qact = next(ins for ins in builder.root if ins.op == I.QACT)
+        got = "quad" if tmm.flags & I.F_QUAD else "pair" if tmm.flags & I.F_PAIR else "plain"
+        assert got == want, (tquad, rows, got)
+        assert bool(qact.flags & I.F_DUP4) == (want == "quad")

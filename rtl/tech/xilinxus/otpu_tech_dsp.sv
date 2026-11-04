@@ -24,11 +24,32 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
   input  logic [7:0]         wlo,               // WREG: the weights from the next cycle on
   input  logic [7:0]         whi,
   input  logic               sel,               // the select from the next cycle on
+  input  logic               sel2,              // TMM QUAD: the quarter's high bit (with sel)
+  input  logic               quad,              // TMM QUAD: wlo holds four 2-bit codes, quarter
+                                                //   {sel2, sel} is the weight (per command)
   input  logic [47:0]        pcin,
   output logic [47:0]        pcout,
   output logic signed [23:0] p
 );
-  logic [47:0] pf;
+  logic [47:0] pf, pcd;
+  logic selr, sel2r, quadr;
+  always_ff @(posedge clk) if (en) begin
+    selr <= sel;
+    sel2r <= sel2;
+    quadr <= quad;
+  end
+  // Ternary weights go through the multiplier like int8 ones: TMM's weights are 0 / +1 / -1
+  // bytes (otpu_mxu wsel decodes them), so A * B is the product the add / sub / skip cell made,
+  // and the chain's P = PCIN + M its running sum. QUAD's low stream holds four 2-bit codes: the
+  // quarter {sel2, sel} is decoded here, in front of A (WREG: the next weight with the next
+  // select, as A's register loads them; else the weight with the registered select), and
+  // INMODE takes A (the high stream is empty). (Until 2026-10-25 a parallel fabric adder chain
+  // per PE did this: ~55 LUTs and ~60 flip-flops a PE, ~57 k LUTs at MCOLS 8.)
+  wire [1:0] qs = WREG ? {sel2, sel} : {sel2r, selr};
+  wire       qd = WREG ? quad : quadr;
+  wire [1:0] tc = wlo[2 * qs +: 2];
+  wire [7:0] wa = qd ? ((tc == 2'b01) ? 8'h01 : (tc == 2'b10) ? 8'hFF : 8'h00) : wlo;
+  wire       si = sel && !quad;                     // INMODE's select (registered: next value)
   DSP48E2 #(
     .A_INPUT("DIRECT"), .B_INPUT("DIRECT"), .AMULTSEL("AD"), .BMULTSEL("B"),
       .PREADDINSEL("A"), .USE_MULT("MULTIPLY"), .USE_WIDEXOR("FALSE"),
@@ -40,8 +61,8 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     .SEL_MASK("MASK"), .SEL_PATTERN("PATTERN")
   ) u_dsp (
     .CLK(clk),
-    .A({{22{wlo[7]}}, wlo}), .B({{10{act[7]}}, act}), .C(48'd0), .D({{19{whi[7]}}, whi}),
-    .INMODE({2'b00, sel, sel, 1'b0}), .OPMODE(FIRST ? 9'b00_000_01_01 : 9'b00_001_01_01),
+    .A({{22{wa[7]}}, wa}), .B({{10{act[7]}}, act}), .C(48'd0), .D({{19{whi[7]}}, whi}),
+    .INMODE({2'b00, si, si, 1'b0}), .OPMODE(FIRST ? 9'b00_000_01_01 : 9'b00_001_01_01),
     .ALUMODE(4'b0000), .CARRYIN(1'b0), .CARRYINSEL(3'b000),
     .CEA1(1'b0), .CEA2(WREG ? en : 1'b0), .CEB1(en), .CEB2(en), .CEC(1'b0),
     .CED(WREG ? en : 1'b0), .CEAD(1'b0),
@@ -50,9 +71,10 @@ module otpu_pe #(parameter bit FIRST = 1'b0, parameter bit LAST = 1'b0, paramete
     .RSTA(1'b0), .RSTB(1'b0), .RSTC(1'b0), .RSTD(1'b0), .RSTM(1'b0), .RSTP(1'b0),
     .RSTALLCARRYIN(1'b0), .RSTALUMODE(1'b0), .RSTCTRL(1'b0), .RSTINMODE(1'b0),
     .ACIN(30'd0), .BCIN(18'd0), .PCIN(pcin), .CARRYCASCIN(1'b0), .MULTSIGNIN(1'b0),
-    .ACOUT(), .BCOUT(), .PCOUT(pcout), .P(pf), .CARRYCASCOUT(), .MULTSIGNOUT(), .CARRYOUT(),
+    .ACOUT(), .BCOUT(), .PCOUT(pcd), .P(pf), .CARRYCASCOUT(), .MULTSIGNOUT(), .CARRYOUT(),
     .OVERFLOW(), .UNDERFLOW(), .PATTERNDETECT(), .PATTERNBDETECT(), .XOROUT());
   assign p = pf[23:0];
+  assign pcout = LAST ? 48'd0 : pcd;
 endmodule
 
 

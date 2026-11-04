@@ -573,7 +573,9 @@ class SimTransport:
         p.setdefault("PLATFORM", t.platform_id)
         p.setdefault("ARCH_HASH", "32'h%08x" % arch_hash(build_config(
             t, MCOLS=p["MCOLS"], LANES=p["LANES"], ACT_ROWS=p["ACT_ROWS"],
-            TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0))))
+            TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0),
+            TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0),
+            TGSC=p.get("TGSC", 0))))
         exe = rtlsim.build("tb_board", srcs, p)
         with simtmp.tempdir("otpu_board_") as d:
             for c in range(len(self.ch)):
@@ -817,6 +819,9 @@ class Board:
             t = by_platform(d["cfg"]["platform"])
             if t is not None and t.family != "xilinx7" and d["temp_c"] is not None:
                 d["temp_c"] = round(R.temp_c(tp, t.family), 2)
+        # bitstreams whose CAPS2 under-reports what they were built with (a generic the FPGA top
+        # did not take): their build and CFG_HASH name the capabilities
+        caps2_errata(d)
         self._info = d
         return d
 
@@ -1056,6 +1061,12 @@ class Board:
             else [np.asarray(words, "<u4")]
         if not self.gather:
             check_no_gather(progs)
+        from opentpu import isa as I
+        for words_ in progs:
+            opflags = words_[:len(words_) // 8 * 8:8]
+            if np.any(((opflags & 0xff) == I.TMM) & ((opflags >> 24) & I.F_GSC != 0)):
+                if not (self._info or self.info()).get("caps2", {}).get("tgsc", False):
+                    raise ConfigMismatch("TMM GSC requires new firmware with CAPS2 bit4 (TGSC)")
         waitc = self.waitc
         if waitc:
             if entries is None:
@@ -1077,6 +1088,13 @@ class Board:
                 from opentpu import waits as W
                 ents += [np.full(1, W.DEFAULT, np.uint64)] * (S - len(ents))
         n = max(len(w) for w in progs)
+        imem = ((self._info or self.info()).get("cfg") or {}).get("IMEM_WORDS")
+        if imem and n > imem:
+            # the loader would take PROG_N rows into an IMEM of fewer: the program's end
+            # overwrites its start, and it runs as something else (r4: YOLOX --wsplit's stem,
+            # 4765 instructions into 4096, gave mAP 0 with no error anywhere)
+            raise ValueError(f"a program of {n // 8} instructions; this bitstream's IMEM holds "
+                             f"{imem // 8}")
         if self.in_run:
             self.stop()
         for s, w in enumerate(progs):
@@ -1293,13 +1311,30 @@ class Board:
 
 
 # ------------------------------------------------------------------------------ configuration
+# (BUILD_ID, CFG_HASH) -> the CAPS2 capabilities the bitstream has but does not report. r4
+# (bb27096f, TMM PAIR + QUAD, CFG_HASH 3fb1359e): otpu_fpga_top_ld had no TPAIR / TQUAD
+# parameters, so Vivado dropped the generics and CAPS2 reads 0; the MXU's PAIR and QUAD
+# datapaths are in every build of that tree (the generics only set CAPS2).
+CAPS2_ERRATA = {(0xbb27096f, 0x3fb1359e): {"tpair": True, "tquad": True}}
+
+
+def caps2_errata(info: dict) -> dict:
+    """info (Board.info()) with CAPS2_ERRATA applied: the capabilities its build has."""
+    e = CAPS2_ERRATA.get((info.get("build_id"), (info.get("cfg") or {}).get("hash")))
+    if e is not None:
+        info["caps2"] = dict(info["caps2"], **e)
+        info["caps2_erratum"] = True
+    return info
+
+
 class ConfigMismatch(RuntimeError):
     """The bitstream on the card and the host's configuration disagree."""
 
 
 def device_config(info: dict, **kw):
     """The Config of the bitstream that `info` (Board.info()) describes: MCOLS and LANES come
-    from its VERSION register, PAIR from CAPS bit5, DSTEP from bit6 and STREAM from bit26, and
+    from its VERSION register, PAIR from CAPS bit5, DSTEP from bit6 and STREAM from bit26, TPAIR
+    from CAPS2 bit1 and TQUAD from bit2 (with PAIR), and
     with register map 4 the slices, TMEM, IMEM, ACT RAM and DRAM sizes from its CFG_* registers
     and SEQ_WC (the sequencer's wait entries, EXPERIMENTAL) from CFG_UARCH bit24
     (before map 4: the YPCB-00338's, the current target's), so the card needs no OTPU_MCOLS /
@@ -1317,16 +1352,26 @@ def device_config(info: dict, **kw):
     caps = info.get("caps") or {}
     pair, dstep = bool(caps.get("pair")), bool(caps.get("dstep"))
     stream = bool(caps.get("stream"))
+    tpair = pair and bool((info.get("caps2") or {}).get("tpair"))
+    tquad = pair and bool((info.get("caps2") or {}).get("tquad"))
+    tfn = dstep and bool((info.get("caps2") or {}).get("tfn"))
+    tgsc = bool((info.get("caps2") or {}).get("tgsc"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
-                          ("STREAM", stream, "the stream engine (CAPS bit26)")):
+                          ("STREAM", stream, "the stream engine (CAPS bit26)"),
+                          ("TPAIR", tpair, "TMM PAIR (CAPS2 bit1, with CAPS bit5)"),
+                          ("TQUAD", tquad, "TMM QUAD (CAPS2 bit2, with CAPS bit5)"),
+                          ("TFN", tfn, "the table functions (CAPS2 bit3, with CAPS bit6)"),
+                          ("TGSC", tgsc, "ternary group scales (CAPS2 bit4)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
                                  f"OTPU_{k}={env}: unset OTPU_{k} (the host follows the "
                                  f"bitstream)")
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
-    dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "DSTEP": dstep,
+    dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
+           "TQUAD": tquad, "TFN": tfn, "TGSC": tgsc,
+           "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
     if c:                                         # register map 4: the device says the rest
@@ -1393,6 +1438,13 @@ def check_hash(info: dict, cfg=None) -> None:
         sizes = {k: c[k] for k in ("S", "TMEM_WORDS", "IMEM_WORDS", "ACT_BLOCKS", "DRAM_BYTES")}
         cfg = board_config(D=info["D"], MCOLS=info["MCOLS"], LANES=info["LANES"],
                            PAIR=bool(caps.get("pair")), DSTEP=bool(caps.get("dstep")),
+                           TPAIR=bool(caps.get("pair"))
+                           and bool((info.get("caps2") or {}).get("tpair")),
+                           TQUAD=bool(caps.get("pair"))
+                           and bool((info.get("caps2") or {}).get("tquad")),
+                           TFN=bool(caps.get("dstep"))
+                           and bool((info.get("caps2") or {}).get("tfn")),
+                           TGSC=bool((info.get("caps2") or {}).get("tgsc")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

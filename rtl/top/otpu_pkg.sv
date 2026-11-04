@@ -6,20 +6,27 @@ package otpu_pkg;
                          OP_LD = 8'h10,
                          OP_ST = 8'h11,
                          OP_DSTEP = 8'h12, OP_STREAM = 8'h13, OP_MM = 8'h20, OP_QACT = 8'h21,
-                         OP_QST = 8'h22,
+                         OP_QST = 8'h22, OP_TMM = 8'h23,
                          OP_VOP = 8'h30, OP_GATHER = 8'h40;
 
   localparam logic [7:0] V_ADD = 0, V_SUB = 1, V_RSUB = 2, V_MUL = 3, V_MAX = 4, V_MIN = 5,
-                         V_OUTER = 6, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
+                         V_OUTER = 6, V_MAC = 7, V_COPY = 8, V_EXP2 = 9, V_RECIP = 10, V_RSQRT = 11,
                          V_ABS = 12, V_FILL = 13, V_EXP2SUB = 14, V_LOG2 = 15, V_RSUM = 16,
                          V_RMAX = 17, V_RSSQ = 18, V_RDOT = 19, V_ARGMAX = 20;
+  // TFN, the table functions (docs/isa.md "Table functions"): 0x20 + fn, fn < V_TFN_N, on
+  // otpu_se_comp only (the stream engine's composites)
+  localparam logic [7:0] V_TFN0 = 8'h20;
+  localparam int         V_TFN_N = 10;
+  function automatic logic is_tfn(input logic [7:0] f);
+    return f >= V_TFN0 && f < V_TFN0 + 8'(V_TFN_N);
+  endfunction
   // HALT flag bit0 CHAIN: load R[rb] instructions from DRAM R[ra] and start them; RLD flag
   // bit0 RAW: the word's bits instead of f2i, bit1 MUL: times R[rb] + w2 (docs/isa.md)
   localparam int HF_CHAIN = 0, RF_RAW = 0, RF_MUL = 1;
   // the composite functions' classes (otpu_se_comp's microcode; the VPU decodes a chunk's as it
   // loads it)
   localparam logic [2:0] CC_NONE = 3'd0, CC_EXP = 3'd1, CC_EXS = 3'd2, CC_RCP = 3'd3,
-                         CC_RSQ = 3'd4, CC_LOG = 3'd5;
+                         CC_RSQ = 3'd4, CC_LOG = 3'd5, CC_TFN = 3'd6;
   function automatic logic [2:0] f_cc(input logic [7:0] f);
     case (f)
       V_EXP2:    return CC_EXP;
@@ -27,7 +34,7 @@ package otpu_pkg;
       V_RECIP:   return CC_RCP;
       V_RSQRT:   return CC_RSQ;
       V_LOG2:    return CC_LOG;
-      default:   return CC_NONE;
+      default:   return is_tfn(f) ? CC_TFN : CC_NONE;
     endcase
   endfunction
   // VOP OUTER flags: one decay word T[d] for all columns / decay 1.0 (T[d] not read)
@@ -87,7 +94,7 @@ package otpu_pkg;
   function automatic int unit_of(input logic [7:0] op);
     case (op)
       OP_LD, OP_ST, OP_DSTEP, OP_STREAM, OP_WAITW: return U_DMA;
-      OP_MM:             return U_MXU;
+      OP_MM, OP_TMM:     return U_MXU;
       OP_QACT, OP_QST:   return U_Q;
       OP_VOP:            return U_VPU;
       OP_BAR, OP_GATHER, OP_RLD: return U_COLL;   // RLD: read locally (otpu_slice)
@@ -159,7 +166,7 @@ package otpu_pkg;
 
   function automatic logic is_binary(input logic [7:0] f);
     return f == V_ADD || f == V_SUB || f == V_RSUB || f == V_MUL || f == V_MAX || f == V_MIN ||
-           f == V_FILL || f == V_EXP2SUB;
+           f == V_FILL || f == V_EXP2SUB || f == V_MAC;
   endfunction
 
   // the functions that read operand B in its bmode (OUTER's is always B_ROW)
@@ -198,7 +205,7 @@ package otpu_pkg;
     logic [31:0] rows, n, kb, m;
     o = '0;
     case (c.op)
-      OP_MM: begin
+      OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); m = 32'(c.w6[23:16]);
         o.a[0] = 24'(n - 1); o.w[0] = c.w5;
         o.a[1] = 24'(n - 1); o.w[1] = c.w7;
@@ -298,14 +305,18 @@ package otpu_pkg;
           f.rd[2] = mk(SP_TMEM, c.w5, c.w7 + 1);
         end
       end
-      OP_MM: begin
+      OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); kb = 32'(c.w4[23:16]); m = 32'(c.w6[23:16]);
         if (n != 0 && kb != 0 && m != 0) begin
-          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 + kb * D);
+          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
+                       ((c.op == OP_TMM) ? (((kb + 32'd3) >> 2) * D) : kb * D));
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
-          if (!c.flags[0])
+          if (c.op == OP_TMM) begin
+            if (c.flags[7] || c.flags[5])
+              f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[5] ? (kb << 2) : 32'd4));
+          end else if (!c.flags[0])
             f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[7] ? 32'd4 :
                          (c.flags[5:4] == 2'd0) ? 32'd4 + 32'(c.w4[31:24]) + kb :
                          (c.flags[5:4] == 2'd3) ? 32'd24 + ((32'(c.w4[31:24]) + kb) << 3) :
@@ -343,6 +354,7 @@ package otpu_pkg;
             f.rd[2] = mk(SP_TMEM, c.w7, cols);
           end else if (c.w6[23:16] != V_FILL)
             f.rd[0] = mk(SP_TMEM, c.w2, p.p0 + cols);
+          if (c.w6[23:16] == V_MAC) f.rd[2] = mk(SP_TMEM, c.w7, cols);   // its column vector
           if (reads_b(c.w6[23:16])) begin
             case (c.w6[25:24])
               B_FULL: f.rd[1] = mk(SP_TMEM, c.w3, p.p1 + cols);

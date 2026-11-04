@@ -10,7 +10,10 @@ The batch area (DRAM past the image, Engine(batch_area=True)):
     io        tin[B] the rows' input token ids (fp32 words), uni[B] the rows' uniforms (sampled
               rows; the host's generator of each request), step (the run's step, below): the
               host's, one write per run
-    tout[B]   the rows' picked token ids (the device's)
+    tout[B]   the rows' picked token ids (the device's), one 64-byte DRAM beat a row (TOUT_STRIDE):
+              a pick is a 4-byte store, and two rows' picks in one ECC word made two partial
+              writes to it back to back, which read back as ECC errors on the card (r5-m8,
+              2026-10-26: channel 0, where tout's first beat lives, under batched steps only)
     per slot: st[STATE_WORDS] (the sampler's words: top-k, log2(e) / T, top-p, the penalty R
               and 1 / R), lg[V] (the sampler's logits), pa[V], pb[V] (the repetition
               penalty's factors over the sequence's context, generate.py's)
@@ -48,6 +51,7 @@ GREEDY = None
 LIVE = 64                       # live programs kept (row sets that may run again)
 PAD_AHEAD = 4                   # a padded group's own program: compiled for this many steps on
 FEED = "feed"                   # a row that only feeds its token (a prompt's): no LM head, no pick
+TOUT_STRIDE = 64                # bytes between two rows' picks in tout: a DRAM beat each
 
 
 def alloc(image, cfg, B: int, base: int) -> dict:
@@ -65,7 +69,7 @@ def alloc(image, cfg, B: int, base: int) -> dict:
         return x
     io = take(4 * (2 * R + 2))              # the host's words: one write per run
     a["io"], a["tin"], a["uni"], a["step"] = io, io, io + 4 * R, io + 8 * R
-    a["tout"] = take(4 * R)
+    a["tout"] = take(TOUT_STRIDE * R)
     a["st"] = [take(4 * G.STATE_WORDS) for _ in range(B)]
     a["lg"] = [take(4 * V) for _ in range(B)]
     a["pa"] = [take(4 * V) for _ in range(B)]
@@ -223,7 +227,7 @@ def _sinks(b, m, spec, x, rows, kinds, pick, area) -> None:
         del x
     for r, sk in zip(pick, sinks):
         t = sk.token()
-        ol.store(Tensor(area["tout"] + 4 * r, (1,), (1,)), t)
+        ol.store(Tensor(area["tout"] + TOUT_STRIDE * r, (1,), (1,)), t)
         if kinds[r] is not GREEDY:
             sk.after(t)
         del t
@@ -452,8 +456,13 @@ class Steps:
         if sig not in self._fit:
             if len(self._ready) > 8:
                 self._ready.clear()
-            progs = self._get(key)
-            self._fit[sig] = self._size(progs) <= self.limit
+            try:
+                progs = self._get(key)
+            except CompileError as e:       # its tiles over TMEM (BitNet's [rows, F] MLP
+                if "TMEM" not in str(e) or len(rows) == 1:  # tiles at 8 rows): fewer rows
+                    raise
+                progs = None
+            self._fit[sig] = progs is not None and self._size(progs) <= self.limit
             if self._fit[sig]:
                 self._ready[key] = progs
         if self._fit[sig] or len(rows) == 1:
@@ -629,7 +638,8 @@ class Steps:
         if kinds is not None and all(k == FEED for k in kinds):
             return None
         t2 = time.perf_counter()
-        out = eng.backend.read(0, a["tout"], 4 * len(grp)).view(np.float32)
+        out = eng.backend.read(0, a["tout"], TOUT_STRIDE * len(grp)).view(np.float32)[
+            ::TOUT_STRIDE // 4]
         tm["read_s"] += time.perf_counter() - t2
         return out
 

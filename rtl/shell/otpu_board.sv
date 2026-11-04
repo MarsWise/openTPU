@@ -60,6 +60,10 @@ module otpu_board #(
   parameter bit CHASH       = 1'b1,    // hashed channel interleave (otpu_native_dram; CAPS bit7)
   parameter bit DSTEP       = 1'b1,    // the DMA's DSTEP datapath (CAPS bit6; 0 leaves it out)
   parameter bit HOSTCAL     = 1'b0,    // the host calibrates the DDR3 controllers (CAPS bit27: LiteDRAM)
+  parameter bit TPAIR       = 1'b0,    // TMM PAIR reported (CAPS2 bit1; the target's TPAIR)
+  parameter bit TQUAD       = 1'b0,    // TMM QUAD reported (CAPS2 bit2; the target's TQUAD)
+  parameter bit TFN         = 1'b0,    // the table functions reported (CAPS2 bit3; the target's TFN)
+  parameter bit TGSC        = 1'b0,    // native ternary group scales (CAPS2 bit4)
   parameter bit COLL_GATHER = 1'b1,    // 0 (S = 1 only): the collective unit runs BAR alone, no
                                        // GATHER (otpu_coll_bar; CAPS2 bit0 = 0, docs/infra_hunt.md 5)
   parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait entries (WAITC, docs/seq_vpu.md; CFG_UARCH bit24)
@@ -219,7 +223,7 @@ module otpu_board #(
   otpu_ctrl #(.D(D), .MCOLS(MCOLS), .ACT_ROWS(ACT_ROWS), .LANES(LANES), .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID),
               .DDR_MTS(DDR_MTS), .TRACE_DEPTH(TRACE_DEPTH), .PQ_WIN(PQ_WIN), .HAS_TEMP(1'b1),
               .HAS_I2C(HAS_I2C), .CHASH(CHASH), .DSTEP(DSTEP), .HOSTCAL(HOSTCAL),
-              .COLL_GATHER(COLL_GATHER),
+              .COLL_GATHER(COLL_GATHER), .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN && DSTEP), .TGSC(TGSC),
               .LDP(S > 1 ? 2 + 2 * XR : 2),  // LOAD to a slice's busy and back
               // each slice on its two channels' 2 GiB each (otpu_native_dram): 4 GiB
               .S(S), .TMEM_WORDS(TMEM_WORDS), .IMEM_WORDS(IMEM_WORDS), .ACT_BLOCKS(ACT_BLOCKS),

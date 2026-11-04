@@ -13,6 +13,7 @@ import numpy as np
 from . import fp32 as F
 from . import isa as I
 from . import quant as Q
+from . import tfn
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,13 @@ class Config:
     IMEM_WORDS: int = 1 << 16   # 8 words per instruction
     LANES: int = 8           # VPU lanes == TMEM banks (timing only; results do not depend on it)
     PAIR: bool = False       # MM PAIR / QACT DUP: 4-bit MMs of M <= MCOLS/2 rows at full rate
+    TPAIR: bool = False      # TMM PAIR (with PAIR's QACT DUP): ternary MMs of M <= MCOLS/2 rows
+    #                          two K blocks an advance (the K-split by two; CAPS2 bit1)
+    TQUAD: bool = False      # TMM QUAD (QACT DUP4): ternary MMs of M <= MCOLS/4 rows four K
+    #                          blocks an advance (the K-split by four; CAPS2 bit2)
+    TGSC: bool = False       # TMM: fp32 scale per row and D-element block (CAPS2 bit4)
+    TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
+    #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
     STREAM: bool = False     # the stream engine runs STREAM's hardware subset (docs/stream.md)
     ACT_ROWS: int = 0        # ACT RAM rows == max stationary rows of one MM (0: MCOLS); more
@@ -71,6 +79,10 @@ def board_config(**kw) -> Config:
                 TMEM_WORDS=a["TMEM_WORDS"], IMEM_WORDS=a["IMEM_WORDS"],
                 DRAM_BYTES=a["DRAM_BYTES"],
                 PAIR=bool(int(env.get("OTPU_PAIR", 0))),
+                TPAIR=bool(int(env.get("OTPU_TPAIR", 0))),
+                TQUAD=bool(int(env.get("OTPU_TQUAD", 0))),
+                TGSC=bool(int(env.get("OTPU_TGSC", 0))),
+                TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
                 SEQ_WC=bool(int(env.get("OTPU_SEQ_WC", 0))))
@@ -242,6 +254,8 @@ class Slice:
             return self._stream(ins)
         if op == I.MM:
             return self._mm(ins)
+        if op == I.TMM:
+            return self._tmm(ins)
         if op == I.QACT:
             return self._qact(ins)
         if op == I.QST:
@@ -541,6 +555,118 @@ class Slice:
             mx = F.chain_max(y)
             self.tput(out + M * ors + np.arange(M), mx)
 
+    def _tmm(self, ins: I.Instr) -> None:
+        """Ternary MXU: four packed D-element blocks per D-byte streamed weight chunk."""
+        cfg, w = self.cfg, ins.w
+        D = cfg.D
+        sa = (self.reg(ins.ra) + w[0]) & 0xFFFFFFFF
+        ssa = (self.reg(ins.rb) + w[1]) & 0xFFFFFFFF
+        out = (self.reg(ins.rc) + w[2]) & 0xFFFFFFFF
+        N, KB = w[3] & 0xFFFF, (w[3] >> 16) & 0xFF
+        rs = w[4]
+        ors, M, ab = w[5] & 0xFFFF, (w[5] >> 16) & 0xFF, w[5] >> 24
+        srs = w[6]
+        unit, accf = bool(ins.flags & I.F_UNIT), bool(ins.flags & I.F_ACC)
+        rsc, pair = bool(ins.flags & I.F_RSC), bool(ins.flags & I.F_PAIR)
+        quad = bool(ins.flags & I.F_QUAD)
+        gsc = bool(ins.flags & I.F_GSC)
+        quarter = w[3] >> 24
+        if quarter and (KB != 1 or quarter > 3 or pair or quad or gsc):
+            raise SimError("TMM: a quarter selects one block of one packed chunk")
+        if gsc and (not cfg.TGSC or unit or rsc or pair or quad or ins.flags & I.F_ASCALE):
+            raise SimError("TMM GSC: needs Config.TGSC and no UNIT/RSC/PAIR/QUAD/ASCALE")
+        if pair and quad:
+            raise SimError("TMM: PAIR and QUAD are exclusive")
+        if pair and 2 * M > cfg.MCOLS:
+            raise SimError("TMM: PAIR needs 2*M <= MCOLS")
+        if quad and 4 * M > cfg.MCOLS:
+            raise SimError("TMM: QUAD needs 4*M <= MCOLS")
+        if not N or not KB:
+            raise SimError("TMM: N and KB must be at least 1")
+        if D % 4 or not (0 < M <= cfg.act_rows) or ab + KB > cfg.ACT_BLOCKS:
+            raise SimError("TMM: M, D or ACT RAM range out of bounds")
+        if M > cfg.MCOLS and ins.flags & (I.F_RMAX | I.F_ASCALE):
+            raise SimError("TMM: RMAX and ASCALE need M <= MCOLS")
+        if not gsc and rsc == unit:
+            raise SimError("TMM: select exactly one of UNIT or RSC")
+        if ins.flags & I.F_ASCALE and not (unit and accf):
+            raise SimError("TMM: ASCALE needs UNIT and ACC")
+        row_bytes = ((KB + 3) // 4) * D
+        if sa % D or rs % D or rs < row_bytes or \
+                sa + (N - 1) * rs + row_bytes > cfg.DRAM_BYTES:
+            raise SimError("TMM: packed rows must be D-byte aligned and in range")
+        scale_bytes = 4 * KB if gsc else 4
+        if not unit and (ssa % 4 or srs % 4 or srs < scale_bytes or
+                         ssa + (N - 1) * srs + scale_bytes > cfg.DRAM_BYTES):
+            raise SimError("TMM: row scales must be word-aligned and in range")
+        if ors < N:
+            raise SimError("TMM: output row stride is smaller than N")
+        idx = out + np.arange(M)[:, None] * ors + np.arange(N)[None, :]
+        self._tidx(idx)
+        if ins.flags & I.F_ASCALE:
+            self._tidx(out + np.arange(M))
+
+        sw = np.ones(N, dtype=np.float32)
+        if not unit:
+            sa_idx = ssa + np.arange(N)[:, None] * srs + np.arange(scale_bytes)[None, :]
+            sw = self.dram[sa_idx].reshape(-1).copy().view(np.float32).reshape(N, -1)
+            if not gsc:
+                sw = sw[:, 0]
+        # the ACT row of each (output row, block): PAIR takes the odd blocks from row j + M,
+        # QUAD block 4c + q from row j + q M
+        R = 4 * M if quad else 2 * M if pair else M
+        kk = np.arange(KB)
+        rsel = np.arange(M)[:, None] + (M * (kk % 4) if quad else
+                                        np.where(pair & (kk % 2 == 1), M, 0))[None, :]  # [M, KB]
+        all_scales = self.ascale[:R, ab:ab + KB]
+        if np.any(all_scales.view(np.uint32) !=
+                  all_scales[np.arange(R) % M][:, :1].view(np.uint32)):
+            raise SimError("TMM: the ACT rows' blocks hold different Sa (more than one QACT)")
+        act_scales = self.ascale[:M, ab:ab + KB]
+        act = self.act[:R, ab * D:(ab + KB) * D].reshape(R, KB, D)[rsel, kk[None, :]]
+        da = self.adoff[:R, ab:ab + KB][rsel, kk[None, :]]
+        group = D // 4
+        acc = np.zeros((M, N), dtype=np.int64)
+        y_gsc = self.tget(idx) if accf else None
+        for k in range(KB):
+            if gsc:
+                acc.fill(0)
+            codes = np.empty((N, D), dtype=np.uint8)
+            for lane in range(D):
+                wk = k + quarter
+                byte = self.dram[sa + np.arange(N) * rs + (wk // 4) * D +
+                                 (lane + (wk % 4) * D) // 4]
+                codes[:, lane] = (byte >> (2 * ((lane + (wk % 4) * D) % 4))) & 0b11
+            if np.any(codes == 0b11):
+                raise SimError("TMM: reserved ternary code 11")
+            weights = np.where(codes == 1, 1, np.where(codes == 2, -1, 0)).astype(np.int64)
+            for g in range(4):
+                lo, hi = g * group, (g + 1) * group
+                # QACT has one offset per D/4 group; hardware's two adjacent D/8
+                # ternary reductions share the same 2^(11-da) scale.
+                dots = act[:, k, lo:hi].astype(np.int64) @ weights[:, lo:hi].T
+                row_sh = 11 - da[:, k, g].astype(np.int64)
+                acc += np.where(row_sh[:, None] >= 0, dots << np.maximum(row_sh[:, None], 0), 0)
+            if gsc:
+                part = F.mul(F.mul(F.i2f(acc), sw[None, :, k]),
+                             F.mul(act_scales[:, k, None], np.float32(2.0 ** -11)))
+                y_gsc = part if y_gsc is None else F.add(y_gsc, part)
+        if gsc:
+            self.tput(idx, y_gsc)
+            if ins.flags & I.F_RMAX:
+                self.tput(out + M * ors + np.arange(M), F.chain_max(y_gsc))
+            return
+        y = F.mul(F.mul(F.i2f(acc), sw[None, :]),
+                  F.mul(act_scales[:, 0, None], np.float32(2.0 ** -11)))
+        if ins.flags & I.F_ASCALE:
+            alpha = self.tget(ssa + np.arange(M))[:, None]
+            y = F.add(F.mul(self.tget(idx), alpha), y)
+        elif accf:
+            y = F.add(self.tget(idx), y)
+        self.tput(idx, y)
+        if ins.flags & I.F_RMAX:
+            self.tput(out + M * ors + np.arange(M), F.chain_max(y))
+
     # ---------------------------------------------------------------- quantizer
     def _quant_rows(self, src, rows, KB, srs, g, row_mode, cscale=None, rscale=None):
         """docs/isa.md "Quantization" of rows rows x KB*D at src (groups of g elements)."""
@@ -559,13 +685,17 @@ class Slice:
         rows, ab, KB = w[1] & 0xFF, (w[1] >> 8) & 0xFF, w[1] >> 16
         srs = w[2]
         dup = bool(ins.flags & I.F_DUP)
-        if (2 * rows > cfg.MCOLS if dup else rows > cfg.act_rows) or ab + KB > cfg.ACT_BLOCKS:
+        dup4 = dup and bool(ins.flags & I.F_DUP4)
+        copies = 4 if dup4 else 2 if dup else 1
+        if (copies * rows > cfg.MCOLS if dup else rows > cfg.act_rows) or \
+                ab + KB > cfg.ACT_BLOCKS:
             raise SimError("QACT out of ACT RAM bounds")
         cs = (w[3] & 0xFFFFFFFF) if ins.flags & I.F_CSCALE else None
         rsc = (w[4] & 0xFFFFFFFF) if ins.flags & I.F_RSCALE else None
         q, s, d = self._quant_rows(src, rows, KB, srs, cfg.D // Q.NSUB,
                                    bool(ins.flags & I.F_ROW), cs, rsc)
-        for r0 in ((0, rows) if dup else (0,)):     # DUP: rows r and r + rows, same bytes
+        for r0 in range(0, copies * rows, rows):    # DUP: rows r and r + rows, same bytes
+            #                                         (DUP4: and r + 2 rows, r + 3 rows)
             self.act[r0:r0 + rows, ab * cfg.D:(ab + KB) * cfg.D] = q
             self.ascale[r0:r0 + rows, ab:ab + KB] = s[:, None]
             self.adoff[r0:r0 + rows, ab:ab + KB] = d.reshape(rows, KB, Q.NSUB)
@@ -616,6 +746,8 @@ class Slice:
         c = np.arange(cols)[None, :]
         if func == I.V_OUTER:
             return self._outer(ins, dst, a, b, w7, rows, cols, drs, brs, bmode)
+        if func == I.V_MAC and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
+            raise SimError("VOP MAC: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
         A = self.tget(aidx) if func != I.V_FILL else None
         bidx = None
@@ -664,6 +796,14 @@ class Slice:
                I.V_RECIP: lambda: F.recip(A), I.V_RSQRT: lambda: F.rsqrt(A),
                I.V_ABS: lambda: F.fabs(A), I.V_FILL: lambda: F.ftz(B),
                I.V_EXP2SUB: lambda: F.exp2(F.sub(A, B)), I.V_LOG2: lambda: F.log2(A)}
+        if func == I.V_MAC:
+            # the column vector is read before anything is written (the VPU's buffers)
+            Cv = self.tget(np.broadcast_to(w7 + c, (1, cols)))
+            ops[func] = lambda: F.add(F.mul(A, Cv), B)
+        if func in I.TFN_FUNCS:
+            if not getattr(self.cfg, "TFN", False):
+                raise SimError(f"VOP: table function {func:#x} needs Config.TFN")
+            ops[func] = lambda: tfn.tfn(func - I.V_SIGMOID, A)
         if func not in ops:
             raise SimError(f"VOP: bad func {func}")
         self.tput(didx, ops[func]())

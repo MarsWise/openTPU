@@ -173,6 +173,7 @@ and ST's `n`, QACT's `w2` and `w3`, GATHER's `w3`).
 | 0x20 | MM | see below |
 | 0x21 | QACT | quantize TMEM rows into ACT RAM |
 | 0x22 | QST | quantize TMEM rows into DRAM bytes |
+| 0x23 | TMM | packed ternary MXU dot product |
 | 0x30 | VOP | vector op on a TMEM tile |
 | 0x40 | GATHER | all-gather over slices |
 
@@ -224,6 +225,57 @@ scans measured at most 7e-5 of the groups, docs/mx_mxu.md 3.3). The bounds keep 
 a group's `|c| < 2^19` (int8; 4-bit `< 2^16`), `B < 2^17`, at most `4 * 255` groups for int8.
 An MM's rows `j` read `Sa[j][ab]` only: its blocks `ab .. ab+KB-1` (and, with PAIR, row `j + M`'s)
 must hold the same `Sa`, as one QACT writes them (the ISA simulator raises otherwise).
+
+### TMM: packed ternary dot product
+
+`TMM` is a separate, version-safe MXU opcode; it does not repurpose MM's fully allocated `WF`
+field. Its address, shape, accumulation, row-max and `ASCALE` fields match MM, except `w4[31:24]`
+is reserved and zero. The activation operand is the same signed-int8 ACT RAM populated by QACT.
+Weights use four 2-bit symbols per byte, low pair first (`00=0`, `01=+1`, `10=-1`, `11=invalid`).
+Four consecutive D-element K blocks are packed into one D-byte DRAM chunk; the last partial
+chunk is zero padded. Thus each packed row occupies `ceil(KB/4)*D` payload bytes, `sa` and `rs`
+are D-byte aligned, and `rs` covers the payload and is D-byte aligned. `D` must be divisible by
+four. The scale row is exactly one fp32 `Sw[n]` at `ssa+n*srs` (`RSC`); alternatively `UNIT`
+implies `Sw[n]=1` and does not read `ssa`. Select exactly one of `UNIT` or `RSC`; `WF` bit 5 is
+reserved and zero, bit 4 is `QUAD` (below). `PAIR` (flags bit 6, TMM PAIR: the K-split by two; a bitstream reports it
+in CAPS2 bit1, `Config.TPAIR`) needs `2M <= MCOLS` and the operand's rows also in ACT rows
+`M..2M-1` (QACT `DUP`): column `j` takes the even K blocks from row `j`, column `j + M` the odd
+ones from row `j + M`, two blocks an advance (`ceil(KB/2)` cycles a weight row instead of `KB`),
+and the two columns' exact integers are added before the epilogue — the result is plain TMM's bit
+for bit. With an odd `KB` the last advance's odd block is not consumed. `QUAD` (flags bit 4, TMM
+QUAD: the K-split by four; CAPS2 bit2, `Config.TQUAD`; not with `PAIR`) needs `4M <= MCOLS` and
+the operand's rows also in ACT rows `M..4M-1` (QACT `DUP4`): column `j + q*M` (`q < 4`) takes
+block `4c + q` of chunk `c` from row `j + q*M`, a whole chunk an advance (`ceil(KB/4)` cycles a
+weight row), and the four columns' exact integers are added before the epilogue — again plain
+TMM's result bit for bit. With `KB mod 4 = r > 0` the last advance's quarters `q >= r` are not
+consumed. `srs` is a multiple of four. TMM `ASCALE` has MM's
+`UNIT+ACC` requirements.
+
+The TMM MXU uses the existing QACT activation scales and offsets and the same fp32 epilogue as
+MM, with a fixed weight exponent `W=11` and multiplier `m=1`. This preserves the normal quantized
+activation scale while the weight coefficient remains exactly ternary:
+
+```
+for n in 0..N-1:
+  for j < M:
+    acc = 0
+    for k in 0..KB-1:
+      chunk = sa + n*rs + floor(k/4)*D
+      for g in 0..3:                         the D/4 activation elements sharing da[g]
+        c = sum_i ACT[j][(ab+k)*D + g*D/4 + i] *
+            ternary(chunk, (k mod 4)*D + g*D/4 + i)
+        sh = 11 - da[j][ab+k][g]
+        acc += (sh >= 0 ? 1 << sh : 0) * c
+    y = (i2f(acc) * Sw[n]) * (Sa[j][ab] * f32(2^-11))
+    if ASCALE: y = T[out+j*ors+n] * T[ssa+j] + y
+    elif ACC:  y = T[out+j*ors+n] + y
+    T[out+j*ors+n] = y
+```
+
+Code `11` in a consumed weight symbol is an error in the ISA simulator and a simulation assertion
+in RTL. Reserved symbols in padding beyond `KB` are not consumed. TMM defines a generic ternary
+ABI only; it does not claim compatibility with a particular BitNet/Tern2 checkpoint, whose
+quantization and scale metadata must be independently established.
 
 #### Weight formats
 
@@ -278,7 +330,8 @@ per-row factor `T[w5 + r]`. With both, `x = (T[src + r*srs + c] * T[w5 + r]) * T
 `Sa[r][ab+k] = S`, `da[r][ab+k][b] = d` of sub-block `b` of block `k`. Flag bit0 `ROW`: every
 `d = 0` (the row's one scale). Flag bit3 `DUP` (`2*rows <= MCOLS`): row `r + rows` receives the
 same bytes and scale records as row `r` in the same cycles, the operand layout of `MM PAIR`
-("Column reuse").
+("Column reuse"). Flag bit4 `DUP4` (with `DUP`, `4*rows <= MCOLS`; bitstreams with CAPS2 bit2):
+rows `r + rows`, `r + 2*rows` and `r + 3*rows` do, the operand layout of `TMM QUAD`.
 
 ### QST
 
@@ -295,6 +348,12 @@ the other bytes of those beats while it runs. Flag bit1 `HALF` (`ROW` mode only)
 still the whole row's, but only elements `c < KB*D/2` are written (a V^T append of a head half
 as wide as its padded row, LFM2's 64 of 128, then writes its 64 real rows instead of 128
 byte-strided ones; a quantizer without `HALF` writes the zero padding too, which nothing reads).
+
+Timing only (the result is the same): a QST with `drs = 1`, `es` a multiple of 4, `dst` word
+aligned and rows of at most 1024 elements (the V^T appends of the attention caches) runs the
+quantizer's T4 path: each row's bytes go to a transposition buffer at LANES a cycle, and every
+four rows are written out a word (four tokens' bytes) a cycle, where the byte path writes one
+byte a cycle.
 
 ### VOP
 
@@ -318,6 +377,7 @@ Elementwise functions write `T[dst + r*drs + c] = f(A, B)`; reductions write
 | 4 | MAX | max(A, B) |
 | 5 | MIN | min(A, B) |
 | 6 | OUTER | A * Dv(c) + B(r) * Cv(c), in place (see below) |
+| 7 | MAC | A * Cv(c) + B: `Cv(c) = T[imm + c]` (imm the TMEM address `R[rd] + w7`), B in FULL / ROW / COL (not SCALAR), `cols <= 256` (r5 vector extensions: CAPS2 bit3, `Config.TFN`) |
 | 8 | COPY | A |
 | 9 | EXP2 | exp2(A) |
 | 10 | RECIP | recip(A) |
@@ -331,6 +391,7 @@ Elementwise functions write `T[dst + r*drs + c] = f(A, B)`; reductions write
 | 18 | RSSQ | isum_64(A(r,c) * A(r,c)) (sum of squares, for RMSNorm: RDOT with B = A) |
 | 19 | RDOT | isum_64(A(r,c) * B(r,c)), B in any bmode (row dot products: `S @ k` is B per column) |
 | 20 | ARGMAX | the RMAX of the row at `T[dst + r*drs]` and the index of its first column at `T[dst + r*drs + 1]` (see below) |
+| 0x20..0x29 | TFN | the table functions of A: SIGMOID, SILU, TANH, GELU, GELU_TANH, SOFTPLUS, MISH, QUICK_GELU, SIN, COS (see "Table functions"; `Config.TFN`, CAPS2 bit3) |
 
 In RSSQ and RDOT each product is rounded, then added into the isum_64 partials.
 
@@ -348,6 +409,50 @@ Dv(c)), mul(B(r), Cv(c)))`: two rounded products, then a rounded add. B must be 
 bit 1 (DONE; `a` is not read). The `a` field holds the decay address: A is dst itself (`ars` is
 not used). `cols <= 256`. `Cv` and `Dv` are read before anything is written, so they may overlap
 dst; `B(r)` is read with every element and must not be written by an earlier element.
+
+**MAC** reads its column vector `Cv` before anything is written (into the VPU's column buffers,
+as OUTER's), so `Cv` may overlap dst; A and B are read with each element (B may be dst itself,
+element for element: an accumulator, `dst += A * Cv`). One rounded product, then a rounded add.
+Depthwise convolution takes one MAC a tap (it took a MUL and an ADD), LayerNorm's affine step
+`(x r) w + b` one pass (two), AdaLN's `x (1 + scale) + shift` one.
+
+### Table functions
+
+`func = 0x20 + fn` (`Config.TFN`, CAPS2 bit3; the stream engine's composite loop runs them,
+LANES/2 columns a cycle like RECIP) evaluates a piecewise quadratic over 256 unit segments of
+`u = a*S + O` (`a = x`, or `|x|` for the periodic SIN / COS). The tables (`c2, c1, c0` per
+segment, fp32, and the two tails) are rtl/vpu/otpu_tfn_rom.sv, generated by
+tools/gen_tfn_tables.py and read by both the RTL and the ISA simulator: they are part of this
+definition. With `x` flushed and every step a rounded mul then a rounded add:
+
+```
+d = DESC[fn]                                  table, S, O, post, periodic, odd (otpu_tfn_rom)
+u = add(mul(d.periodic ? abs(x) : x, S), O)
+periodic:  bad = u is inf or NaN;  tail = none
+else:      lo = gt(+0, u);  hi = !gt(256, u)  (u >= 256 or NaN);  a tail: u = +0
+t = trunc(u) (the integer part, bitwise), s = int(t) mod 256, f = add(u, -t)   (exact)
+(c2, c1, c0) = TAB[d.table][s], or (0, 0, TAIL[d.table][hi]) at a tail
+g = add(mul(add(mul(c2, f), c1), f), c0)
+post: g = add(mul(g, x), -0) (x*g) | add(mul(g, 1), relu(x)) | add(mul(g, 1), -0)
+odd and x's sign set: g = -g;  bad: g = NaN (canonical)
+```
+
+| fn | name | table on | S, O | post |
+|---|---|---|---|---|
+| 0 | SIGMOID | sigmoid, x in [-16, 16) | 8, 128 | g |
+| 1 | SILU | sigmoid | 8, 128 | x*g |
+| 2 | TANH | tanh, [-8, 8) | 16, 128 | g |
+| 3 | GELU | Phi (the erf form), [-8, 8) | 16, 128 | x*g |
+| 4 | GELU_TANH | sigmoid(2 sqrt(2/pi)(x + 0.044715 x^3)), [-8, 8) | 16, 128 | x*g |
+| 5 | SOFTPLUS | log1p(exp(-abs(x))), [-32, 32) | 4, 128 | g + relu(x) |
+| 6 | MISH | tanh(softplus(x)), [-16, 16) | 8, 128 | x*g |
+| 7 | QUICK_GELU | sigmoid(1.702 x), [-16, 16) | 8, 128 | x*g |
+| 8 | SIN | sin over a period | 256/(2 pi), 0 | g, odd |
+| 9 | COS | the SIN table | 256/(2 pi), 64 | g |
+
+Each piece interpolates the function at its segment's ends and middle (the pieces meet at the
+knots: sigmoid(0) = 0.5, sin(0) = 0 exactly); against float64 the error is under 5e-6
+absolute over the useful ranges (softplus 1.3e-5; tests/test_tfn.py).
 
 ### DSTEP
 

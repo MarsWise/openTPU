@@ -14,6 +14,7 @@ from opentpu.isasim import Machine, SimError, Slice
 from opentpu.kernels import attention_decode, attention_layer, mlp
 from opentpu.runtime import compile_kernel, run
 from opentpu import rtlsim
+from opentpu.quant import pack_ternary_mxu
 from opentpu import target as _target
 
 from conftest import assert_same_state, rel
@@ -56,6 +57,278 @@ def test_design_size_block_128_rtl(have_verilator):
                            block=128)
     ri, rr = both(attention_decode, Config(S=1, D=128, ACT_BLOCKS=16), **args)
     assert rel(rr.outputs["out"], want) < 0.03
+
+
+@pytest.mark.parametrize("KB,unit,acc", [
+    (1, False, False), (3, True, False), (4, False, True),
+    (5, True, True), (7, False, False),
+])
+def test_tmm_rtl(have_verilator, KB, unit, acc):
+    rng = np.random.default_rng(0x7E2 + KB)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16)
+    D, M, N = cfg.D, 6, 7
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    weight_at, scale_at, init_at, out_at = 0x20000, 0x30000, 0x40000, 2048
+    row_stride, out_stride = packed.shape[1], N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    initial = rng.standard_normal((M, out_stride), dtype=np.float32)
+    if acc:
+        img[init_at:init_at + initial.nbytes] = initial.view(np.uint8).reshape(-1)
+    if not unit:
+        scales = rng.uniform(0.05, 0.2, N).astype(np.float32)
+        img[scale_at:scale_at + scales.nbytes] = scales.view(np.uint8)
+
+    prog = [I.ld(DATA, 0, M * KB * D)]
+    if acc:
+        prog.append(I.ld(init_at, out_at, M * out_stride))
+    prog += [
+        I.qact(0, M, 0, KB, KB * D),
+        I.tmm(weight_at, 0 if unit else scale_at, out_at, N, KB, row_stride,
+              out_stride, M, 0, 4, unit=unit, acc=acc, rsc=not unit),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(
+        cfg, [prog], [img.copy()], axi=True, stall=25, seed=0x7E2 + KB,
+    )
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
+@pytest.mark.parametrize("M,KB,unit,acc", [(1, 5, False, False), (2, 4, True, True),
+                                          (1, 1, False, True), (2, 7, False, False),
+                                          (1, 20, False, False)])
+def test_tmm_pair_rtl(have_verilator, M, KB, unit, acc):
+    """TMM PAIR (the ternary K-split by two) in the RTL against the ISA simulator, under random
+    port stalls: DUP'd ACT rows, the odd blocks in the high columns, the partners' integers
+    added before the epilogue; and the ISA's TMM PAIR is plain TMM's bit for bit
+    (test_ternary). Odd KB leaves the last advance's high block out."""
+    rng = np.random.default_rng(0x7A1 + 16 * M + KB)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
+    D, N = cfg.D, 9
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    wa, sa, oa, ia, ors = 0x100000, 0x200000, 4096, 0x280000, N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    prog = [I.ld(DATA, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+        I.qact(0, M, 0, KB, KB * D, dup=True),
+        I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4, unit=unit,
+              rsc=not unit, acc=acc, rmax=True, pair=True),
+        I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25,
+                                 seed=0x7A1 + KB)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
+TMM_BIG = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=256, DRAM_BYTES=1 << 24)
+
+
+@pytest.mark.parametrize("case", ["kb255", "kb255_pair", "acc_limits", "acc_limits_pair",
+                                  "replay8", "ascale_pair"])
+def test_tmm_rtl_edges(have_verilator, case):
+    """TMM edges in the RTL against the ISA simulator, one build (ACT_BLOCKS 256): the largest KB
+    (255, one QACT of 32640 elements), accumulator limits (every weight +1 against activations
+    at the int8 limits in every group: the 48-bit sums at their largest), row replay at
+    M = ACT_ROWS = 8 (each weight chunk consumed twice) and ASCALE with PAIR; plain and TMM
+    PAIR, port stalls."""
+    cfg = TMM_BIG
+    D = cfg.D
+    rng = np.random.default_rng(sum(map(ord, case)))
+    pair = case.endswith("pair")
+    M, N, KB = {"kb255": (1, 5, 255), "kb255_pair": (2, 5, 255), "acc_limits": (4, 6, 64),
+                "acc_limits_pair": (2, 6, 64), "replay8": (8, 7, 16),
+                "ascale_pair": (2, 6, 9)}[case]
+    unit = case.startswith("acc") or case == "ascale_pair"
+    if case.startswith("acc"):
+        values = np.where(rng.random((M, KB * D)) < 0.5, 127.0, -127.0).astype(np.float32)
+        values[:, ::2] = 127.0                       # every group's maximum the int8 limit
+        weights = np.ones((N, KB * D), np.int8)
+        weights[1::2] = -1
+    else:
+        values = rng.standard_normal((M, KB * D), dtype=np.float32)
+        weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    wa, sa, oa, ia, al = 0x400000, 0x600000, 0x8000, 0x700000, 0x7F00
+    ors = N + 1
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    alpha = rng.uniform(-2, 2, M).astype(np.float32)
+    img[ia + init.nbytes:ia + init.nbytes + alpha.nbytes] = alpha.view(np.uint8)
+    asc = case == "ascale_pair"
+    prog = [I.ld(DATA, 0, M * KB * D), I.ld(ia, oa, M * ors)]
+    if asc:
+        prog.append(I.ld(ia + init.nbytes, al, M))
+    prog += [I.qact(0, M, 0, KB, KB * D, dup=pair),
+             I.tmm(wa, al if asc else (0 if unit else sa), oa, N, KB, packed.shape[1], ors, M,
+                   0, 4, unit=unit, rsc=not unit, acc=True, rmax=M <= cfg.MCOLS,
+                   ascale=al if asc else None, pair=pair),
+             I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25,
+                                 seed=sum(map(ord, case)))
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+    if pair:                                      # and TMM PAIR is plain TMM's, bit for bit
+        plain = [i if i.op != I.QACT else I.qact(0, M, 0, KB, KB * D) for i in prog]
+        plain[-2] = I.tmm(wa, al if asc else (0 if unit else sa), oa, N, KB, packed.shape[1],
+                          ors, M, 0, 4, unit=unit, rsc=not unit, acc=True, rmax=True,
+                          ascale=al if asc else None)
+        p2 = Machine(cfg, [plain], [img.copy()]).run()
+        assert np.array_equal(p2.slices[0].tmem[oa:oa + M * ors + M],
+                              ref.slices[0].tmem[oa:oa + M * ors + M])
+
+
+@pytest.mark.parametrize("KB,unit,acc", [(5, False, False), (4, True, True), (1, False, True),
+                                        (6, False, False), (7, True, False), (20, False, False),
+                                        (3, False, True)])
+@pytest.mark.parametrize("mcols,M", [(4, 1), (8, 1), (8, 2)])
+def test_tmm_quad_rtl(have_verilator, KB, unit, acc, mcols, M):
+    """TMM QUAD (the ternary K-split by four) in the RTL against the ISA simulator, under random
+    port stalls: QACT DUP4's four ACT rows, column q taking quarter q of each chunk, the four
+    partners' integers added before the epilogue (M = 1/2 on MCOLS 4/8); KB not a multiple of four
+    leaves the last advance's top quarters out. The ISA's QUAD is plain TMM's bit for bit
+    (test_ternary)."""
+    rng = np.random.default_rng(0x9D4 + KB)
+    cfg = Config(S=1, D=128, MCOLS=mcols, ACT_ROWS=8, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
+    D, N = cfg.D, 9
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    wa, sa, oa, ia, ors = 0x100000, 0x200000, 4096, 0x280000, N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    prog = [I.ld(DATA, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+        I.qact(0, M, 0, KB, KB * D, dup4=True),
+        I.tmm(wa, 0 if unit else sa, oa, N, KB, packed.shape[1], ors, M, 0, 4, unit=unit,
+              rsc=not unit, acc=acc, rmax=True, quad=True),
+        # a plain TMM and a QUAD back to back (the pipeline takes the next command only when
+        # it is alike), then the QUAD again over the same rows
+        I.tmm(wa, 0 if unit else sa, oa + 2 * M * ors, N, KB, packed.shape[1], ors, M, 0, 4,
+              unit=unit, rsc=not unit),
+        I.tmm(wa, 0 if unit else sa, oa + 4 * M * ors, N, KB, packed.shape[1], ors, M, 0, 4,
+              unit=unit, rsc=not unit, quad=True),
+        I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25,
+                                 seed=0x9D4 + KB)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+    t = ref.slices[0].tmem
+    for j in range(M):
+        a, b = oa + (2*M + j)*ors, oa + (4*M + j)*ors
+        assert np.array_equal(t[a:a + N], t[b:b + N])
+
+
+@pytest.mark.parametrize("M", [3, 6])
+def test_tmm_rtl_row_offsets_past_the_window(have_verilator, M):
+    # QACT gives each row its own per-group offsets da; a group whose da exceeds TMM's W = 11 drops
+    # out of that row only (docs/isa.md: sh = 11 - da[j][...]). One row's tiny group must not change
+    # the other rows' sums (isasim once skipped the group for the whole batch). M = 6 > MCOLS
+    # replays the streamed rows.
+    from opentpu import fp32 as F
+    rng = np.random.default_rng(0xD11 + M)
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=8, ACT_BLOCKS=16)
+    D, KB, N = cfg.D, 2, 9
+    g = D // 4
+    values = rng.standard_normal((M, KB * D), dtype=np.float32)
+    values[0, g:2 * g] *= 2.0 ** -14                 # row 0, block 0, group 1: da > 11
+    values[M - 1, KB * D - g:] *= 2.0 ** -13         # the last row, block 1, group 3
+    _, _, da = F.quantize_mx(values, g, False)
+    assert da[0, 1] > 11 and da[M - 1, 4 * KB - 1] > 11
+    assert (da[1:M - 1] <= 11).all()                 # the middle rows keep every group
+    weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+    packed = pack_ternary_mxu(weights, D)
+    weight_at, out_at = 0x20000, 2048
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    prog = [
+        I.ld(DATA, 0, M * KB * D),
+        I.qact(0, M, 0, KB, KB * D),
+        I.tmm(weight_at, 0, out_at, N, KB, packed.shape[1], N, M, 0, 4, unit=True),
+        I.st(0x60000, out_at, M * N),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25, seed=0xD11 + M)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+    # the middle rows equal their own exact dot products of the quantized activations
+    q, s, d = F.quantize_mx(values, g, False)
+    rec = (q.astype(np.float64).reshape(M, -1, g) * (s[:, None, None].astype(np.float64)
+           / np.ldexp(1.0, d.astype(int))[:, :, None])).reshape(M, -1)
+    got = ref.slices[0].dram[0x60000:0x60000 + M * N * 4].view(np.float32).reshape(M, N)
+    want = rec @ weights.T.astype(np.float64)
+    for r in range(1, M - 1):
+        assert np.allclose(got[r], want[r], rtol=1e-5, atol=1e-6 * np.abs(want[r]).max())
+
+
+def test_tmm_rtl_ascale_rmax_final_values(have_verilator):
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_ROWS=4, ACT_BLOCKS=2)
+    M, N, D, ors = 3, 4, cfg.D, 6
+    out_at, alpha_at = 2048, 2100
+    weight_at, init_at, alpha_dram = 0x20000, 0x40000, 0x50000
+    old = np.array([[-2.0, -2.0, -3.0, -4.0],
+                    [-1.0, -3.0, 0.0, 2.0],
+                    [0.0, -0.0, 0.0, -0.0]], dtype=np.float32)
+    alpha = np.array([2.0, -1.0, -3.0], dtype=np.float32)
+    packed = pack_ternary_mxu(np.zeros((N, D), dtype=np.int8), D)
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    values = np.zeros((M, D), dtype=np.float32)
+    img[DATA:DATA + values.nbytes] = values.view(np.uint8).reshape(-1)
+    img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+    img[init_at:init_at + old.nbytes] = old.reshape(-1).view(np.uint8)
+    img[alpha_dram:alpha_dram + alpha.nbytes] = alpha.view(np.uint8)
+    prog = [
+        I.ld(DATA, 0, M * D),
+        I.ld(init_at, out_at, M * ors),
+        I.ld(alpha_dram, alpha_at, M),
+        I.qact(0, M, 0, 1, D),
+        I.tmm(weight_at, alpha_at, out_at, N, 1, D, ors, M, 0, 4,
+              unit=True, acc=True, rmax=True, ascale=alpha_at),
+        I.halt(),
+    ]
+    ref = Machine(cfg, [prog], [img.copy()]).run()
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25, seed=0xA5CA1E)
+    assert np.array_equal(drams[0], ref.slices[0].dram)
+    assert np.array_equal(tmems[0], ref.slices[0].tmem)
+
+
+def test_tmm_rtl_rejects_reserved_symbol(have_verilator):
+    cfg = Config(S=1, D=128, MCOLS=4, ACT_BLOCKS=16)
+    packed = pack_ternary_mxu(np.zeros((1, cfg.D), dtype=np.int8), cfg.D)
+    packed[0, 0] = 0b11
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[DATA:DATA + cfg.D * 4] = np.zeros(cfg.D, np.float32).view(np.uint8)
+    img[0x20000:0x20000 + cfg.D] = packed[0]
+    prog = [
+        I.ld(DATA, 0, cfg.D),
+        I.qact(0, 1, 0, 1, cfg.D),
+        I.tmm(0x20000, 0, 1024, 1, 1, cfg.D, 1, 1, 0, 0, unit=True),
+        I.halt(),
+    ]
+    with pytest.raises(RuntimeError, match="reserved TMM symbol"):
+        rtlsim.run(cfg, [prog], [img], axi=True, stall=20, seed=0x7E2)
 
 
 # ------------------------------------------------------------------------------------ fuzzing

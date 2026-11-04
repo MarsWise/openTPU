@@ -267,6 +267,8 @@ DEC = {"int4": DEC_INT4, "fp4": DEC_FP4, "nvfp4": DEC_FP4}
 NSUB = 4                       # sub-blocks per K-block (QACT's offsets, int4 / fp4's multipliers)
 NVG = 8                        # nvfp4: E4M3 groups per K-block
 MXU_FORMATS = ("int8", "int4", "fp4", "nvfp4")
+TERNARY = "ternary"          # TMM's packed rows (2 bits a weight) with one fp32 scale a row (RSC)
+TERNARY_GSC = "ternary_gsc"  # exact ternary values, fp32 scales per group of D=128
 FOUR = ("int4", "fp4", "nvfp4")
 MMAX = 63                      # int4 / fp4: the largest 6-bit multiplier
 DW_MAX = 255                   # an offset byte
@@ -284,8 +286,110 @@ def pack4(codes: np.ndarray) -> np.ndarray:
     return (c[..., 0::2] | (c[..., 1::2] << 4)).astype(np.uint8)
 
 
+TERNARY_ZERO = 0b00
+TERNARY_POSITIVE = 0b01
+TERNARY_NEGATIVE = 0b10
+TERNARY_INVALID = 0b11
+
+
+def pack_ternary(weights: np.ndarray) -> np.ndarray:
+    """Pack signed {-1, 0, +1} weights, four per byte, least-significant pair first.
+
+    The symbol map is 00=0, 01=+1, 10=-1; 11 is reserved. The last byte's unused
+    pairs are zero.     This generic row-packing format is also the payload encoding consumed by TMM when each
+    row is padded to the MXU's D-byte streaming stride. It does not identify a checkpoint's
+    quantization semantics.
+    """
+    w = np.asarray(weights)
+    if w.ndim < 1:
+        raise ValueError("ternary weights must have at least one dimension")
+    if not np.issubdtype(w.dtype, np.integer) or np.issubdtype(w.dtype, np.bool_):
+        raise TypeError("ternary weights must have an integer dtype")
+    if np.any((w < -1) | (w > 1)):
+        raise ValueError("ternary weights must be in {-1, 0, +1}")
+
+    k = w.shape[-1]
+    packed = np.zeros((*w.shape[:-1], (k + 3) // 4), dtype=np.uint8)
+    codes = np.where(w == 1, TERNARY_POSITIVE,
+                     np.where(w == -1, TERNARY_NEGATIVE, TERNARY_ZERO)).astype(np.uint8)
+    for lane in range(4):
+        part = codes[..., lane::4]
+        packed[..., :part.shape[-1]] |= part << (2 * lane)
+    return packed
+
+
+def pack_ternary_mxu(weights: np.ndarray, D: int = 128) -> np.ndarray:
+    """Pack [N, K] ternary rows for TMM, padding each row to complete D-byte stream chunks."""
+    w = np.asarray(weights)
+    if w.ndim != 2:
+        raise ValueError("TMM weights must have shape [N, K]")
+    if D <= 0 or D % 4 or w.shape[1] == 0 or w.shape[1] % D:
+        raise ValueError(f"TMM needs K divisible by D={D} and D divisible by 4")
+    packed = pack_ternary(w)
+    stride = -(-packed.shape[1] // D) * D
+    rows = np.zeros((w.shape[0], stride), dtype=np.uint8)
+    rows[:, :packed.shape[1]] = packed
+    return rows
+
+
+def unpack_ternary(packed: np.ndarray, count: int) -> np.ndarray:
+    """Unpack low-pair-first ternary bytes to signed int8 values, validating symbols and tail."""
+    p = np.asarray(packed)
+    if p.dtype != np.uint8:
+        raise TypeError("packed ternary weights must have dtype uint8")
+    if p.ndim < 1:
+        raise ValueError("packed ternary weights must have at least one dimension")
+    if (not isinstance(count, (int, np.integer))
+            or isinstance(count, (bool, np.bool_)) or count < 0):
+        raise ValueError("count must be a non-negative integer")
+    if p.shape[-1] != (count + 3) // 4:
+        raise ValueError("packed row length does not match count")
+
+    lanes = np.stack([(p >> (2 * lane)) & 0b11 for lane in range(4)], axis=-1)
+    unpacked = lanes.reshape(*p.shape[:-1], 4 * p.shape[-1])
+    codes = unpacked[..., :count]
+    if np.any(codes == TERNARY_INVALID):
+        raise ValueError("reserved ternary code 11")
+    if count % 4 and np.any(unpacked[..., count:] != TERNARY_ZERO):
+        raise ValueError("non-zero ternary padding")
+    return np.where(codes == TERNARY_POSITIVE, 1,
+                    np.where(codes == TERNARY_NEGATIVE, -1, 0)).astype(np.int8)
+
+
+def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.ndarray:
+    """Exact int64 +/−/skip reference matmul without expanding ternary weights.
+
+    Activations have shape [..., K]; packed weights have shape [N, ceil(K/4)].
+    """
+    a = np.asarray(activations)
+    if a.ndim < 1 or not np.issubdtype(a.dtype, np.signedinteger) or a.dtype.itemsize > 4:
+        raise TypeError("activations must be a signed integer array of at most 32 bits")
+    w = np.asarray(packed_weights)
+    if w.ndim != 2:
+        raise ValueError("packed_weights must have shape [N, ceil(K/4)]")
+    count = a.shape[-1]
+    if w.shape[-1] != (count + 3) // 4:
+        raise ValueError("packed row length does not match activation width")
+
+    result = np.zeros((*a.shape[:-1], w.shape[0]), dtype=np.int64)
+    a64 = a.astype(np.int64)
+    for k in range(count):
+        codes = (w[:, k // 4] >> (2 * (k % 4))) & 0b11
+        if np.any(codes == TERNARY_INVALID):
+            raise ValueError("reserved ternary code 11")
+        activation = a64[..., k, None]
+        result += np.where(codes == TERNARY_POSITIVE, activation, 0)
+        result -= np.where(codes == TERNARY_NEGATIVE, activation, 0)
+    if count % 4 and np.any(w[:, -1] >> (2 * (count % 4))):
+        raise ValueError("non-zero ternary padding")
+    return result
+
+
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:
-    """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks)."""
+    """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks;
+    ternary: four K-blocks a D-byte chunk, TMM's)."""
+    if fmt in (TERNARY, TERNARY_GSC):
+        return -(-K // (4 * D)) * D
     return K if fmt == "int8" else -(-K // (2 * D)) * D
 
 
@@ -297,7 +401,9 @@ def scale_bytes(K: int, fmt: str, D: int = 128, rsc: bool = False) -> int:
     if K % D:
         raise ValueError(f"inner dimension {K} is not a multiple of D={D}")
     KB = K // D
-    if rsc:
+    if fmt == TERNARY_GSC:
+        return 4 * KB
+    if rsc or fmt == TERNARY:
         return 4
     if fmt == "int8":
         return 4 + 4 * -(-KB // 4)
@@ -510,7 +616,13 @@ QUANT_ROWS = 1 << 14    # quantize_mxu: rows per piece, so its temporaries stay 
 def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
     """W [N, K] in an MXU weight format ("int8", "int4", "fp4" or "nvfp4"): the DRAM rows
     [N, row_bytes] (uint8) and the scale rows [N, scale_bytes] (uint8), ready to place (rows
-    rs and srs bytes apart). Rows are quantized on their own, QUANT_ROWS at a time."""
+    rs and srs bytes apart). Rows are quantized on their own, QUANT_ROWS at a time.
+    "ternary": every row of W must be s * {-1, 0, +1} (a BitNet projection, its weight_scale
+    applied): the row's s (its largest |w|) is its RSC scale, the signs TMM's packed rows."""
+    if fmt == TERNARY:
+        return quantize_ternary(W, D)
+    if fmt == TERNARY_GSC:
+        return pack_ternary_gsc(W, D)
     N = W.shape[0]
     if N <= QUANT_ROWS:
         return quantize_mx(W, fmt, D)
@@ -521,6 +633,32 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
     for i in range(QUANT_ROWS, N, QUANT_ROWS):
         q[i:i + QUANT_ROWS], sc[i:i + QUANT_ROWS] = quantize_mx(W[i:i + QUANT_ROWS], fmt, D)
     return q, sc
+
+
+def pack_ternary_gsc(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """Lossless repack of already-ternary grouped values. Refuse any other values."""
+    W = np.asarray(W, np.float32)
+    if D != 128 or W.ndim != 2 or W.shape[1] % D or not np.isfinite(W).all():
+        raise ValueError("TMM GSC needs finite [N,K] weights with groups of 128")
+    blocks = W.reshape(W.shape[0], -1, D)
+    scale = np.abs(blocks).max(axis=2)
+    if not np.all((blocks == 0) | (np.abs(blocks) == scale[..., None])):
+        raise ValueError("TMM GSC repacking refuses non-ternary groups")
+    return (pack_ternary_mxu(np.sign(W).astype(np.int8), D),
+            np.ascontiguousarray(scale, dtype='<f4').view(np.uint8).reshape(W.shape[0], -1))
+
+
+def quantize_ternary(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """W [N, K] with rows s_n * {-1, 0, +1} -> (TMM packed rows [N, row_bytes], fp32 RSC scale
+    rows [N, 4] as bytes). Refuses a row with more than one magnitude (not ternary)."""
+    W = np.asarray(W, np.float32)
+    s = np.abs(W).max(axis=1)
+    codes = np.where(s[:, None] > 0, np.rint(W / np.where(s > 0, s, 1)[:, None]), 0)
+    if not np.array_equal((codes * s[:, None]).astype(np.float32), W):
+        bad = int(np.argmax(np.any((codes * s[:, None]).astype(np.float32) != W, axis=1)))
+        raise ValueError(f"row {bad} is not ternary (s * {{-1, 0, 1}})")
+    return (pack_ternary_mxu(codes.astype(np.int8), D),
+            np.ascontiguousarray(s.astype(np.float32)).view(np.uint8).reshape(-1, 4))
 
 
 def part_scales(srows: np.ndarray, fmt: str, k0: int, kb: int) -> np.ndarray:
@@ -545,6 +683,13 @@ def part_rows(rows: np.ndarray, fmt: str, c0: int, c1: int, D: int = 128) -> np.
     rows = np.asarray(rows, np.uint8)
     if fmt == "int8":
         return np.ascontiguousarray(rows[:, c0:c1])
+    if fmt == TERNARY:                          # four K-blocks a D-byte chunk
+        if c0 % (4 * D):
+            raise ValueError(f"a ternary column part starts on a whole chunk ({c0})")
+        out = np.zeros((rows.shape[0], row_bytes(c1 - c0, fmt, D)), np.uint8)
+        n = out.shape[1]
+        out[:, :n] = rows[:, c0 // 4:c0 // 4 + n]
+        return out
     if c0 % (2 * D):
         raise ValueError(f"a 4-bit column part starts on a whole chunk ({c0})")
     out = np.zeros((rows.shape[0], row_bytes(c1 - c0, fmt, D)), np.uint8)
@@ -859,5 +1004,3 @@ def import_nvfp4(codes: np.ndarray, e4m3_scales: np.ndarray, tensor_scale: float
     rows[:, :K // 2] = pack4(codes)
     return rows, pack_scales("nvfp4", sw.astype(np.float32),
                              e4=e4.reshape(N, K // D, NVG).astype(np.uint8))
-
-

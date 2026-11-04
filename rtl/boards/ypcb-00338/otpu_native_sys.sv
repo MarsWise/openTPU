@@ -42,7 +42,11 @@ module otpu_native_sys #(
   parameter int PLATFORM = 0,
   parameter logic [31:0] ARCH_HASH = 32'h0,
   parameter int TRACE_DEPTH = 16384,     // trace records (otpu_board; 0: no trace buffer)
-  parameter bit COLL_GATHER = 1'b1       // 0: the collective unit without GATHER (otpu_board)
+  parameter bit COLL_GATHER = 1'b1,      // 0: the collective unit without GATHER (otpu_board)
+  parameter bit TPAIR = 1'b0,            // CAPS2 bits 1..3 (otpu_board)
+  parameter bit TQUAD = 1'b0,
+  parameter bit TFN   = 1'b0,
+  parameter bit TGSC  = 1'b0
 ) (
   // core clock and reset (synchronous, high), XDMA's clock and reset
   input  logic                  clk,
@@ -198,7 +202,8 @@ module otpu_native_sys #(
                .TMEM_WORDS(TMEM_WORDS),
                .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID), .DDR_MTS(DDR_MTS), .DSTEP(DSTEP),
                .HOSTCAL(HOSTCAL), .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
-               .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER)) u_board (
+               .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
+               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC)) u_board (
     .clk, .clk_f, .rst, .ctl_mrst, .calib, .ded, .temp, .led, .i2c_lo, .i2c_pin,
     .s_ctl_awaddr, .s_ctl_awvalid, .s_ctl_awready, .s_ctl_wdata, .s_ctl_wstrb, .s_ctl_wvalid,
     .s_ctl_wready, .s_ctl_bresp, .s_ctl_bvalid, .s_ctl_bready, .s_ctl_araddr, .s_ctl_arvalid,

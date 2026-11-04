@@ -67,6 +67,18 @@ dstep="${DSTEP:-${T_DSTEP:-1}}"     # 0: no DSTEP datapath in the DMA (CAPS bit6
 # otpu_seq WAITC (EXPERIMENTAL, docs/seq_vpu.md; CFG_UARCH bit24, in CFG_HASH when on): the
 # target's [arch] SEQ_WC, or SEQ_WC=1. The host writes each program's wait entries
 seq_wc="${SEQ_WC:-${T_SEQ_WC:-1}}"
+# TMM PAIR reported in CAPS2 bit1 (the MXU takes it in every build of this tree; in CFG_HASH when
+# on): the target's [arch] TPAIR, or TPAIR=1. Off by default (production bitstreams before it)
+tpair="${TPAIR:-${T_TPAIR:-0}}"
+[[ "$tpair" == true ]] && tpair=1; [[ "$tpair" == false ]] && tpair=0
+# TMM QUAD (the ternary K-split by four, QACT DUP4) reported in CAPS2 bit2: TQUAD=1 or the target's
+tquad="${TQUAD:-${T_TQUAD:-0}}"
+tgsc="${TGSC:-${T_TGSC:-0}}"
+[[ "$tgsc" == true ]] && tgsc=1; [[ "$tgsc" == false ]] && tgsc=0
+[[ "$tquad" == true ]] && tquad=1; [[ "$tquad" == false ]] && tquad=0
+# the table functions (VOP 0x20..0x29, the stream engine's) reported in CAPS2 bit3: TFN=1 or the target's
+tfn="${TFN:-${T_TFN:-0}}"
+[[ "$tfn" == true ]] && tfn=1; [[ "$tfn" == false ]] && tfn=0
 tmem_impl="${TMEM_IMPL:-${T_TMEM_IMPL:-3}}"   # TMEM: 0 a copy per read port, 1 banked, 3 one copy (timing only)
 tmem_rq="${TMEM_RQ:-0}"                      # TMEM_IMPL 1: request-priority bank addresses
 tmem_x="${TMEM_X:-}"                         # TMEM_IMPL 3: the one copy's knobs (tmem_knobs.tcl)
@@ -85,7 +97,7 @@ export TMEM_WORDS="${TMEM_WORDS:-${T_TMEM_WORDS:-65536}}"
 # CFG_HASH: the arch hash of what this build is (the knobs applied to the target's arch)
 arch_hash="$(PYTHONPATH="$root" python3 -m opentpu.target hash "$target" MCOLS="$mcols" \
   LANES="$lanes" ACT_ROWS="$act_rows" TMEM_WORDS="$TMEM_WORDS" DSTEP="$dstep" SEQ_WC="$seq_wc" \
-  2>/dev/null || echo 0)"
+  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" 2>/dev/null || echo 0)"
 # BUILD_ID register: the git commit's first 8 hex digits, taken here (Vivado may run in Docker)
 build_id="${BUILD_ID:-$(git -C "$root" rev-parse HEAD 2>/dev/null | cut -c1-8)}"
 build_id="${build_id:-0}"
@@ -126,6 +138,10 @@ mkdir -p "$out"
 export OTPU_IP_CACHE="${OTPU_IP_CACHE-$HOME/.cache/otpu-vivado-ip}"
 export OTPU_FAST="${FAST:-0}"
 export OTPU_SEQ_WC_GEN="$seq_wc"
+export OTPU_TPAIR_GEN="$tpair"                                  # read by vivado/create_project.tcl
+export OTPU_TFN_GEN="$tfn"                                      # read by vivado/create_project.tcl
+export OTPU_TQUAD_GEN="$tquad"                                  # read by vivado/create_project.tcl
+export OTPU_TGSC_GEN="$tgsc"
 export PCIE_GEN="${PCIE_GEN:-2}"    # read by vivado/bd_native.tcl and userclk1_reroute.tcl
 export TRACE_DEPTH="${TRACE_DEPTH:-${T_TRACE_DEPTH:-16384}}"   # read by vivado/create_project.tcl
 export COLL_GATHER="${COLL_GATHER:-0}"                          # read by vivado/create_project.tcl

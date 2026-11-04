@@ -38,6 +38,19 @@ tokens and logits bit for bit (README, "Validating against Hugging Face").
 The MX MXU ([mx_mxu.md](mx_mxu.md)) replaced these formats' scales: the next section is what
 the code does now; the sections after it are the survey and the 4-bit MXU before MX.
 
+## Ternary encoding and TMM
+
+`opentpu.quant.pack_ternary` and `unpack_ternary` provide a validated low-pair-first storage
+reference for signed symbols `{-1, 0, +1}`: `00` is zero, `01` is positive one, `10` is negative
+one, and `11` is reserved. Four symbols occupy one byte; unused high pairs in the final byte must
+be zero. `ternary_matmul` is an exact int64 software reference for signed integer activations; it
+accumulates directly from packed positive/negative/zero symbols without expanding a weight matrix.
+`pack_ternary_mxu` lays out 2-D weight matrices for ISA `TMM`, padding each row to the MXU's
+D-byte streaming stride. Compiler descriptors use `QTensor.ternary_weight`; TMM applies one
+optional fp32 scale per output row and the QACT activation scales/offsets. These helpers do not
+quantize floating-point weights or define BitNet/Tern2 checkpoint semantics. No pretrained
+ternary checkpoint has been validated.
+
 ## The MX formats
 
 Every MM output is one exact integer and every scale under a row's fp32 scale is a power-of-two

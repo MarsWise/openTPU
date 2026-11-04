@@ -97,7 +97,7 @@ set rtl [list \
   rtl/mem/otpu_tmem.sv rtl/mem/otpu_actram.sv \
   rtl/seq/otpu_seq.sv rtl/vpu/otpu_vtree.sv rtl/dma/otpu_dma.sv \
   rtl/mxu/otpu_mxu.sv rtl/tech/xilinx7/otpu_tech_dsp.sv rtl/tech/generic/otpu_tech_ram.sv \
-  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
+  rtl/vpu/otpu_quant.sv rtl/vpu/otpu_tfn_rom.sv rtl/vpu/otpu_se_comp.sv rtl/vpu/otpu_se_tail.sv rtl/vpu/otpu_vpu.sv rtl/top/otpu_coll.sv \
   rtl/top/otpu_slice.sv \
   rtl/shell/otpu_ctrl.sv rtl/shell/otpu_trace.sv \
   rtl/shell/otpu_board.sv rtl/mem/otpu_native_dram.sv \
@@ -121,9 +121,18 @@ source $here/bd_native.tcl   ;# sets PCIE_GEN (environment, run_vivado.sh) for t
 make_wrapper -files [get_files otpu_bd.bd] -top
 add_files -norecurse [glob $out/otpu.gen/sources_1/bd/otpu_bd/hdl/otpu_bd_wrapper.v]
 set_property top otpu_fpga_top_ld [current_fileset]
-# otpu_seq WAITC (run_vivado.sh: the target's [arch] SEQ_WC, or SEQ_WC=1; CFG_UARCH bit24)
-set SEQ_WC [expr {[info exists ::env(OTPU_SEQ_WC_GEN)] && $::env(OTPU_SEQ_WC_GEN) eq "1" ? 1 : 0}]
-set_property generic "SEQ_WC=1'b$SEQ_WC MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
+# otpu_seq WAITC (run_vivado.sh: the target's [arch] SEQ_WC, or SEQ_WC=1; CFG_UARCH bit24).
+# Direct invocation uses the YPCB m4 target default (on); an explicit environment value still
+# selects an intentionally wait-entry-free build and its matching CFG_HASH.
+set SEQ_WC [expr {[info exists ::env(OTPU_SEQ_WC_GEN)] ? $::env(OTPU_SEQ_WC_GEN) eq "1" : 1}]
+# TMM PAIR in CAPS2 bit1 (run_vivado.sh: the target's [arch] TPAIR, or TPAIR=1; in CFG_HASH when on)
+set TPAIR [expr {[info exists ::env(OTPU_TPAIR_GEN)] ? $::env(OTPU_TPAIR_GEN) eq "1" : 0}]
+# TMM QUAD in CAPS2 bit2 (run_vivado.sh: TQUAD=1 or the target's [arch] TQUAD)
+set TQUAD [expr {[info exists ::env(OTPU_TQUAD_GEN)] ? $::env(OTPU_TQUAD_GEN) eq "1" : 0}]
+# the table functions in CAPS2 bit3 (run_vivado.sh: TFN=1 or the target's [arch] TFN)
+set TFN [expr {[info exists ::env(OTPU_TFN_GEN)] ? $::env(OTPU_TFN_GEN) eq "1" : 0}]
+set TGSC [expr {[info exists ::env(OTPU_TGSC_GEN)] ? $::env(OTPU_TGSC_GEN) eq "1" : 0}]
+set_property generic "SEQ_WC=1'b$SEQ_WC TPAIR=1'b$TPAIR TQUAD=1'b$TQUAD TFN=1'b$TFN TGSC=1'b$TGSC MCOLS=$MCOLS ACT_ROWS=$ACT_ROWS VPU_CL=$VPU_CL LANES=$LANES CORE_KHZ=$CORE_KHZ BUILD_ID=32'h$BUILD_ID DDR_MTS=$DDR_SPEED DSTEP=1'b$DSTEP MXU_IMPL=$MXU_IMPL MXU_E=$MXU_E TMEM_IMPL=$TMEM_IMPL TMEM_RQ=1'b$TMEM_RQ PCIE_GEN=$PCIE_GEN PLATFORM=$PLATFORM ARCH_HASH=32'h$ARCH_HASH TRACE_DEPTH=$TRACE_DEPTH COLL_GATHER=1'b$COLL_GATHER TMEM_WORDS=$TMEM_WORDS$TMEM_GEN" [current_fileset]
 
 # ---- constraints: the board (otpu_top_ld.xdc) and the core's pads, VREF and synchronizers
 # (otpu_litedram.xdc); then, after the IP's constraints, as unmanaged Tcl on the implemented
@@ -139,42 +148,12 @@ add_files -fileset constrs_1 -norecurse [list $cons/otpu_top_ld.xdc \
 set late [list $cons/otpu_mem_ch.tcl $cons/otpu_top_native.tcl]
 if {$CLK2X} { lappend late $cons/otpu_clk2x.tcl }
 lappend late $cons/otpu_mxu_place.tcl $cons/otpu_ddr_phy_place.tcl
-# setup margins (ns; unset or 0: none): implementation times the checks named below with that much
-# more setup uncertainty, so a route that meets them has that much slack at the real clocks.
-# OTPU_SETUP_MARGIN: every check between the core clocks (core_clk, core_clk2x). OTPU_SYS_MARGIN:
-# LiteDRAM's sys clock to itself (the controllers, the PHY's read data into the ECC decoders),
-# which carries no uncertainty of its own (otpu_litedram.xdc's are on the ld MMCMs' clock pairs:
-# not here, as build.tcl sets these back to 0). Generated here (otpu_margin.tcl in OUT_DIR, one
-# "# margin NAME {FROM} {TO} NS" line a group); build.tcl reports each group's worst slack with
-# it, then removes it for the reports and the bitstream
-set margins {}
-foreach {knob name from to} {
-  OTPU_SETUP_MARGIN core {core_clk_otpu_bd_clk_wiz_0_0 core_clk2x_otpu_bd_clk_wiz_0_0}
-                         {core_clk_otpu_bd_clk_wiz_0_0 core_clk2x_otpu_bd_clk_wiz_0_0}
-  OTPU_SYS_MARGIN   sys  {crg_s7mmcm_clkout} {crg_s7mmcm_clkout}
-} {
-  set m [expr {[info exists ::env($knob)] && $::env($knob) ne "" ? $::env($knob) : 0}]
-  if {![string is double -strict $m] || $m < 0 || $m > 1} { error "$knob '$m': a margin in ns, 0 to 1" }
-  if {$m > 0} { lappend margins [list $name $from $to $m] }
-}
-if {[llength $margins]} {
-  set fh [open $out/otpu_margin.tcl w]
-  puts $fh "# otpu_margin.tcl (create_project.tcl, OTPU_SETUP_MARGIN / OTPU_SYS_MARGIN): more setup uncertainty"
-  puts $fh "# on the checks of each group (implementation only; build.tcl removes it)"
-  foreach g $margins { puts $fh "# margin [lindex $g 0] {[lindex $g 1]} {[lindex $g 2]} [lindex $g 3]" }
-  puts $fh "proc otpu_margin_set {name from to m} {"
-  puts $fh "  set f \[get_clocks -quiet \$from\]; set t \[get_clocks -quiet \$to\]"
-  puts $fh "  if {\[llength \$f\] != \[llength \$from\] || \[llength \$t\] != \[llength \$to\]} {"
-  puts $fh "    puts \"CRITICAL WARNING: \\\[otpu_margin.tcl\\\] \$name: clocks not found (\$from -> \$to): no setup margin\""
-  puts $fh "    return"
-  puts $fh "  }"
-  puts $fh "  foreach a \$f { foreach b \$t { set_clock_uncertainty -setup -from \$a -to \$b \$m } }"
-  puts $fh "  puts \"otpu_margin.tcl: setup margin \$m ns on \$name (\$from -> \$to)\""
-  puts $fh "}"
-  foreach g $margins { puts $fh "otpu_margin_set [lindex $g 0] {[lindex $g 1]} {[lindex $g 2]} [lindex $g 3]" }
-  close $fh
-  lappend late $out/otpu_margin.tcl
-}
+# setup margins (ns; unset or 0: none): margins.tcl (OTPU_SETUP_MARGIN, OTPU_X2C_MARGIN,
+# OTPU_SYS_MARGIN), generated as otpu_margin.tcl in OUT_DIR; build.tcl reports each group's worst
+# slack with it, then removes it for the reports and the bitstream
+source $here/margins.tcl
+set mf [otpu_write_margins $out]
+if {$mf ne ""} { lappend late $mf }
 # OTPU_TMEM_PBLOCK (pblock ranges, e.g. CLOCKREGION_X0Y3:CLOCKREGION_X1Y4; unset: none): the TMEM
 # (u_tmem: the pumped RAMs, their pumps, the arbitration) in a hard pblock there. With the core
 # clock off the memory's 133.33 MHz the channel whose PHY rows held the pumped TMEM read ECC errors

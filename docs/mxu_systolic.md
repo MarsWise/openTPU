@@ -295,6 +295,12 @@ without it (r2m4ng):
 | slices / LUT | 57,519 (77.05%) / 172,736 | 54,176 (72.57%) / 169,571 |
 | the router's worst congestion | South level 5, 110% | North and East level 5, 105% / 104% |
 
+The fence (2026-10-25, `OTPU_MXU_FENCE`, on with the placement): the array's DSP columns'
+free sites (184 at MCOLS 8: the rows below and above the array and its column ends) are
+prohibited, so the other units' DSPs go to the other columns. Without it r5's m8 0f9f9b1d put the
+VPU stream tail's lane 7 multiplier at DSP48_X5Y147, in column 4, and stretched that lane's
+fabric over 330 slice rows (its worst path, -2.715 ns at 150 MHz).
+
 ## Plan and status
 
 1. Done: `IMPL=2` dot product with the unchanged epilogue, bit-exact on the MM / 4-bit / PAIR RTL

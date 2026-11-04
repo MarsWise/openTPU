@@ -18,14 +18,14 @@ from . import target as _target
 ROOT = Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
 TB = ROOT / "sim" / "verilator"
-BUILD = ROOT / "build" / "verilator"
+BUILD = Path(os.environ.get("OTPU_VERILATOR_BUILD_DIR", str(ROOT / "build" / "verilator")))
 
 RTL_SOURCES = [
     "vpu/otpu_fp.sv", "vpu/otpu_fpipe.sv", "top/otpu_pkg.sv", "mem/otpu_dram.sv", "mem/otpu_tmem.sv",
     "mem/otpu_native_dram.sv", "mem/otpu_actram.sv", "seq/otpu_seq.sv",
     "vpu/otpu_vtree.sv", "dma/otpu_dma.sv", "mxu/otpu_mxu.sv", "tech/generic/otpu_tech_dsp.sv",
     "tech/generic/otpu_tech_ram.sv",
-    "vpu/otpu_quant.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv", "vpu/otpu_vpu.sv",
+    "vpu/otpu_quant.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv", "vpu/otpu_vpu.sv",
     "top/otpu_coll.sv", "exp/tmem_nocopy/otpu_tmem_model.sv", "top/otpu_slice.sv",
     "top/otpu_top.sv",
 ]
@@ -34,6 +34,24 @@ RTL_SOURCES = [
 # Verilator's flags (in the build cache's key, with its version and the sources' names)
 VFLAGS = ["--binary", "-j", "0", "-Wno-fatal", "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC",
           "-Wno-UNUSEDSIGNAL", "-Wno-UNUSEDPARAM", "-O3", "--x-assign", "0", "--x-initial", "0"]
+# Explicit host-tool choices also reach CLI subprocesses launched by pytest. Defaults keep
+# the existing flow; the r5 runner bounds compiler memory and avoids GCC 13's compiler ICE.
+if "OTPU_VERILATOR_JOBS" in os.environ:
+    _jobs = int(os.environ["OTPU_VERILATOR_JOBS"])
+    if _jobs < 1:
+        raise ValueError("OTPU_VERILATOR_JOBS must be positive")
+    VFLAGS[2] = str(_jobs)
+if "OTPU_VERILATOR_SPLIT" in os.environ:
+    _split = int(os.environ["OTPU_VERILATOR_SPLIT"])
+    if _split < 1:
+        raise ValueError("OTPU_VERILATOR_SPLIT must be positive")
+    VFLAGS += ["--output-split", str(_split), "--output-split-cfuncs", "500"]
+if "OTPU_VERILATOR_COMPILER" in os.environ:
+    _compiler = os.environ["OTPU_VERILATOR_COMPILER"]
+    if _compiler not in ("gcc", "clang"):
+        raise ValueError("OTPU_VERILATOR_COMPILER must be gcc or clang")
+    VFLAGS += ["--compiler", _compiler, "-MAKEFLAGS",
+               "CXX=" + ("clang++" if _compiler == "clang" else "g++"), "-CFLAGS", "-std=c++20"]
 _VERSION: str | None = None
 
 

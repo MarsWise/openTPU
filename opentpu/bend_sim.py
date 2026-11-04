@@ -24,6 +24,28 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "bend"
 BIN = ROOT / "build" / "otpu_bend"
 
+# The upstream Bend port implements the original 20 VOPs. Local r5 extensions must never
+# silently take its default COPY path (nor QACT DUP4 take its two-copy path).
+SUPPORTED_VFUNCS = frozenset(range(21)) - {I.V_MAC}
+
+
+def check_program(words: np.ndarray) -> None:
+    """Reject local ISA extensions before any program is sent to the upstream Bend server."""
+    for pc, ins in enumerate(np.asarray(words, np.uint32).reshape(-1, 8)):
+        op, flags = int(ins[0]) & 255, int(ins[0]) >> 24
+        extension = None
+        if op == I.TMM:
+            extension = "TMM (including PAIR/QUAD)"
+        elif op == I.QACT and flags & I.F_DUP and flags & I.F_DUP4:
+            extension = "QACT DUP4"
+        elif op == I.VOP:
+            func = (int(ins[6]) >> 16) & 255
+            if func not in SUPPORTED_VFUNCS:
+                extension = f"VOP {I.VFUNCS.get(func, hex(func))}"
+        if extension:
+            raise NotImplementedError(f"Bend backend: {extension} at pc {pc} is not implemented; "
+                                      "use the isa, rtl or board backend for r5 extensions")
+
 QUIT, INIT, DATA, LOAD, RUN, HOST = 0, 1, 2, 3, 4, 5
 DRAM, TMEM, ACT, CTRL = 0, 1, 2, 3
 IMEM = 4096                         # IMEM's first control word (sim.bend IMEM)
@@ -297,6 +319,8 @@ class BendMachine:
             raise ValueError("at most 8 run arguments")
         a += [0] * (8 - len(a))
         self.programs = [words_of(p) for p in programs]
+        for w in self.programs:
+            check_program(w)
         for s, w in enumerate(self.programs):
             self._cmd([LOAD, s, len(w) // 8] + a, w.tobytes())
         return self

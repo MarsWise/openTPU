@@ -134,6 +134,7 @@ class Spec:
     mtp: bool = False       # the image holds the MTP drafter (the checkpoint's mtp.* layer, a
                             # draft head) and two slots of every DeltaNet state and convolution
                             # window for the speculative verify (opentpu/llm/mtp.py, docs/mtp.md 9)
+    native_bonsai: bool = False  # exact packed weights + VPU Hadamard; native GSC firmware
 
     @property
     def layers(self) -> int:
@@ -184,6 +185,8 @@ class Spec:
 
     def check(self, cfg: Config) -> None:
         S, D = cfg.S, cfg.D
+        if self.native_bonsai and (S != 1 or D != 128 or not cfg.TGSC or self.mtp):
+            raise ValueError("native Bonsai 2 requires one slice, D=128, TGSC firmware and no MTP")
         need = [(self.head_dim % D == 0, f"head_dim {self.head_dim} % D"),
                 (self.rope_dim % 2 == 0 and self.rope_dim <= self.head_dim, "rope_dim"),
                 (self.lin_dk % D == 0 and self.lin_dv % D == 0,
@@ -586,7 +589,8 @@ class DeltaNetParts:
             q = self.index(p)
             return self._wh[q * self.R2:q * self.R2 + self.R2, :]
         w, o = self._wh, self._off(p)
-        return replace(w, data=w.data + o, scale=w.scale + o)
+        return replace(w, data=w.data + o, scale=w.scale + o,
+                       hsigns=None if w.hsigns is None else w.hsigns + o)
 
     def cv(self, p) -> Tensor:
         if not self.grouped:
@@ -619,7 +623,8 @@ class DeltaNetParts:
         if not self.grouped:
             return self._wout[g * self.H:(g + 1) * self.H, :]
         w, o = self._wout, Affine.of(g) * self.gs
-        return replace(w, data=w.data + o, scale=w.scale + o)
+        return replace(w, data=w.data + o, scale=w.scale + o,
+                       hsigns=None if w.hsigns is None else w.hsigns + o)
 
     def _gates(self, g) -> Tensor:
         e = self._eb
@@ -687,6 +692,14 @@ class Image(EmbedHost):
                  experts: int | None = None, embed_host: bool | None = None,
                  formats: str | None = None, prefill_rows: int | None = None):
         spec.check(cfg)
+        if spec.native_bonsai:
+            if not lookup:
+                raise ValueError("native Bonsai 2 requires resident=True (on-card embedding table)")
+            if wformat not in ("int8", "auto", Q.TERNARY_GSC) or head_format not in (None, Q.TERNARY_GSC):
+                raise ValueError("native Bonsai 2 requires ternary_gsc projections and head")
+            if formats or embed_host:
+                raise ValueError("native Bonsai 2 uses its fixed formats and on-card embedding")
+            wformat, head_format = Q.TERNARY_GSC, Q.TERNARY_GSC
         if batch != 1:
             raise ValueError("Qwen3.5 runs one sequence: batch=1")
         if cap % cfg.D:
@@ -799,7 +812,8 @@ class Image(EmbedHost):
                          "dh": (b.alloc(self.nd * Q.row_bytes(H, "fp4", D)),
                                 b.alloc(self.nd * Q.scale_bytes(H, "fp4", D)))}
         self.head = (b.alloc(self.v_loc * Q.row_bytes(H, self.head_format, D)),
-                     b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)))
+                     b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)
+                             + (4 * H if spec.native_bonsai else 0)))
         # the int8 embedding rows of the resident decode are the tied int8 head's (S = 1)
         shared = spec.tied and self.head_format == "int8" and S == 1
         if embed_host is None:      # an int8 table of its own on the host by default where its
@@ -859,13 +873,17 @@ class Image(EmbedHost):
         fl, fa, fg, fd = g
         mf = {"wh": fl, "wab": fl, "wout": fl, "wq": fa, "wgate": fa, "wk": fa, "wv": fa,
               "wo": fa, "wg": fg, "wu": fg, "wd": fd}       # each projection's format (KINDS)
+        if spec.native_bonsai:
+            mf["wab"] = "int8"  # these auxiliary gates are plain F32 in the source pack
+        def scalloc(bump, n, k, fmt):
+            return bump.alloc(n * sb(k, fmt) + (4 * k if fmt == Q.TERNARY_GSC else 0))
         lb = _Bump()                                    # offsets inside one layer block
         common = {"g_in": lb.alloc(4 * H), "g_post": lb.alloc(4 * H)}
         for name, (n, k) in mlp.items():
-            common[name] = (lb.alloc(n * rb(k, mf[name])), lb.alloc(n * sb(k, mf[name])))
-        dchunk = _chunk(self.f_loc, D, D if fd == "int8" else 2 * D)
+            common[name] = (lb.alloc(n * rb(k, mf[name])), scalloc(lb, n, k, mf[name]))
+        dchunk = _chunk(self.f_loc, D, 4 * D if fd == Q.TERNARY_GSC else D if fd == "int8" else 2 * D)
         common["wd"] = [(lb.alloc(self.h_loc * rb(dchunk, fd)),
-                         lb.alloc(self.h_loc * sb(dchunk, fd)))
+                         scalloc(lb, self.h_loc, dchunk, fd))
                         for _ in range(F_ // dchunk)]
         mo = spec.moe
         if mo is not None:          # the router (int8, the shared expert's gate its last row)
@@ -876,14 +894,14 @@ class Image(EmbedHost):
         lin = dict(common, alog=lnb.alloc(4 * nl), dtb=lnb.alloc(4 * nl), gn=lnb.alloc(4 * dv))
         if self.grouped:            # per head group: its pairs' blocks, then its out_proj block
             pb, gb = _Bump(), _Bump()
-            ns.pofs = {"wh": (pb.alloc(self.RP * rb(H, fl)), pb.alloc(self.RP * sb(H, fl))),
+            ns.pofs = {"wh": (pb.alloc(self.RP * rb(H, fl)), scalloc(pb, self.RP, H, fl)),
                        "cv": pb.alloc(4 * self.CVW),
                        "state": pb.alloc(4 * 2 * dv * dk * self.slots)}
             ns.PS = pb.next                             # a pair's block, bytes
             for _ in range(og // 2):
                 gb.alloc(ns.PS)
             ns.gofs = {"wout": (gb.alloc(H * rb(og * dv, fl)),
-                                gb.alloc(H * sb(og * dv, fl))),
+                                scalloc(gb, H, og * dv, fl)),
                        "eb": gb.alloc(4 * 4 * (og // 2))}       # its pairs' gates, per token
             ns.GS = gb.next                             # a head group's block
             lin["groups"] = lnb.alloc(nl // og * ns.GS)
@@ -895,7 +913,7 @@ class Image(EmbedHost):
         for kind, bump, L in ((LIN, lnb, lin), (ATTN, ab, attn)):
             for name, (n, k) in self.mats[kind].items():
                 if name not in L:
-                    L[name] = (bump.alloc(n * rb(k, mf[name])), bump.alloc(n * sb(k, mf[name])))
+                    L[name] = (bump.alloc(n * rb(k, mf[name])), scalloc(bump, n, k, mf[name]))
         attn["kv"] = [{"k": ab.alloc(cap * d), "ks": ab.alloc(cap * k_scale_bytes(d, D)),
                        "vt": ab.alloc(d * cap), "vs": ab.alloc(4 * cap)}
                       for _ in range(self.nkv_loc)]
@@ -939,7 +957,13 @@ class Image(EmbedHost):
 
         qb = QC.Batch()                 # the matrices, quantized in worker processes
 
-        def put_q1(s, addr_pair, a, fmt):
+        def put_q1(s, addr_pair, a, fmt, signs=None):
+            if fmt == Q.TERNARY_GSC:
+                q, sc = Q.pack_ternary_gsc(a, D)
+                put(s, addr_pair[0], q)
+                put(s, addr_pair[1], sc)
+                put(s, addr_pair[1] + sc.nbytes, W.signs_for(a.shape[1]) if signs is None else signs)
+                return
             qb.submit(a, fmt, D, lambda q, sc: (put(s, addr_pair[0], q),
                                                 put(s, addr_pair[1], sc)))
 
@@ -950,6 +974,11 @@ class Image(EmbedHost):
         def put_parts(addrs, parts, fmt, C):
             """Each slice's rows quantized whole and stored in column parts of C (qwen3's)."""
             for s, p in enumerate(parts):
+                if fmt == Q.TERNARY_GSC:
+                    signs = W.signs_for(p.shape[1])
+                    for k, addr_pair in enumerate(addrs):
+                        put_q1(s, addr_pair, p[:, k*C:(k+1)*C], fmt, signs[k*C:(k+1)*C])
+                    continue
                 qb.submit(p, fmt, D, lambda q, sc, s=s: [
                     (put(s, a0, pq), put(s, a1, ps))
                     for (a0, a1), (pq, ps) in zip(addrs, Q.column_parts(q, sc, fmt, p.shape[1],
@@ -1004,8 +1033,12 @@ class Image(EmbedHost):
                 # out_proj's rows quantized whole (as the emulation's), its head groups'
                 # column blocks their column parts (quant.column_parts)
                 fo = mf["wout"]
-                gouts = Q.column_parts(*QC.quantize_mxu(wout, fo, D), fo, wout.shape[1],
-                                       og * dv, D)
+                if fo == Q.TERNARY_GSC:
+                    gouts = [Q.pack_ternary_gsc(wout[:, g:g + og*dv], D)
+                             for g in range(0, wout.shape[1], og*dv)]
+                else:
+                    gouts = Q.column_parts(*QC.quantize_mxu(wout, fo, D), fo, wout.shape[1],
+                                           og * dv, D)
                 gouts = [gouts[s * nl // og:(s + 1) * nl // og] for s in range(S)]
                 if self.grouped:
                     for s in range(S):
@@ -1018,6 +1051,10 @@ class Image(EmbedHost):
                             o = Lo["groups"] + g * lay.GS
                             put(s, o + lay.gofs["wout"][0], gq)
                             put(s, o + lay.gofs["wout"][1], gs)
+                            if fo == Q.TERNARY_GSC:
+                                signs = W.signs_for(wout.shape[1])
+                                put(s, o + lay.gofs["wout"][1] + gs.nbytes,
+                                    signs[g*og*dv:(g+1)*og*dv])
                 else:
                     put_q(Lo["wh"], [np.concatenate(pr) for pr in prows], mf["wh"])
                     for s in range(S):
@@ -1354,7 +1391,8 @@ class Image(EmbedHost):
             lofs, mf = lay.lofs[kind], lay.mf
             ns = SimpleNamespace(g_in=Tensor(off + lofs["g_in"], (H,), (1,)),
                                  g_post=Tensor(off + lofs["g_post"], (H,), (1,)),
-                                 moe=spec.moe is not None, kind=kind)
+                                 moe=spec.moe is not None, kind=kind,
+                                 mlp_loop=spec.native_bonsai)
             if ns.moe:
                 E = spec.moe.E
                 da, sa = lofs["router"]
@@ -1495,6 +1533,9 @@ def _deltanet(x, lw, pos: int, spec: Spec, hs):
     TP = K * CP                                         # taps words of a pair (then its ring)
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_in), eps))
     ab = ol.dot(xs, lw.wab)                             # [1, 2nl]: a, then b, of each head
+    if spec.native_bonsai:
+        from ..kernels.hadamard import stationary
+        xs = stationary(xs, dn.wh(0))
     decay, beta = gates(ab[0, 0:nl], ab[0, nl:2 * nl], ol.load(lw.alog), ol.load(lw.dtb))
     eb = ol.empty([4 * NP]).reshape(NP, 4)              # per pair: decays of a, b; betas
     eb[:, 0:2].set(decay.reshape(NP, 2))
@@ -1534,7 +1575,10 @@ def _deltanet(x, lw, pos: int, spec: Spec, hs):
         ha = hb(0)[1] * bw                              # head a's channels first
         cuts = ((0, ha), (ha, CP), (CP, RP)) if split else ((0, CP), (CP, RP))
         for c0, c1 in cuts:
-            ol.dot(xs, dn.wh(p)[c0:c1, :], out=P[t][:, c0:c1])
+            weight = dn.wh(p)[c0:c1, :]
+            if spec.native_bonsai:
+                weight = replace(weight, hsigns=None, hblock=0)
+            ol.dot(xs, weight, out=P[t][:, c0:c1])
 
     def fetch_cv(p):
         """Pair p's taps and convolution window (one load; slot 1's window: two)."""
@@ -1659,7 +1703,7 @@ def _deltanet(x, lw, pos: int, spec: Spec, hs):
             post(1 - t)
             if g is not None:
                 flush(g)
-            elif last1:                         # the last group: its first pair now
+            elif last1 and not spec.native_bonsai:  # Hadamard couples all four heads
                 flush(group(p), 0)
         rdot2(St[0], t, 0)
         rdot1(St[1], t, 1)
@@ -1700,7 +1744,7 @@ def _deltanet(x, lw, pos: int, spec: Spec, hs):
     for p in range(1 + 2 * n_it, NP):
         _pair_segment(p, p % 2, p + 1 >= NP, p + 2 >= NP, group(p - 1))
     post((NP - 1) % 2)
-    flush(group(NP - 1), 1 if og == 4 and NP > 1 else None)
+    flush(group(NP - 1), 1 if og == 4 and NP > 1 and not spec.native_bonsai else None)
     return x + ol.all_reduce(y)
 
 
@@ -1730,6 +1774,9 @@ def _deltanet_dstep(x, lw, pos: int, spec: Spec, hs):
     TP = K * CP
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_in), eps))
     ab = ol.dot(xs, lw.wab)
+    if spec.native_bonsai:
+        from ..kernels.hadamard import stationary
+        xs = stationary(xs, dn.wh(0))
     decay, beta = gates(ab[0, 0:nl], ab[0, nl:2 * nl], ol.load(lw.alog), ol.load(lw.dtb))
     eb = ol.empty([4 * NP]).reshape(NP, 4)
     eb[:, 0:2].set(decay.reshape(NP, 2))
@@ -1764,7 +1811,10 @@ def _deltanet_dstep(x, lw, pos: int, spec: Spec, hs):
         ha = hb(0)[1] * bw                              # head a's channels first
         cuts = ((0, ha), (ha, CP), (CP, RP)) if split else ((0, CP), (CP, RP))
         for c0, c1 in cuts:
-            ol.dot(xs, dn.wh(p)[c0:c1, :], out=P[t][:, c0:c1])
+            weight = dn.wh(p)[c0:c1, :]
+            if spec.native_bonsai:
+                weight = replace(weight, hsigns=None, hblock=0)
+            ol.dot(xs, weight, out=P[t][:, c0:c1])
 
     def fetch_cv(p):
         if dn.slot:                                     # (slot 1's window: two loads)
@@ -1863,7 +1913,11 @@ def _deltanet_dstep(x, lw, pos: int, spec: Spec, hs):
             prep(p + 1, 1 - t)
         post(t)
         if og == 4 and isinstance(p, int) and p >= NP - 2:
-            flush((NP - 1) // 2, p - (NP - 2))  # the last group pair by pair, as _deltanet
+                if spec.native_bonsai:
+                    if last1:
+                        flush((NP - 1) // 2)  # complete Hadamard block, all four heads
+                else:
+                    flush((NP - 1) // 2, p - (NP - 2))
         elif g is not None:
             flush(g)
         if not last2:

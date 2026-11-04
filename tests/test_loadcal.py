@@ -3,6 +3,7 @@ centre, when it is wanted, the scan against ddrcal's PHY model, and the load on 
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from opentpu import Config
 from opentpu.host import ddrcal as C
@@ -99,10 +100,13 @@ def test_slips_off_scans_the_calibrated_bitslips_only():
     assert L.slips_wanted(env="") and L.slips_wanted(env="1") and not L.slips_wanted(env="0")
 
 
-def test_the_load_runs_on_the_isa_simulator():
-    """A few iterations of the load (the m8 card's TMEM): the DMA's tiles are the source tile (it
-    stores them and reloads the one before), and every row of the MMs' results is written."""
-    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072)
+@pytest.mark.parametrize("tmem", [131072, 65536])
+def test_the_load_runs_on_the_isa_simulator(tmem):
+    """A few iterations of the load (the m8 card's TMEM, and the m4 card's 64K, where the reload
+    goes into the source tile -- r4's run 4b found it did not fit): the DMA's tiles are the source
+    tile (it stores them and reloads the one before), and every row of the MMs' results is
+    written."""
+    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=tmem)
     img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=3)
     dram = np.concatenate([img, np.zeros(cfg.DRAM_BYTES - len(img), np.uint8)])
     m = Machine(cfg, [prog], [dram]).run()
@@ -112,3 +116,52 @@ def test_the_load_runs_on_the_isa_simulator():
         assert np.array_equal(got[a["dma"] + k * L.TILE:a["dma"] + (k + 1) * L.TILE], src)
     out = got[a["out"]:a["out"] + 4 * 2 * L.ROWS * L.R].view(np.float32).reshape(2 * L.ROWS, L.R)
     assert np.isfinite(out).all() and (np.abs(out).sum(1) > 0).all()
+
+
+@pytest.mark.parametrize("rows,pair", [(4, True), (2, False)])
+def test_the_ternary_load_runs_tmm_on_the_isa_simulator(rows, pair):
+    """OTPU_LOAD_KIND=ternary[:rows]: each MM of the load is a TMM (PAIR on the m8 card's 8
+    columns at 4 rows) over packed ternary rows, its results x W^T * scale."""
+    from opentpu import isa as I
+    from opentpu import quant as Q
+    assert L.load_kind("") == ("fp4", L.ROWS) and L.load_kind("ternary") == ("ternary", 4)
+    assert L.load_kind("ternary:2") == ("ternary", 2)
+    with pytest.raises(ValueError):
+        L.load_kind("int8")
+    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072, MCOLS=8, PAIR=pair, TPAIR=pair)
+    img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=2, rows=rows, kind="ternary")
+    assert sum(ins.op == I.TMM for ins in prog) == 2, "the load's MMs are not TMMs"
+    dram = np.concatenate([img, np.zeros(cfg.DRAM_BYTES - len(img), np.uint8)])
+    got = np.asarray(Machine(cfg, [prog], [dram]).run().slices[0].dram)
+    x = img[a["x"]:a["x"] + 4 * rows * L.H].view(np.float32).reshape(rows, L.H)
+    rb = Q.pack_ternary_mxu(np.zeros((1, L.H), np.int8), cfg.D).shape[1]
+    rng = np.random.default_rng(0)
+    w = rng.choice(np.array([-1, 0, 1], np.int8), (L.R, L.H))
+    sc = rng.uniform(0.05, 0.2, L.R).astype(np.float32)
+    assert np.array_equal(img[a["w"]:a["w"] + L.R * rb].reshape(L.R, rb),
+                          Q.pack_ternary_mxu(w, cfg.D))
+    want = (x @ w.T.astype(np.float32)) * sc
+    out = got[a["out"]:a["out"] + 4 * 2 * rows * L.R].view(np.float32).reshape(2 * rows, L.R)
+    for i in range(2):
+        y = out[i * rows:(i + 1) * rows]
+        assert float(np.linalg.norm(y - want) / np.linalg.norm(want)) < 0.02
+
+
+def test_a_host_calibration_after_the_cpu_s_is_the_one_loadcal_starts_from(monkeypatch):
+    """memcal cal --force holds the core's CPU and calibrates from the host: loadcal then starts
+    from the host's taps, bitslips and bit offsets, not the CPU's stale mailbox (run 4c)."""
+    from opentpu.host import memcal, selfcal
+
+    def res(tap, offs):
+        return {"read": [{"tap": tap, "bitslip": 4}] * 9, "bit_offsets": [offs] * 9}
+    cpu = {0: res(14, [0] * 8), 1: res(6, [0, 0, 0, 2, 2, 0, 2, 0])}
+    host = {"by": "host", "channels": {"1": res(7, [2, 0, 0, 2, 2, 0, 2, 0])}}
+    monkeypatch.setattr(selfcal, "present", lambda c: True)
+    monkeypatch.setattr(selfcal, "result", lambda c, cfg: cpu)
+    monkeypatch.setattr(memcal, "last", lambda t: host)
+    for held, tap1, off1 in ((False, 6, 0), (True, 7, 2)):
+        monkeypatch.setattr(selfcal, "held", lambda c, h=held: h)
+        taps = L.calibrated(None, None, Path("."))
+        slips, offs = L.calibrated_slips(None, None, Path("."))
+        assert taps[0] == [14] * 9 and taps[1] == [tap1] * 9
+        assert offs[1][0][0] == off1 and offs[1][0][3] == 2

@@ -73,7 +73,11 @@ def _hash_without_numerics(cfg) -> int:
     import hashlib
     import json
     d = dataclasses.asdict(cfg)
-    d.pop("SEQ_WC")                     # (a field that host's Config does not have)
+    d.pop("SEQ_WC")                     # (fields that host's Config does not have)
+    d.pop("TPAIR")
+    d.pop("TQUAD")
+    d.pop("TFN")
+    d.pop("TGSC")
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
                    separators=(",", ":"))
     return int.from_bytes(hashlib.sha256(s.encode()).digest()[:4], "big")
@@ -692,7 +696,7 @@ def test_the_real_150_mhz_paths_start_at_flip_flops():
     assert re.search(r"r_ben\[p\] = \(.*off\[p\]\) \? '0 : rq_b\[p\];", sl)
     for f, regs in (("rtl/dma/otpu_dma.sv", ["t_rbv <= t_rben_c", "t_rb_q <= adv_nx ? (adv ? t_rben_c : t_rbv) : '0;"]),
                     ("rtl/vpu/otpu_vpu.sv", ["ta_ben <= ta_ben_c", "tb_bad <= tb_bad_c"]),
-                    ("rtl/vpu/otpu_quant.sv", ["t_rben <= t_rben_c", "t_rbad2 <= t_rbad2_c"])):
+                    ("rtl/vpu/otpu_quant.sv", ["t_rben_q <= t_rben_c", "t_rbad2 <= t_rbad2_c"])):
         u = src(f)
         assert "otpu_tmem_breq #(" in u and all(r in u for r in regs), f
     assert '(* keep = "true" *) logic [NRP-1:0][LANES-1:0] rpvb;' in tm
@@ -708,3 +712,19 @@ def test_config_summary_names_the_target(no_env):
     new = config_summary(Board(FakeTransport(regmap=4, **kw)).info())
     assert "register map 4, ypcb-00338 (S=1, 2 channels x 2048 MiB)" in new and "DDR3-1066" in new
     assert T.by_platform(2).name == "bcu1525" and T.by_platform(999) is None
+
+
+def test_board_tops_take_every_generic_the_flow_sets():
+    """Every generic create_project.tcl sets on the YPCB-00338 project is a parameter of its top
+    (otpu_fpga_top_ld) and reaches otpu_board through otpu_native_sys: Vivado drops a generic
+    the top lacks with a warning only (r4 bb27096f: TPAIR / TQUAD, CAPS2 read 0)."""
+    tcl = (ROOT / "boards/ypcb-00338/vivado/create_project.tcl").read_text()
+    m = re.search(r'set_property generic "([^"]*)"', tcl)
+    names = set(re.findall(r"(\w+)=", m.group(1))) | {"TMEM_NSB", "TMEM_SBP", "TMEM_RPL"}
+    top = re.sub(r"//.*", "", (ROOT / "rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv").read_text())
+    sysv = re.sub(r"//.*", "", (ROOT / "rtl/boards/ypcb-00338/otpu_native_sys.sv").read_text())
+    params = set(re.findall(r"parameter\s+(?:bit|int|logic\s*\[[^\]]*\])?\s*(\w+)\s*=", top))
+    missing = sorted(n for n in names if n not in params)
+    assert not missing, f"otpu_fpga_top_ld lacks the generics {missing}"
+    for cap in ("TPAIR", "TQUAD", "TFN"):
+        assert f".{cap}({cap})" in top.replace(" ", "") and f".{cap}({cap})" in sysv.replace(" ", ""), cap

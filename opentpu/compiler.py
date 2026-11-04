@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -227,6 +227,25 @@ class Affine:
         return f"({self.const}{' + ' + s if s else ''})"
 
 
+def _store_offsets(off: "Affine", limit: int = 1 << 16) -> list:
+    """Every element offset a store to a kernel output covers: one for a static address, one
+    per iteration for an address in hardware loops of compile-time counts (runtime.collect
+    checks the outputs were written whole). A loop with a run-time count, or more than `limit`
+    iterations in all, is not recorded: those stores need a static address."""
+    if off.is_static:
+        return [off.static()]
+    loops = list(off.terms)
+    if any(l.rcount or l.count <= 0 for l in loops) or \
+            int(np.prod([l.count for l in loops])) > limit:
+        raise CompileError("stores to kernel outputs must use static addresses or hardware "
+                           "loops of compile-time counts")
+    offs = [off.const]
+    for l in loops:
+        c = off.terms[l]
+        offs = [o + i * c for o in offs for i in range(l.count)]
+    return offs
+
+
 def _static(x) -> int:
     return Affine.of(x).static()
 
@@ -292,6 +311,10 @@ class QTensor:
     tiles: tuple | None = None
     k0: int = 0
     rsc: bool = False
+    ternary: bool = False
+    gsc: bool = False
+    hsigns: Affine | None = None
+    hblock: int = 0
 
     @staticmethod
     def weight(data, scale, n: int, k: int, fmt: str, D: int, **kw) -> "QTensor":
@@ -299,8 +322,33 @@ class QTensor:
         "nvfp4", opentpu/quant.py quantize_mxu's rows): element rows row_bytes apart, scale rows
         scale_bytes apart."""
         from . import quant as Q
+        if fmt == Q.TERNARY_GSC:
+            w = QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
+            return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
+        if fmt == Q.TERNARY:                    # TMM's packed rows with RSC row scales
+            return QTensor.ternary_weight(data, scale, n, k, D, **kw)
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), Q.row_bytes(k, fmt, D),
                        Q.scale_bytes(k, fmt, D), D, wf=Q.mxu_wf(fmt), **kw)
+
+    @staticmethod
+    def ternary_weight(data, scale, n: int, k: int, D: int, rs: int | None = None,
+                       srs: int = 4, gsc: bool = False) -> "QTensor":
+        """Descriptor for TMM's low-pair-first packed ternary rows and optional row scales."""
+        if n <= 0 or k <= 0 or k % D or D % 4:
+            raise CompileError(f"ternary weight shape ({n}, {k}) needs positive K divisible by "
+                               f"D={D} and D divisible by 4")
+        row_bytes = -(-k // 4)
+        stride = ((row_bytes + D - 1) // D) * D if rs is None else rs
+        if stride % D or stride < row_bytes:
+            raise CompileError(f"ternary weight row stride {stride} must cover {row_bytes} "
+                               f"bytes and be D={D}-byte aligned")
+        if scale is not None and (srs % 4 or srs < 4):
+            raise CompileError(f"ternary scale stride {srs} must be a multiple of 4 and >= 4")
+        if gsc and (D != 128 or scale is None or srs < 4 * k // D):
+            raise CompileError("ternary GSC needs D=128 and a fp32 scale per K block")
+        return QTensor(Affine.of(data), None if scale is None else Affine.of(scale),
+                       (n, k), stride, 0 if scale is None else srs, D,
+                       wf=I.W8, rsc=scale is not None and not gsc, ternary=True, gsc=gsc)
 
     def padded_cols(self, r0, nr: int, c0, nc: int, valid: int) -> "QTensor":
         """Rows [r0, r0+nr), columns [c0, c0+nc) of which the first `valid` are real (the rest
@@ -339,7 +387,9 @@ class QTensor:
             raise CompileError("QTensor column slices must be multiples of D")
         if self.tiles is not None:
             return self.padded_cols(r0, nr, c0, nc, nc)
-        if self.wf == I.W8:
+        if self.ternary:
+            data = self.data + r0 * self.rs + c0.div_exact(4 * self.D) * self.D
+        elif self.wf == I.W8:
             data = self.data + r0 * self.rs + c0
         else:                     # 4-bit rows stream whole D-byte chunks of two D-blocks
             data = self.data + r0 * self.rs + c0.div_exact(2 * self.D) * self.D
@@ -347,15 +397,19 @@ class QTensor:
         if self.scale is not None:
             # the rows' scale rows stay where they are (each starts with its Sw): a column
             # slice starts at block k0 of them, an immediate of the MM
-            if not c0.is_static and not self.rsc:
+            if not c0.is_static and not (self.rsc or self.gsc):
                 raise CompileError(f"a column slice of a scaled matrix at a run-time or "
                                    f"loop-dependent column ({c0}): its first block is MM's k0, "
                                    f"an immediate; store the matrix in column parts")
             scale = self.scale + r0 * self.srs
-            if not self.rsc:
+            if self.gsc:
+                scale = scale + c0.div_exact(self.D) * 4
+            elif not self.rsc:
                 k0 += c0.div_exact(self.D).static()
         return QTensor(data, scale, (nr, nc), self.rs, self.srs, self.D, wf=self.wf, k0=k0,
-                       rsc=self.rsc)
+                       rsc=self.rsc, ternary=self.ternary, gsc=self.gsc,
+                       hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
+                       hblock=self.hblock)
 
 
 VT_TILE = 256          # V^T cache tile (tokens): the attention block (qwen3.ATTN_BLOCK)
@@ -581,6 +635,16 @@ class Tile:
             raise CompileError(f"row_stride_view({r0}, {n}, {step}) outside {self}")
         return Tile(self.b, self.base + r0 * self.rs, (n, self.cols), self.rs * step, self.buf)
 
+    def windows(self, row: int, c0: int, n: int, step: int, cols: int) -> "Tile":
+        """n overlapping windows of `cols` words in row `row` of a 2-D tile, the j-th starting at
+        column c0 + j * step, as a read-only [n, cols] view (row stride `step`, which may be
+        less than `cols`): a convolution's input patches for QACT, which reads rows at any
+        stride (kernels/conv.py). The windows must stay inside the row."""
+        if len(self.shape) != 2 or not 0 <= row < self.rows or n < 1 or step < 1 or \
+                c0 < 0 or c0 + (n - 1) * step + cols > self.cols:
+            raise CompileError(f"windows({row}, {c0}, {n}, {step}, {cols}) outside {self}")
+        return Tile(self.b, self.base + row * self.rs + c0, (n, cols), step, self.buf)
+
     def reshape(self, rows: int, cols: int) -> "Tile":
         """The same words as a [rows, cols] tile (contiguous tiles only; one row always is)."""
         if not (self.contiguous or self.rows == 1) or rows * cols != self.rows * self.cols:
@@ -676,6 +740,12 @@ class _Parts:
         self.b, self.rows, self.cols = b, rows, cols
         self.shape = shape or (rows, cols)
 
+    def __getitem__(self, idx):
+        """A column range's shape (Stationary.blocks of a stationary filled in parts)."""
+        _, cs = idx
+        c0, c1, _ = cs.indices(self.cols)
+        return _Parts(self.b, self.rows, c1 - c0)
+
 
 class Stationary:
     """A tile quantized into ACT RAM blocks [ab, ab+KB), in chunks of up to ACT_ROWS rows.
@@ -685,9 +755,10 @@ class Stationary:
     "MM"), so dot() runs an MM per range and adds them up (MM ACC)."""
 
     def __init__(self, src: Tile, chunks: list, KB: int, owners: list, pair: bool = False,
-                 qranges: list | None = None):
+                 qranges: list | None = None, quad: bool = False):
         self.src, self.chunks, self.KB, self.owners = src, chunks, KB, owners
-        self.pair = pair
+        self.pair = pair or quad
+        self.quad = quad                # rows also in ACT rows 2M..4M-1 (QACT DUP4: TMM QUAD)
         self.qranges = qranges
 
     def add_qrange(self, k0: int, k1: int) -> None:
@@ -1326,7 +1397,33 @@ class Builder:
             return out
         raise CompileError(f"cannot use {x!r} as a tile")
 
-    def vop(self, func: int, dst: Tile, a: Tile | None, b, at=None) -> None:
+    def mac(self, x, c, y, out=None) -> Tile:
+        """out = x * c[None, :] + y (VOP MAC: c a [cols] tile, read into the VPU's column buffers;
+        y a tile of x's shape, or a row / column broadcast). out: write there (e.g. in place into
+        y, an accumulator) instead of a new tile. Columns go 256 a VOP."""
+        x = self.materialize(x)
+        if not isinstance(c, Tile) or c.shape != (x.cols,):
+            raise CompileError(f"mac: the column vector must be a [{x.cols}] tile")
+        self.check_live(x, c, y if isinstance(y, Tile) else (y.t if isinstance(y, Bcast) else None))
+        if out is None:
+            out = self.alloc(x.shape)
+        elif (out.rows, out.cols) != (x.rows, x.cols):
+            raise CompileError(f"mac: out {out.shape} vs {x.shape}")
+        for c0 in builtins.range(0, x.cols, I.OUTER_MAX_COLS):
+            c1 = min(c0 + I.OUTER_MAX_COLS, x.cols)
+            whole = c0 == 0 and c1 == x.cols
+            xs, os_ = (x, out) if whole else (x[:, c0:c1], out[:, c0:c1])
+            if isinstance(y, Tile):
+                ys = y if whole else y[:, c0:c1]
+            elif isinstance(y, Bcast) and y.kind != B_ROWVIEW and not whole:
+                ys = Bcast(y.t[c0:c1], y.kind)
+            else:
+                ys = y
+            self.vop(I.V_MAC, os_, xs, ys, cv=c if whole else c[c0:c1])
+        out.fresh = True
+        return out
+
+    def vop(self, func: int, dst: Tile, a: Tile | None, b, at=None, cv=None) -> None:
         """Emit dst = func(a, b) over dst's shape; b may be a Tile, Bcast or float. at: a TMEM
         word offset with loop terms added to dst's address (VOP's dst = R[ra] + w1: rows of a
         buffer the loop walks, the looped attention's outputs, tiled._attention_loop)."""
@@ -1358,6 +1455,10 @@ class Builder:
             raise CompileError(f"bad operand {b!r}")
         drs = dst.rs if len(dst.shape) == 2 else 0
         ra, d_base = (0, dst.base) if at is None else self.addr(Affine(dst.base) + Affine.of(at))
+        if func == I.V_MAC:
+            if bmode == I.B_SCALAR:
+                raise CompileError("mac: y must be a tile or a broadcast (not a scalar)")
+            imm = cv.base
         self.emit(I.vop(func, d_base, a_base, b_base, rows, cols, drs, ars, brs, bmode, imm,
                         ra=ra, comment=I.VFUNCS[func]))
 
@@ -1416,7 +1517,8 @@ class Builder:
         if not getattr(value, "fresh", False) or value.shape != dst.shape:
             return False
         ins = self._last_vop_writing(value)
-        if ins is None or (ins.w[5] >> 16) & 0xFF in I.REDUCE:
+        if ins is None or (ins.w[5] >> 16) & 0xFF in I.REDUCE or \
+                (ins.w[5] >> 16) & 0xFF == I.V_MAC:
             return False
         rows, cols = dst.rows, dst.cols
         drs = dst.rs if len(dst.shape) == 2 else 0
@@ -1526,10 +1628,8 @@ class Builder:
             n = rows * x.cols if merged else x.cols
             self.emit(I.st(imm, x.base + r * x.rs, n, ra=ra, comment="store"))
             if t.host is not None:
-                if not Affine.of(t.offset).is_static or not Affine.of(base).is_static:
-                    raise CompileError("stores to kernel outputs must use static addresses")
-                off = Affine.of(t.offset).static() + r * rstride
-                self.stores.append((t.host, off, n))
+                for off in _store_offsets(Affine.of(t.offset) + r * rstride):
+                    self.stores.append((t.host, off, n))
 
     def quantize(self, x: Tile, temp: bool = False, free: bool = False,
                  rscale: Tile | None = None, cscale: Tile | None = None) -> Stationary:
@@ -1548,7 +1648,9 @@ class Builder:
             raise CompileError(f"QACT of {KB} blocks: at most {QACT_KB_MAX} (its field); quantize "
                                f"the operand in ranges")
         src, rs, cs, rsc = x.base, (x.rs if len(x.shape) == 2 else x.cols), None, None
-        fused = self.fuse_cscale(x) if temp and rscale is None and cscale is None else None
+        # Native Hadamard projections need the original fp32 tile after QACT too. The scale
+        # fusion removes its producing multiply; preserve it on a TGSC configuration.
+        fused = self.fuse_cscale(x) if temp and not self.cfg.TGSC and rscale is None and cscale is None else None
         if fused is not None:
             src, rs, cs, rsc = fused
         if rscale is not None or cscale is not None:
@@ -1564,17 +1666,20 @@ class Builder:
         # 4-bit MM can feed the odd K-blocks to the second half of the columns. A taller tile
         # (up to ACT_ROWS rows) replays the streamed chunks instead: PAIR would not be faster
         pair = self.cfg.PAIR and 2 * x.rows <= self.cfg.MCOLS
-        st = Stationary(x, chunks, KB, owners, pair)
+        # TMM QUAD (Config.TQUAD): a tile of at most MCOLS/4 rows is written four times (QACT
+        # DUP4, no extra cycles), so a ternary MM takes a chunk's four K blocks an advance
+        quad = pair and getattr(self.cfg, "TQUAD", False) and 4 * x.rows <= self.cfg.MCOLS
+        st = Stationary(x, chunks, KB, owners, pair, quad=quad)
         for m0 in builtins.range(0, x.rows, self.cfg.act_rows):
             mc = min(self.cfg.act_rows, x.rows - m0)
             ab, owner = self.act_alloc(KB)
             for k in builtins.range(ab, ab + KB):   # live now: the next chunk must not take it
                 self.act_live[k] = weakref.ref(st)
             self.emit(I.qact(src + m0 * rs, mc, ab, KB, rs, cscale=cs,
-                             rscale=None if rsc is None else rsc + m0, dup=pair,
+                             rscale=None if rsc is None else rsc + m0, dup=pair, dup4=quad,
                              comment="quantize -> ACT" + (" x col scale" if cs is not None else "")
                              + (" x row scale" if rsc is not None else "")
-                             + (" dup" if pair else "")))
+                             + (" dup4" if quad else " dup" if pair else "")))
             chunks.append((ab, mc))
             owners.append(owner)
         st.loop = self.loops[-1].loop if self.loops else None     # created in this loop body
@@ -1595,7 +1700,8 @@ class Builder:
             raise CompileError(f"a stationary of {rows} rows: ACT RAM holds {self.cfg.act_rows}")
         KB = cols // D
         pair = self.cfg.PAIR and 2 * rows <= self.cfg.MCOLS
-        st = Stationary(_Parts(self, rows, cols), [], KB, [], pair, qranges=[])
+        quad = pair and getattr(self.cfg, "TQUAD", False) and 4 * rows <= self.cfg.MCOLS
+        st = Stationary(_Parts(self, rows, cols), [], KB, [], pair, qranges=[], quad=quad)
         ab, owner = self.act_alloc(KB)
         for k in builtins.range(ab, ab + KB):
             self.act_live[k] = weakref.ref(st)
@@ -1626,7 +1732,8 @@ class Builder:
         (ab, mc), = st.chunks
         rs = x.rs if len(x.shape) == 2 else x.cols
         ra, src = (0, x.base) if at is None else self.addr(Affine(x.base) + Affine.of(at))
-        self.emit(I.qact(src, mc, ab + col // D, x.cols // D, rs, dup=st.pair, ra=ra,
+        self.emit(I.qact(src, mc, ab + col // D, x.cols // D, rs, dup=st.pair, dup4=st.quad,
+                         ra=ra,
                          cscale=None if cscale is None else cscale.base,
                          comment="quantize -> ACT (part)" + (" dup" if st.pair else "")
                          + (" x col scale" if cscale is not None else "")))
@@ -1864,6 +1971,12 @@ class Builder:
             raise CompileError("dot(a, w): w must be a streamed QTensor descriptor")
         if acc is not None and out is not None:
             raise CompileError("dot: give either acc= (accumulate) or out= (overwrite)")
+        if w.hsigns is not None:
+            from .kernels.hadamard import hadamard
+            source = a.src if isinstance(a, Stationary) else a
+            self.check_live(source)
+            signs = self.load(Tensor(w.hsigns, (w.shape[1],), (1,)))
+            a = hadamard(source, signs, w.hblock)
         if acc_scale is not None:
             if acc is None or w.scale is not None:
                 raise CompileError("dot(acc_scale=...) needs acc= and an unscaled stream (V^T)")
@@ -1904,6 +2017,10 @@ class Builder:
             raise CompileError("dot(rowmax=True) needs M <= MCOLS and an output tile from "
                                "ol.empty/zeros/full (they reserve the row-max area)")
         unit = w.scale is None
+        if w.gsc and not self.cfg.TGSC:
+            raise CompileError("dot: ternary group scales require Config.TGSC / new firmware")
+        if w.ternary and (w.D != self.cfg.D or (not unit and not (w.rsc or w.gsc))):
+            raise CompileError("dot: TMM needs a ternary descriptor for this D and row scales")
         # PAIR reads a chunk's two blocks' scales at once: 8-byte (nvfp4: 16-byte) aligned rows
         # and an even first block
         al = 16 if w.wf == I.WNV else 8
@@ -1914,27 +2031,51 @@ class Builder:
         # one MM per QACT range of the operand (an MM's rows read one Sa: docs/isa.md "MM"),
         # added up in the output: the first as asked (overwrite, ACC or ASCALE), the rest ACC;
         # RMAX on the last, whose written values are the sums
-        bpb = self.cfg.D if w.wf == I.W8 else self.cfg.D // 2   # streamed bytes per block
+        bpb = self.cfg.D if w.wf == I.W8 else self.cfg.D // 2   # MM bytes per K block
         parts = st.ranges()
         for i, (k0, k1) in enumerate(parts):
-            if (k0 * bpb) % self.cfg.D:
+            if not w.ternary and (k0 * bpb) % self.cfg.D:
                 raise CompileError(f"dot: a QACT range starting at block {k0} of 4-bit weights "
                                    f"(their D-byte chunks hold two blocks): split the operand "
                                    f"at even blocks")
+            if w.ternary and k0 % 4:
+                raise CompileError(f"dot: TMM QACT range starts at block {k0}; packed ternary "
+                                   f"ranges must start on a four-block boundary")
+            if w.ternary and k1 - k0 > 255:
+                raise CompileError(f"dot: TMM supports at most 255 K blocks per instruction, "
+                                   f"got {k1 - k0}")
             first, last = i == 0, i == len(parts) - 1
             kp = 0 if unit or w.rsc else w.k0 + k0
             ppair = pair and kp % 2 == 0
             m0 = 0
             for ab, mc in st.chunks:
-                ins = I.mm(sa + k0 * bpb, ssa, out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc,
-                           ab + k0, w.srs, unit=unit, acc=acc is not None or not first,
-                           rmax=rowmax and last, wf=w.wf, pair=ppair, k0=kp, rsc=w.rsc,
-                           ascale=acc_scale.base if acc_scale is not None and first else None,
-                           ra=ra, rb=rb,
-                           comment=f"mm {M}x{K} . {N}x{K}^T"
-                           + (f" part {k0}:{k1}" if len(parts) > 1 else "")
-                           + (" pair" if ppair else "") + (" +rowmax" if rowmax and last else "")
-                           + (" acc*=scale" if acc_scale is not None and first else ""))
+                if w.ternary:
+                    tquad = not w.gsc and st.quad and getattr(self.cfg, "TQUAD", False)
+                    tpair = not w.gsc and not tquad and st.pair and getattr(self.cfg, "TPAIR", False)
+                    ins = I.tmm(sa + (k0 // 4) * self.cfg.D, ssa + (4 * k0 if w.gsc else 0),
+                                out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
+                                w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc,
+                                pair=tpair, quad=tquad,
+                                acc=acc is not None or not first,
+                                rmax=rowmax and last,
+                                ascale=acc_scale.base if acc_scale is not None and first else None,
+                                ra=ra, rb=rb,
+                                comment=f"tmm {M}x{K} . {N}x{K}^T"
+                                + (" pair" if tpair else "") + (" quad" if tquad else "")
+                                + (f" part {k0}:{k1}" if len(parts) > 1 else "")
+                                + (" +rowmax" if rowmax and last else "")
+                                + (" acc*=scale" if acc_scale is not None and first else ""))
+                else:
+                    ins = I.mm(sa + k0 * bpb, ssa, out.base + m0 * ors, N, k1 - k0, w.rs, ors,
+                               mc, ab + k0, w.srs, unit=unit,
+                               acc=acc is not None or not first, rmax=rowmax and last,
+                               wf=w.wf, pair=ppair, k0=kp, rsc=w.rsc,
+                               ascale=acc_scale.base if acc_scale is not None and first else None,
+                               ra=ra, rb=rb,
+                               comment=f"mm {M}x{K} . {N}x{K}^T"
+                               + (f" part {k0}:{k1}" if len(parts) > 1 else "")
+                               + (" pair" if ppair else "") + (" +rowmax" if rowmax and last else "")
+                               + (" acc*=scale" if acc_scale is not None and first else ""))
                 self.emit(ins)
                 m0 += mc
         self.bump_version(out.buf)
@@ -2095,7 +2236,7 @@ def slow_drains(prog, cfg, lanes: int | None = None) -> list:
     lanes = lanes or cfg.MCOLS
     out = []
     for pc, ins in enumerate(prog):
-        if ins.op != I.MM:
+        if ins.op not in (I.MM, I.TMM):
             continue
         ors, M, KB = ins.w[5] & 0xFFFF, (ins.w[5] >> 16) & 0xFF, (ins.w[3] >> 16) & 0xFF
         adv = -(-KB // 2) if ins.flags & I.F_PAIR else KB

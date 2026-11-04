@@ -1,4 +1,4 @@
-// Unit test of rtl/vpu/otpu_se_comp.sv (tests/test_se_comp.py): chunks of composite functions
+// Unit test of rtl/vpu/otpu_se_comp.sv (and TFN, VOP 0x20 + fn) (tests/test_se_comp.py): chunks of composite functions
 // issued the way the VPU issues them (a decision HA cycles before S0, held by `hold`; the
 // latency rule: a chunk never enters while chunks with more passes are in flight), with
 // random gaps and random `en` stalls. EXT = 1 puts the stage units outside, built the way SE's
@@ -23,6 +23,7 @@ module tb_se_comp;
 
   logic          in_v, hold, out_v;
   logic [2:0]    in_c;
+  logic [3:0]    in_tf;
   logic [MW-1:0] in_meta, out_meta;
   logic [L-1:0]  in_m, out_m;
   f32_t          in_a [L], in_b [L], out_d [L];
@@ -30,7 +31,7 @@ module tb_se_comp;
   f32_t          st_a [NS][L], st_b [NS][L], st_c [NS][L], st_e [NS][L], st_y [NS][L];
 
   otpu_se_comp #(.LANES(L), .NS(NS), .MW(MW), .HA(HA), .EXT(EXT)) dut (
-    .clk, .rst, .en, .en_l({L{en}}), .in_v, .in_c, .in_a, .in_b, .in_m, .in_meta, .hold, .hold_n(), .st_sel, .st_a, .st_b,
+    .clk, .rst, .en, .en_l({L{en}}), .in_v, .in_c, .in_tf, .in_a, .in_b, .in_m, .in_meta, .hold, .hold_n(), .st_sel, .st_a, .st_b,
     .st_c, .st_e, .st_y, .out_v, .out_d, .out_m, .out_meta);
 
   if (EXT) begin : g_units
@@ -71,7 +72,7 @@ module tb_se_comp;
     case (f)
       V_EXP2, V_EXP2SUB: n = 9;
       V_RECIP:           n = 6;
-      default:           n = 10;
+      default:           n = is_tfn(f) ? 6 : 10;
     endcase
     return (n + NS - 1) / NS;
   endfunction
@@ -87,6 +88,7 @@ module tb_se_comp;
   longint      cyc;
   assign in_v = pv[HA - 1];
   assign in_c = f_cc(fn[pi[HA - 1]]);
+  assign in_tf = fn[pi[HA - 1]][3:0];
   assign in_meta = MW'(pi[HA - 1]);
   assign in_m = L'(pi[HA - 1] * 37);             // the lane mask is carried, not used
   for (genvar l = 0; l < L; l++) begin : g_in
@@ -128,6 +130,7 @@ module tb_se_comp;
             // there, +inf in the VPU's chains and in fp32.py, whose NaN is always positive)
             if ((fn[nout] == V_EXP2 || fn[nout] == V_EXP2SUB) && (is_nan(x) || is_nan(y)))
               e = out_d[l];
+            if (is_tfn(fn[nout])) e = out_d[l];         // TFN: opentpu/tfn.py checks it
             if (e !== out_d[l]) begin
               if (nref < 10) $display("RTLREF chunk %0d lane %0d f=%0d x=%08h y=%08h exp=%08h got=%08h",
                                       nout, l, fn[nout], x, y, e, out_d[l]);

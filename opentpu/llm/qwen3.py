@@ -52,7 +52,7 @@ from ..kernels import mailbox as MB
 from ..kernels import gather as GA
 from ..kernels.gather import gather_row, onehot, onehot_blocks
 from ..kernels.gather import operand as gather_operand
-from ..kernels.lib import rmsnorm, rope, rope_rows, sigmoid, softcap
+from ..kernels.lib import rmsnorm, rope, rope_rows, sigmoid, silu, softcap
 from ..kernels.mlp import _chunk, down_chunk, swiglu_down
 from ..runtime import ALIGN
 
@@ -85,6 +85,10 @@ class Spec:
     #                           tied int8 LM head holds them: the device gathers them from it,
     #                           kernels.gather.gather_row)
     formats: str = ""         # weight formats per kind over the image's wformat (KINDS)
+    # BitNet b1.58 (opentpu/llm/bitnet.py) runs on this code with:
+    subln: bool = False       # RMSNorm of the attention output before W_o (attn_sub_norm) and of
+    #                           act(gate) * up before W_down (ffn_sub_norm), the whole F row
+    act: str = "silu"         # the MLP's gate activation: "silu" (SwiGLU) or "relu2" (BitNet)
     mix: str = ""             # the recommended mix (wformat "mix": formats.named, MIXES)
 
     @property
@@ -95,7 +99,13 @@ class Spec:
     @staticmethod
     def from_hf(model_dir) -> "Spec":
         c = json.loads((Path(model_dir) / "config.json").read_text())
-        rp = rope_parameters(c, model_dir)          # (Qwen3's YaRN: not supported)
+        rp = rope_parameters(c, model_dir, ("default", "yarn"))
+        theta = rp.get("rope_theta") or c.get("rope_theta") or 10000.0
+        extra = {}
+        if rp.get("rope_type", rp.get("type")) == "yarn":
+            from .yarn import parameters
+            dim = c.get("head_dim") or c["hidden_size"] // c["num_attention_heads"]
+            extra = parameters(c, rp, dim, theta)
         if c.get("use_sliding_window"):
             raise ValueError(f"{model_dir}: sliding-window attention is not supported")
         if c.get("attention_bias"):
@@ -108,10 +118,11 @@ class Spec:
                     n_q=c["num_attention_heads"], n_kv=c["num_key_value_heads"],
                     head_dim=c.get("head_dim") or c["hidden_size"] // c["num_attention_heads"],
                     ffn=c["intermediate_size"], vocab=c["vocab_size"], eps=c["rms_norm_eps"],
-                    theta=rp.get("rope_theta") or c.get("rope_theta") or 10000.0,
+                    theta=theta,
                     tied=c.get("tie_word_embeddings", True),
                     bos=c.get("bos_token_id", 151643),
-                    eos=tuple(eos) if isinstance(eos, list) else (eos,), mix=FM.mix_for(c))
+                    eos=tuple(eos) if isinstance(eos, list) else (eos,), mix=FM.mix_for(c),
+                    **extra)
 
     def check(self, cfg: Config) -> None:
         S, D = cfg.S, cfg.D
@@ -237,6 +248,16 @@ def load_weights(model_dir, mtp: bool = False) -> Weights:
     `mtp` (Qwen3.5's drafter,
     opentpu/llm/mtp.py). Gemma 4: gemma4.load_weights (its PLE table read by rows)."""
     cfg = Path(model_dir) / "config.json"
+    if cfg.exists() and json.loads(cfg.read_text()).get("model_type") == "prism_hadamard_qwen35":
+        if mtp:
+            raise ValueError("Bonsai 2 MTP has not been implemented")
+        from .bonsai2 import RotatedWeights
+        return RotatedWeights(model_dir)
+    if cfg.exists() and isinstance(json.loads(cfg.read_text()).get("quantization"), dict):
+        if mtp:
+            raise ValueError("MLX 1-bit checkpoint has no MTP loader")
+        from .mlx_weights import MLXWeights
+        return MLXWeights(model_dir)
     if cfg.exists() and json.loads(cfg.read_text()).get("model_type") in ("gemma4",
                                                                           "gemma4_text"):
         from .gemma4 import load_weights as gemma4_weights
@@ -476,7 +497,8 @@ def _lookup_build(put, S: int, W: dict, spec, cap: int, lk: dict) -> None:
     z = np.concatenate([np.full(cap, np.inf, np.float32), np.full(lk["block"], -np.inf,
                                                                   np.float32)])
     if "embed" in lk:
-        e = F.ftz(np.asarray(W["model.embed_tokens.weight"], np.float32))
+        e = F.ftz(W.embedding_table() if hasattr(W, "embedding_table") else
+                  np.asarray(W["model.embed_tokens.weight"], np.float32))
     elif lk["own"]:
         tab = W["model.embed_tokens.weight"]
         eq, es = Q.quantize_mxu(tab, "int8", lk["D"])
@@ -947,14 +969,17 @@ class Image(EmbedHost):
         # W_down in column parts of the MLP's F chunk: each down MM streams one part, whose
         # scales are then contiguous (with row-major scales every row would cost a DRAM beat);
         # the chunk by W_down's format
-        self.dchunks = {fd: _chunk(self.f_loc, D, D if fd == "int8" else 2 * D)
-                        for fd in sorted({f[2] for f in self.lf})}
+        self.dchunks = {fd: (self.f_loc if fd == Q.TERNARY else
+                             _chunk(self.f_loc, D, D if fd == "int8" else 2 * D))
+                        for fd in sorted({f[2] for f in self.lf})}  # (ternary: one part)
         self.dchunk = self.dchunks[self.lf[0][2]]
         self.bofs, self.bsize = {}, {}                  # per layout: offsets inside its block
         for key in dict.fromkeys(self.lf):
             mf, C = self.mats_formats(key), self.dchunks[key[2]]
             lb = _Bump()
             L = {"g_in": lb.alloc(4 * H), "g_post": lb.alloc(4 * H)}
+            if getattr(spec, "subln", False):
+                L.update(g_asub=lb.alloc(4 * spec.n_q * d), g_fsub=lb.alloc(4 * F_))
             if spec.qk_norm:
                 L.update(qn=lb.alloc(4 * d), kn=lb.alloc(4 * d))
             if spec.nope:
@@ -1054,6 +1079,9 @@ class Image(EmbedHost):
             for s in range(S):
                 put(s, Lo["g_in"], f32(W[p + "input_layernorm.weight"]))
                 put(s, Lo["g_post"], f32(W[p + "post_attention_layernorm.weight"]))
+                if getattr(spec, "subln", False):
+                    put(s, Lo["g_asub"], f32(W[p + "self_attn.attn_sub_norm.weight"]))
+                    put(s, Lo["g_fsub"], f32(W[p + "mlp.ffn_sub_norm.weight"]))
                 if spec.qk_norm:
                     put(s, Lo["qn"], f32(qk[0]))
                     put(s, Lo["kn"], f32(qk[1]))
@@ -1149,6 +1177,10 @@ class Image(EmbedHost):
             ns = SimpleNamespace(
                 g_in=Tensor(off + lofs["g_in"], (H,), (1,)),
                 g_post=Tensor(off + lofs["g_post"], (H,), (1,)),
+                g_asub=(Tensor(off + lofs["g_asub"], (spec.n_q * d,), (1,))
+                        if getattr(spec, "subln", False) else None),
+                g_fsub=(Tensor(off + lofs["g_fsub"], (spec.ffn,), (1,))
+                        if getattr(spec, "subln", False) else None),
                 qn=Tensor(off + lofs["qn"], (d,), (1,)) if spec.qk_norm else None,
                 kn=Tensor(off + lofs["kn"], (d,), (1,)) if spec.qk_norm else None,
                 rg=Tensor(off + lofs["rg"], (2,), (1,)) if spec.nope else None)
@@ -1372,14 +1404,53 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
         else:
             o_loc[r0:r1, :].set((acc / l[:, None]) * sg.reshape(G * nh, d)[r0:r1, :])
     o_all = ol.all_gather(o_row)                # [1, n_q*d], slice-major head order
+    if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o
+        o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)
     y = ol.all_gather(ol.dot(o_all, lw.wo))     # [1, H]
     return x + y
 
 
+def _bitnet_mlp(x, lw, spec: Spec):
+    """BitNet's MLP: W_down ffn_sub_norm(relu(W_gate x)^2 * W_up x) after post_attention_layernorm.
+    The sub-norm spans the whole F row, so gate and up are projected whole (one slice) and
+    W_down is one part (Image.dchunks: ternary)."""
+    if ol.num_programs() != 1:
+        raise ol.CompileError("BitNet's MLP (subln) runs on one slice")
+    # each [rows, F] tile is dropped (del) as soon as it is dead: the compiler frees a tile's
+    # TMEM when its last reference goes, so at most three of them are live at once (a batched
+    # step's rows: R x F words each, F = 6,912 for 2B4T)
+    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
+    g = ol.dot(xs, lw.wg)                       # [rows, F]
+    u = ol.dot(xs, lw.wu)
+    del xs
+    if spec.act == "relu2":
+        r = ol.maximum(g, 0.0)
+        del g
+        t = r * r
+        del r
+    else:
+        t = silu(g)
+        del g
+    a = t * u
+    del t, u
+    a = rmsnorm(a, ol.load(lw.g_fsub), spec.eps)
+    y = ol.dot(a, lw.wd[:, 0:spec.ffn])
+    del a
+    return x + y
+
+
 def _mlp(x, lw, spec: Spec):
+    if getattr(spec, "subln", False):           # (LFM2's / Qwen3.5's Specs have no subln)
+        return _bitnet_mlp(x, lw, spec)
     sid = ol.program_id()
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
-    y = swiglu_down(xs, lw.wg, lw.wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
+    wg, wu = lw.wg, lw.wu
+    if getattr(spec, "native_bonsai", False):
+        from dataclasses import replace
+        from ..kernels.hadamard import stationary
+        xs = stationary(xs, wg)
+        wg, wu = (replace(w, hsigns=None, hblock=0) for w in (wg, wu))
+    y = swiglu_down(xs, wg, wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
     h_loc = lw.wd.shape[0]
     mine = slice(sid * h_loc, (sid + 1) * h_loc)
     return ol.all_gather(x[:, mine] + y)
@@ -1806,6 +1877,8 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
             cols = slice(h0 * d, min(nq, h0 + mc) * d)      # a time (TMEM)
             o[:, cols].set(o[:, cols] * sigmoid(ol.dot(xs, lw.wgate[cols, :])))
     o_all = ol.all_gather(o)                    # [R, n_q*d]
+    if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o (as
+        o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)     # _attention's, a row at a time)
     y = ol.all_gather(ol.dot(o_all, lw.wo))     # [R, H]
     return x + y
 
@@ -2070,10 +2143,11 @@ def mxu_time(progs) -> float:
                 loops.pop()
             if ins.op == I.LOOP:
                 loops.append((pc + ins.w[0], ins.w[1] if ins.ra == 0 else 1))
-            elif ins.op == I.MM:
-                mult = math.prod(c for _, c in loops)
+            elif ins.op in (I.MM, I.TMM):         # (PAIR: half the advances, MM or TMM;
+                mult = math.prod(c for _, c in loops)   # TMM QUAD a quarter)
                 t += mult * (ins.w[3] & 0xFFFF) * ((ins.w[3] >> 16) & 0xFF) * \
-                    (0.5 if ins.flags & I.F_PAIR else 1.0)
+                    (0.25 if ins.op == I.TMM and ins.flags & I.F_QUAD else
+                     0.5 if ins.flags & I.F_PAIR else 1.0)
         best = max(best, t)
     return best
 
@@ -2230,6 +2304,10 @@ class Engine:
                  snapshots: int = 0, batch_area: bool = False, tile_runs: bool | None = None,
                  tile_rows: int | None = None):
         from . import prefill as PF
+        if getattr(spec, "native_bonsai", False):
+            # Initial native firmware path: one token per run. It preserves full Hadamard
+            # blocks and uses the verified step decoder for prompt tokens as well.
+            rows, prompt_runs, tile_runs = 1, False, False
         self.spec, self.cap, self.block = spec, cap, block
         self.prog_cache = PC.enabled() if prog_cache is None else bool(prog_cache)
         self.prompt_runs = prompt_runs

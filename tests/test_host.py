@@ -96,6 +96,21 @@ def test_v3_info_snapshot_and_rates():
                                           / 0.01 / 1e9)
 
 
+def test_a_program_longer_than_imem_is_refused():
+    """The loader takes PROG_N rows into IMEM: a program longer than this bitstream's IMEM
+    (CFG IMEM_WORDS) is refused before anything is written (r4 loaded YOLOX --wsplit's stem,
+    4765 instructions into 4096, and it ran as garbage with no error)."""
+    b = Board(FakeTransport(devname=None, regmap=5))
+    imem = b.info()["cfg"]["IMEM_WORDS"]
+    fits = I.assemble([I.nop()] * (imem // 8 - 1) + [I.halt()])
+    b.load_program(4096, fits)
+    assert b.t.reg_read(R.R_PROG_N) == imem // 8
+    long = I.assemble([I.nop()] * (imem // 8) + [I.halt()])
+    with pytest.raises(ValueError, match="IMEM holds"):
+        b.load_program(4096, long)
+    assert b.t.reg_read(R.R_PROG_N) == imem // 8           # nothing loaded
+
+
 def test_caps2_gather_and_the_load_refusal():
     """Register map 5's CAPS2 bit0 (GATHER): a one-slice bitstream built without it (otpu_board
     COLL_GATHER 0) runs BAR alone, so the host refuses to load a program with a GATHER there,
@@ -106,7 +121,8 @@ def test_caps2_gather_and_the_load_refusal():
     gather = I.assemble([I.gather(0, 256, 4, 64, 256, 64, 0), I.halt()])
     bar = I.assemble([I.bar(), I.halt()])
     b = Board(FakeTransport(devname=None, regmap=5, gather=False))
-    assert b.info()["caps2"] == {"gather": False} and not b.gather
+    assert b.info()["caps2"] == {"gather": False, "tpair": False, "tquad": False, "tfn": False, "tgsc": False}
+    assert not b.gather
     with pytest.raises(NoGather, match="instruction 0"):
         b.load_program(4096, gather)
     with pytest.raises(NoGather, match="slice 0"):
@@ -116,14 +132,21 @@ def test_caps2_gather_and_the_load_refusal():
     for t in (FakeTransport(devname=None, regmap=5), FakeTransport(devname=None, regmap=4),
               FakeTransport(devname=None)):
         ok = Board(t)
-        assert ok.gather and ok.info()["caps2"] == {"gather": True}
+        assert ok.gather and ok.info()["caps2"]["gather"]
         ok.load_program(4096, gather)
         assert t.reg_read(R.R_PROG_N) == 2
     cfg = board_config()
     names = {n for g, n, _ in op_checks(cfg)}
     assert "GATHER" in names
     assert names - {n for g, n, _ in op_checks(cfg, gather=False)} == {"GATHER"}
-    assert R.caps2(None) == {"gather": True} and R.caps2(0) == {"gather": False}
+    assert R.caps2(None) == {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False}
+    assert R.caps2(0) == {"gather": False, "tpair": False, "tquad": False, "tfn": False, "tgsc": False}
+    assert R.caps2(R.CAP2_GATHER | R.CAP2_TPAIR) == {"gather": True, "tpair": True,
+                                                     "tquad": False, "tfn": False, "tgsc": False}
+    assert R.caps2(R.CAP2_TQUAD) == {"gather": False, "tpair": False, "tquad": True,
+                                     "tfn": False, "tgsc": False}
+    assert R.caps2(R.CAP2_TFN)["tfn"] and not R.caps2(R.CAP2_TQUAD)["tfn"]
+    assert R.caps2(R.CAP2_TGSC)["tgsc"] and not R.caps2(R.CAP2_TFN)["tgsc"]
 
 
 def test_ddr_rate(monkeypatch, capsys):
@@ -2198,3 +2221,61 @@ def test_dma_lock_is_reentrant_in_its_thread(tmp_path, monkeypatch):
     th.join(10)
     assert order == ["holder", "other"]
     assert ops == [board.fcntl.LOCK_EX, board.fcntl.LOCK_UN] * 2
+
+
+def test_selftest_tmm_stage_covers_pair_and_quad():
+    """otpu-selftest's tmm stage adds TMM PAIR / QUAD programs (QACT DUP / DUP4 rows) on a
+    bitstream that reports them (CAPS2 bit1 / bit2); here a board that is the ISA simulator, so
+    every program runs and its plain results meet the float reference."""
+    import dataclasses as dc
+    from opentpu.host import checks as CK
+    from opentpu.isasim import Machine, board_config
+
+    class SimBoard:
+        def __init__(self, cfg):
+            self.cfg, self.dram, self.prog = cfg, np.zeros(1 << 23, np.uint8), None
+
+        def write(self, addr, data):
+            data = np.asarray(data).view(np.uint8).reshape(-1)
+            self.dram[addr:addr + data.size] = data
+
+        def load(self, addr, prog):
+            self.prog = prog
+
+        def run(self, timeout=None):
+            sl = Machine(dc.replace(self.cfg, DRAM_BYTES=self.dram.size), [self.prog],
+                         [self.dram.copy()]).run().slices[0]
+            self.dram[:] = sl.dram[:self.dram.size]
+            return {"instructions": [sl.icount], "cycles": 0}
+
+        def read(self, addr, n):
+            return self.dram[addr:addr + n].copy()
+
+    for tp, tq, want in ((False, False, 4), (True, True, 9)):
+        cfg = board_config(PAIR=True, TPAIR=tp, TQUAD=tq, DRAM_BYTES=1 << 23)
+        ok, msg = CK.tmm_check(SimBoard(cfg), cfg)
+        assert ok and msg.startswith(f"{want} ternary TMM programs"), msg
+        assert ("QUAD KB=7" in msg) == tq and ("PAIR KB=5" in msg) == tp
+
+
+def test_r4_caps2_erratum():
+    """r4 (bb27096f) reports CAPS2 0 (its FPGA top dropped the TPAIR / TQUAD generics) but was
+    built with both: its BUILD_ID and CFG_HASH 3fb1359e name them (board.CAPS2_ERRATA), so the
+    host takes TPAIR / TQUAD and the hash matches. The registers are the card's (2026-10-21,
+    card_info): without the erratum the host's hash is r3's 4ffd1e17 and it refuses the card."""
+    import copy
+
+    from opentpu.host.board import ConfigMismatch, caps2_errata, device_config
+    card = {"build_id": 0xbb27096f, "regmap": 5, "D": 128, "MCOLS": 4, "LANES": 8, "act_rows": 16,
+            "caps": R.caps(0xef0a0eff), "caps2": R.caps2(0),
+            "cfg": {"S": 1, "TMEM_WORDS": 65536, "IMEM_WORDS": 32768, "ACT_BLOCKS": 128,
+                    "DRAM_BYTES": 4294967296, "channels": 2, "channel_bytes": 2147483648,
+                    "MXU_IMPL": 2, "TMEM_IMPL": 3, "VPU_CL": 2, "ULANES": 8, "SEQ_WC": 1,
+                    "platform": 1, "hash": 0x3fb1359e}}
+    with pytest.raises(ConfigMismatch, match="4ffd1e17"):
+        device_config(copy.deepcopy(card))
+    c = device_config(caps2_errata(copy.deepcopy(card)))
+    assert c.TPAIR and c.TQUAD and not c.TFN
+    other = copy.deepcopy(card)
+    other["build_id"] = 0x12345678
+    assert not caps2_errata(other)["caps2"]["tpair"]

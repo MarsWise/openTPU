@@ -285,7 +285,11 @@ module otpu_native_dram #(
   assign a_wdata = a_wdata_x; assign a_be = a_be_x;
   assign a_rdy = (qa_n[0] < QD) && (qa_n[1] < QD) && (ao_n < OD);
   assign a_rdy_x = a_rdy;
-  assign sw_rdy = (qw_n[0] < WQD) && (qw_n[1] < WQD);
+  // sw_rdy from flip-flops: qw_ok[c] is qw_n[c] < WQD, loaded with qw_n's next value's compare
+  // (r5's m8 0f9f9b1d: qw_n -> sw_rdy -> the slice's grant -> TMEM's replay copies, -1.83 ns)
+  // (equal to the compare from the first reset on; a slice may run cycles before it)
+  (* max_fanout = 16 *) logic [1:0] qw_ok;
+  assign sw_rdy = &qw_ok;
   wire sw_take = sw_req && sw_rdy;
   wire sw_ch = chan_of(sw_addr);
   wire [24:0] sw_m = sw_addr[29:5];
@@ -576,6 +580,7 @@ module otpu_native_dram #(
       for (int c = 0; c < 2; c++) begin
         qb_n[c] <= '0; qb_h[c] <= '0; qa_n[c] <= '0; qa_h[c] <= '0; a_iss[c] <= '0;
         qw_n[c] <= '0; qw_f[c] <= '0; qw_r[c] <= '0; qw_rn[c] <= '0; wnz[c] <= '0;
+        qw_ok[c] <= 1'b1;
         tg_n[c] <= '0; tg_h[c] <= '0;
         rb_n[c] <= '0; rb_res[c] <= '0; rb_h[c] <= '0; rb_t[c] <= '0;
         ra_n[c] <= '0; ra_res[c] <= '0; ra_h[c] <= '0; ra_t[c] <= '0;
@@ -661,6 +666,7 @@ module otpu_native_dram #(
           if (h_ik[c][k] || h_dk[c][k]) wnz[c][k] <= h_iv[c][k] || whb[c][wh_f[c]] != (WW + 1)'(1);
         qb_n[c] <= (QW + 1)'(updn(16'(qb_n[c]), qb_push[c], popb));
         qw_n[c] <= (WW + 1)'(updn(16'(qw_n[c]), qw_push[c], popw));
+        qw_ok[c] <= (WW + 1)'(updn(16'(qw_n[c]), qw_push[c], popw)) < (WW + 1)'(WQD);
         qw_rn[c] <= (WW + 1)'(updn(16'(qw_rn[c]), qw_push[c], h_inc[c]));
         qa_n[c] <= na; tg_n[c] <= ntg;
         rb_n[c] <= rbn; rb_res[c] <= rbr; ra_n[c] <= ran; ra_res[c] <= rar;
@@ -942,5 +948,16 @@ module otpu_native_dram #(
         endcase
       end
     end
+`endif
+`ifndef SYNTHESIS
+  // checked once a reset was seen (before it the registers hold their start values)
+  bit qw_rst;
+  initial qw_rst = 1'b0;
+  always @(posedge clk) begin
+    if (rst) qw_rst <= 1'b1;
+    if (!rst && qw_rst && qw_ok !== {qw_n[1] < WQD, qw_n[0] < WQD})
+      $fatal(1, "otpu_native_dram: qw_ok %b is not qw_n %0d / %0d < %0d", qw_ok, qw_n[0], qw_n[1],
+             WQD);
+  end
 `endif
 endmodule

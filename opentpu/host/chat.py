@@ -1038,13 +1038,17 @@ def main(argv=None):
     ap.add_argument("--repetition-penalty", type=float)
     ap.add_argument("--seed", type=int)
     ap.add_argument("--max-new", type=int, default=1024, help="tokens per reply at most")
+    ap.add_argument("--strict-fpga", action="store_true",
+                    help="refuse a configuration in which the host computes part of the model "
+                         "(per-position inputs, sampling the device's loop does not take): "
+                         "print where each stage runs (opentpu/llm/placement.py)")
     ap.add_argument("--wformat", default=FM.AUTO,
-                    choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", FM.MIX],
+                    choices=[FM.AUTO, "int8", "fp4", "int4", "nvfp4", "ternary_gsc", FM.MIX],
                     help="weight format of the layers (docs/quant.md; fp4 needs a bitstream "
                          "with 4-bit MM support): auto (default) is the model's recommended "
                          "mix of int8 and fp4 where it has one (mix, docs/formats.md), else "
                          "int8")
-    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4"],
+    ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4", "ternary_gsc"],
                     help="weight format of the LM head (default: --wformat)")
     ap.add_argument("--no-prog-cache", action="store_true",
                     help="compile the decode loop's bucket programs in every process (by "
@@ -1104,7 +1108,16 @@ def main(argv=None):
                          f"feed the turns' text as is")
     tokenizer = load_tokenizer(path)        # (on a thread, while the model loads)
     spec = load_spec(path)
-    wformat = FM.auto(spec, a.wformat)
+    bitnet = getattr(spec, "subln", False)  # BitNet b1.58 (opentpu/llm/bitnet.py): its own image
+    if bitnet:                              # formats, every projection a TMM
+        from opentpu.llm.bitnet import IMAGE
+        if a.wformat not in (FM.AUTO, IMAGE["wformat"]):
+            raise SystemExit(f"otpu-chat: {path.name} is BitNet b1.58: its weights are "
+                             f"{IMAGE['wformat']} (--wformat {a.wformat})")
+        wformat = IMAGE["wformat"]
+        a.head_format = a.head_format or IMAGE["head_format"]
+    else:
+        wformat = FM.auto(spec, a.wformat)
     streams = ST.streams(spec)          # a MoE: its experts streamed (opentpu/host/streamed.py)
     if streams:
         if a.backend not in ("isa", "board") or a.per_position:
@@ -1158,7 +1171,10 @@ def main(argv=None):
                              prog_cache=not a.no_prog_cache, prompt_runs=not a.no_prompt_runs,
                              snapshots=SNAPSHOTS)
         else:
-            eng = Engine(spec, load_weights(path), cap=a.cap, cfg=cfg, backend=backend,
+            if bitnet:
+                from opentpu.llm.bitnet import Weights as BitNetWeights
+            eng = Engine(spec, BitNetWeights(path) if bitnet else load_weights(path), cap=a.cap,
+                         cfg=cfg, backend=backend,
                          wformat=wformat, head_format=a.head_format,
                          resident=not a.per_position, prog_cache=not a.no_prog_cache,
                          prompt_runs=not a.no_prompt_runs, snapshots=SNAPSHOTS)
@@ -1187,6 +1203,13 @@ def main(argv=None):
     if a.mtp and not chat.use_mtp:
         print("otpu-chat: --mtp: these sampling settings stay on the host; plain decode",
               flush=True)
+    if a.strict_fpga:
+        from opentpu.llm import placement as PL
+        print("placement:\n" + PL.report(eng, chat.on_card), flush=True)
+        bad = PL.strict_errors(eng, chat.on_card)
+        if bad:
+            raise SystemExit("otpu-chat: --strict-fpga: the host would compute: "
+                             + "; ".join(bad))
     chat.max_slices = a.max_slices
     if not chat.use_mtp:                # the decode loop's bucket programs ahead, in the
         from opentpu.host import gen_warm as GW     # background (opentpu/host/gen_warm.py)

@@ -133,6 +133,66 @@ def stream_check(board, cfg) -> tuple[bool, str]:
     return ok, f"STREAM (every mode) and DSTEP: {msg}"
 
 
+def tmm_check(board, cfg) -> tuple[bool, str]:
+    """otpu-selftest's tmm stage: packed ternary TMM programs (unit and per-row scale, with and
+    without accumulate, several K blocks) against the ISA simulator, from the same DRAM image."""
+    from opentpu.quant import pack_ternary_mxu
+    cases = [(1, False, False, "plain"), (3, True, False, "plain"), (4, False, True, "plain"),
+             (5, True, True, "plain")]
+    # a bitstream with TMM PAIR / QUAD (CAPS2 bit1 / bit2): their K-splits too, on QACT DUP /
+    # DUP4 rows (2M / 4M <= MCOLS), KB not a multiple of their split among them
+    if getattr(cfg, "TPAIR", False) and cfg.MCOLS >= 2:
+        cases += [(5, False, False, "pair"), (4, True, True, "pair")]
+    if getattr(cfg, "TQUAD", False) and cfg.MCOLS >= 4:
+        cases += [(5, False, False, "quad"), (7, True, False, "quad"), (4, False, True, "quad")]
+    cases = [c for c in cases if c[0] <= cfg.ACT_BLOCKS]
+    done = []
+    errs = []
+    for KB, unit, acc, mode in cases:
+        rng = np.random.default_rng(0x7E2 + KB)
+        split = {"pair": 2, "quad": 4}.get(mode, 1)
+        D, M, N = cfg.D, min(6, cfg.ACT_ROWS, cfg.MCOLS // split if split > 1 else 6), 7
+        values = rng.standard_normal((M, KB * D), dtype=np.float32)
+        weights = rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D))
+        packed = pack_ternary_mxu(weights, D)
+        weight_at, scale_at, init_at, out_at = 0x20000, 0x30000, 0x40000, 2048
+        stride, ostride = packed.shape[1], N + 2
+        img = np.zeros(PROG_AT, np.uint8)
+        img[0:values.nbytes] = values.view(np.uint8).reshape(-1)
+        img[weight_at:weight_at + packed.size] = packed.reshape(-1)
+        if acc:
+            init = rng.standard_normal((M, ostride), dtype=np.float32)
+            img[init_at:init_at + init.nbytes] = init.view(np.uint8).reshape(-1)
+        if not unit:
+            sc = rng.uniform(0.05, 0.2, N).astype(np.float32)
+            img[scale_at:scale_at + sc.nbytes] = sc.view(np.uint8)
+        prog = [I.ld(0, 0, M * KB * D)]
+        if acc:
+            prog.append(I.ld(init_at, out_at, M * ostride))
+        prog += [I.qact(0, M, 0, KB, KB * D, dup=mode != "plain", dup4=mode == "quad"),
+                 I.tmm(weight_at, 0 if unit else scale_at, out_at, N, KB, stride, ostride, M, 0,
+                       4, unit=unit, acc=acc, rsc=not unit, pair=mode == "pair",
+                       quad=mode == "quad"),
+                 I.st(0x50000, out_at, M * ostride),
+                 I.halt()]
+        ok, msg, _ = run_demo(board, cfg, prog, img)
+        if not ok:
+            return False, f"TMM {mode} KB={KB} unit={unit} acc={acc}: {msg}"
+        if not acc:
+            # independent float reference: bit-exactness to the simulator alone would not catch
+            # a shared misreading of the ternary semantics
+            got = board.read(0x50000, 4 * M * ostride).view("<f4").reshape(M, ostride)[:, :N]
+            want = values @ weights.T.astype(np.float32) * (1.0 if unit else sc)
+            err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
+            if not err < 0.03:
+                return False, f"TMM {mode} KB={KB} unit={unit}: result differs from float reference " \
+                              f"(rel {err:.4f})"
+            errs.append(err)
+        done.append(f"KB={KB}" if mode == "plain" else f"{mode.upper()} KB={KB}")
+    return True, (f"{len(done)} ternary TMM programs match the ISA simulator "
+                  f"({', '.join(done)}); max rel err vs float {max(errs):.4f}")
+
+
 def vops_check(board, cfg, need: bool = False) -> tuple[bool, str]:
     """otpu-selftest's vops stage: vops_program() against the ISA simulator. Wrong results fail
     on a bitstream that has the functions (register map >= VOPS_SINCE), and on an older one
@@ -541,3 +601,37 @@ def model_check(t, cfg, model: str, tokens: int, sim: bool, wformat: str = "int8
                 f"{dev.rows}, {pre_cyc / 1e6:.2f} Mcycles/token; {len(one)} one-token runs, "
                 f"{np.mean(one) / 1e6:.2f} Mcycles/token; {dt:.1f} s wall" +
                 ("" if ok else f"; ISA simulator says {tok.decode(want)!r}"))
+
+
+def vext_program() -> list:
+    """VOP MAC in its modes (FULL / ROW / COL, in place into B) and a QST T4 V^T write (rows
+    into a cache's transposed layout), on the demo image's data."""
+    A, B_, C_, RES = 0, 1024, 2048, 8192
+    p = [I.ld(DATA, 0, 4096)]
+    for k, bm in enumerate((I.B_FULL, I.B_ROW, I.B_COL)):
+        p.append(I.mac(RES + 512 * k, A, B_, C_, 3, 100, 100, 101,
+                       1 if bm == I.B_ROW else 103, bm))
+    p.append(I.mac(B_, A, B_, C_, 3, 100, 103, 101, 103, I.B_FULL))
+    p += [I.st(OUT, RES, 1536), I.st(OUT + 0x2000, B_, 512),
+          I.qst(A, OUT + 0x4000, OUT + 0x10000, 7, 1, 128, 1, 132, row=True), I.halt()]
+    return p
+
+
+def vext_check(board, cfg) -> tuple[bool, str]:
+    """otpu-selftest's vext stage (the r5 vector extensions, CAPS2 bit3): every table function
+    on a tile and on the edge values (otpu-diag's vpu-tfn checks) and vext_program(), each
+    against the ISA simulator; a bitstream without them passes with a note."""
+    if not getattr(cfg, "TFN", False):
+        return True, "note: no vector extensions (CAPS2 bit3 clear)"
+    from .opchecks import diag_image, op_checks
+    img = diag_image(cfg)
+    progs = [(n, p) for g, n, p in op_checks(cfg) if g == "vpu-tfn"]
+    progs.append(("MAC / QST T4", vext_program()))
+    bad = []
+    for name, prog in progs:
+        ok, msg, _ = run_demo(board, cfg, prog, img)
+        if not ok:
+            bad.append(f"{name}: {msg.split(',')[0]}")
+    if bad:
+        return False, f"{len(bad)} of {len(progs)} differ: " + "; ".join(bad[:4])
+    return True, f"{len(progs)} programs (TFN x10 on tiles and edge values, MAC, QST T4) == ISA"

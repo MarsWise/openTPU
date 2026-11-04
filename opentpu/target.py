@@ -71,7 +71,7 @@ SIM_LANES_MAX = 16
 # Makefile, create_project.tcl, tools/synth).
 CORE = ["vpu/otpu_fp.sv", "vpu/otpu_fpipe.sv", "top/otpu_pkg.sv", "mem/otpu_tmem.sv",
         "mem/otpu_actram.sv", "seq/otpu_seq.sv", "vpu/otpu_vtree.sv", "dma/otpu_dma.sv",
-        "mxu/otpu_mxu.sv", "vpu/otpu_quant.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
+        "mxu/otpu_mxu.sv", "vpu/otpu_quant.sv", "vpu/otpu_tfn_rom.sv", "vpu/otpu_se_comp.sv", "vpu/otpu_se_tail.sv",
         "vpu/otpu_vpu.sv", "top/otpu_coll.sv", "top/otpu_slice.sv"]
 TECH = {"generic": ["tech/generic/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv"],
         "xilinx7": ["tech/xilinx7/otpu_tech_dsp.sv", "tech/generic/otpu_tech_ram.sv"],
@@ -242,10 +242,13 @@ def arch_hash(cfg) -> int:
     programs compiled for one Config run on any device whose Config hashes the same). SEQ_WC
     (EXPERIMENTAL, the sequencer's wait entries) is in it only when on: the hash of every
     build without it stays, and a host that writes no entries refuses a build with it (its
-    hash leaves it out: opentpu/host/board.py check_hash)."""
+    hash leaves it out: opentpu/host/board.py check_hash). TPAIR (TMM PAIR), TQUAD (TMM
+    QUAD) and TFN (the table functions) likewise: in it only when on, so the bitstreams built
+    before them keep their hashes."""
     d = dict(dataclasses.asdict(cfg), NUMERICS=NUMERICS)
-    if not d.get("SEQ_WC"):
-        d.pop("SEQ_WC", None)
+    for k in ("SEQ_WC", "TPAIR", "TQUAD", "TFN", "TGSC"):
+        if not d.get(k):
+            d.pop(k, None)
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
                    separators=(",", ":"))
     return int.from_bytes(hashlib.sha256(s.encode()).digest()[:4], "big")
@@ -285,7 +288,9 @@ def rtl_params(t: Target | str | None = None) -> dict:
         "VPU_CL": u["VPU_CL"], "ULANES": u["ULANES"], "TMEM_IMPL": u["TMEM_IMPL"],
         "RPB": u["RPB"] or NRP * a["LANES"], "WPB": u["WPB"], "WIN": u["WIN"],
         "FIFO_DEPTH": u["FIFO_DEPTH"], "TRACE_DEPTH": u["TRACE_DEPTH"], "PQ_WIN": u["PQ_WIN"],
-        "CHASH": int(u["CHASH"]), "SEQ_WC": int(a["SEQ_WC"]),
+        "CHASH": int(u["CHASH"]), "SEQ_WC": int(a["SEQ_WC"]), "TPAIR": int(a["TPAIR"]),
+        "TQUAD": int(a.get("TQUAD", False)), "TFN": int(a.get("TFN", False)),
+        "TGSC": int(a.get("TGSC", False)),
         "DDR_MTS": int(p.get("mem_mts", 0)),
         "NCH": p["channels_per_slice"],
         "CH_LOG2": (p["channel_bytes"] - 1).bit_length(),
@@ -322,6 +327,16 @@ def build_config(t: Target | str | None = None, **knobs):
         a["DSTEP"] = a["STREAM"] = bool(int(knobs["DSTEP"]))
     if knobs.get("SEQ_WC") is not None:
         a["SEQ_WC"] = bool(int(knobs["SEQ_WC"]))
+    if knobs.get("TPAIR") is not None:
+        a["TPAIR"] = bool(int(knobs["TPAIR"]))
+    if knobs.get("TQUAD") is not None:
+        a["TQUAD"] = bool(int(knobs["TQUAD"]))
+    if knobs.get("TFN") is not None:
+        a["TFN"] = bool(int(knobs["TFN"]))
+    if knobs.get("TGSC") is not None:
+        a["TGSC"] = bool(int(knobs["TGSC"]))
+    if not a["DSTEP"]:
+        a["TFN"] = False                       # TFN runs on the stream engine
     return config(t, **a)
 
 

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "firmware": {
+    "name": "openTPU NextGen m4 ternary-MXU",
+    "source_commit": "e97273038ae1fdefc134845f9df6a4c700f5765a",
+    "build_id": "0xe9727303",
+    "bitstream_sha256": "1B248980DB51B9705BCB9499F9B6863CD8C025E6C1D741BAA3CCC67364677AAB",
+    "part": "xc7k480tffg1156-2",
+    "version": {
+      "D": 128,
+      "MCOLS": 4,
+      "LANES": 8
+    }
+  },
+  "host": {
+    "branch": "feature/nextgen-hardware-first-vla-bitnet-vllm",
+    "tmm_opcode": "0x23"
+  },
+  "known": [
+    {
+      "name": "r3: openTPU NextGen m4 ternary-MXU",
+      "build_id": "0xe9727303",
+      "cfg_hash": "0x4ffd1e17",
+      "bitstream_sha256": "1B248980DB51B9705BCB9499F9B6863CD8C025E6C1D741BAA3CCC67364677AAB",
+      "version": {
+        "D": 128,
+        "MCOLS": 4,
+        "LANES": 8
+      }
+    },
+    {
+      "name": "r4: m4 133.33 MHz + TMM PAIR / QUAD (CAPS2 0: board.CAPS2_ERRATA)",
+      "build_id": "0xbb27096f",
+      "cfg_hash": "0x3fb1359e",
+      "bitstream_sha256": "CF0AF8A680ACA4C8771537CC94AF8FFB020D709FC23E9DF28E91184092CC3A58",
+      "version": {
+        "D": 128,
+        "MCOLS": 4,
+        "LANES": 8
+      }
+    },
+    {
+      "name": "r5-m4: m4 133.33 MHz + TMM PAIR / QUAD + TFN / MAC / QST T4",
+      "build_id": "pending",
+      "cfg_hash": "0x603d5a6f",
+      "bitstream_sha256": "pending",
+      "version": {
+        "D": 128,
+        "MCOLS": 4,
+        "LANES": 8
+      }
+    },
+    {
+      "name": "r5-m8: m8 137.5 MHz (core_clk2x 275) + TMM PAIR / QUAD + TFN / MAC / QST T4 (2f2320e2: WNS +0.021, WHS +0.016)",
+      "build_id": "0x2f2320e2",
+      "cfg_hash": "0x3b7f244e",
+      "bitstream_sha256": "270AFA7AFDE39927909609B60711E276705CE0A32A780F41FDDB52216068C23B",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
+    }
+  ]
+}

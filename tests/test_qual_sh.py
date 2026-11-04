@@ -127,7 +127,8 @@ def qual(tmp_path):
     run of deploy_t_e776703a."""
     tree = tmp_path / "tree"
     (tree / "tools/qual").mkdir(parents=True)
-    shutil.copy(ROOT / "tools/qual/qual.sh", tree / "tools/qual/qual.sh")
+    qual_script = (ROOT / "tools/qual/qual.sh").read_bytes().replace(b"\r\n", b"\n")
+    (tree / "tools/qual/qual.sh").write_bytes(qual_script)
     (tree / "opentpu/llm").mkdir(parents=True)
     (tree / "opentpu/__init__.py").write_text("")
     shutil.copy(ROOT / "opentpu/llm/__init__.py", tree / "opentpu/llm/__init__.py")

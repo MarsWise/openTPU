@@ -202,11 +202,12 @@ module otpu_vpu
 
   function automatic logic [3:0] n_slots(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER: return 4'd1;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC: return 4'd1;
       V_EXP2, V_EXP2SUB:           return 4'd9;
       V_RECIP:                     return 4'd6;
       V_RSQRT, V_LOG2:             return 4'd10;
-      default:                     return 4'd0;
+      // TFN (C8 only): six ops, RECIP's passes (the latency rule orders by slots)
+      default:                     return is_tfn(f) ? 4'd6 : 4'd0;
     endcase
   endfunction
 
@@ -219,7 +220,7 @@ module otpu_vpu
                          C_LOG = 3'd5;
   function automatic logic [2:0] f_cls(input logic [7:0] f);
     case (f)
-      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER: return C_ONE;
+      V_ADD, V_SUB, V_RSUB, V_MUL, V_OUTER, V_MAC: return C_ONE;
       V_EXP2, V_EXP2SUB:           return C_EXP;
       V_RECIP:                     return C_RCP;
       V_RSQRT:                     return C_RSQ;
@@ -763,6 +764,7 @@ module otpu_vpu
         unique case (1'b1)
           sf[V_MUL]:  if (s == 0) begin ia = x; ib = y; dest = 2'd1; end
           sf[V_OUTER]: if (s == 0) begin ia = x; ib = xd[l]; ic_ = y; ie = xc[l]; dest = 2'd1; end
+          sf[V_MAC]:  if (s == 0) begin ia = x; ib = xc[l]; ic_ = y; dest = 2'd1; end
           sf[V_ADD]:  if (s == 0) begin ia = x; ic_ = y; dest = 2'd1; end
           sf[V_SUB]:  if (s == 0) begin ia = x; ic_ = fneg(y); dest = 2'd1; end
           sf[V_RSUB]: if (s == 0) begin ia = y; ic_ = fneg(x); dest = 2'd1; end
@@ -930,6 +932,7 @@ module otpu_vpu
       unique case (1'b1)
         m0d.fh[V_MUL]:  begin ia = x; ib = y; end
         m0d.fh[V_OUTER]: begin ia = x; ib = xd[l]; ic_ = y; ie = xc[l]; end
+        m0d.fh[V_MAC]:  begin ia = x; ib = xc[l]; ic_ = y; end
         m0d.fh[V_ADD]:  begin ia = x; ic_ = y; end
         m0d.fh[V_SUB]:  begin ia = x; ic_ = fneg(y); end
         m0d.fh[V_RSUB]: begin ia = y; ic_ = fneg(x); end
@@ -966,7 +969,8 @@ module otpu_vpu
     assign sy[1] = c_uy;
     assign sy[2] = c_qy;
     otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1)) u_comp (
-      .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_a(c_ia),
+      .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_tf(m0.func[3:0]),
+      .in_a(c_ia),
       .in_b(c_ib), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),
       .hold_n(c_hold_n),
       .st_sel(c_sel), .st_a(c_sa), .st_b(c_sb), .st_c(c_sc), .st_e(c_se), .st_y(sy),
@@ -1571,6 +1575,9 @@ module otpu_vpu
           brs <= hc.w6[15:0]; func <= hf; bmode <= hc.w6[25:24];
           imm <= hc.w7;
           nslots <= n_slots(hf);
+`ifndef SYNTHESIS
+          if (is_tfn(hf) && !C8) $fatal(1, "otpu_vpu: TFN (VOP %0h) needs the stream engine", hf);
+`endif
           c16 = hc.w4[31:16];
 `ifndef SYNTHESIS
           nchunks = comp_f(hf) ? (c16 + cwid - 1) / cwid : (c16 + 16'(LANES) - 1) >> LW;
@@ -1582,11 +1589,13 @@ module otpu_vpu
           nch <= nchunks;
           ir <= '0; ic <= '0; ch <= '0;
           a_row <= AW'(hc.w2); b_row <= AW'(hc.w3); d_row <= AW'(hc.w1);
-          // OUTER: A is dst (in place), after a fill of its column buffers
-          filling <= (hf == V_OUTER);
+          // OUTER: A is dst (in place), after a fill of its column buffers; MAC: the fill of
+          // its column vector C (the C buffer; no D)
+          filling <= (hf == V_OUTER) || (hf == V_MAC);
           nfill <= (nchunks < 16'd2) ? 16'd2 : nchunks;
           oc_a <= AW'(hc.w7); od_a <= AW'(hc.w2);
-          od_sc <= hc.flags[VF_DSCALAR]; od_one <= hc.flags[VF_DONE];
+          od_sc <= hc.flags[VF_DSCALAR] && hf == V_OUTER;
+          od_one <= hc.flags[VF_DONE] || hf == V_MAC;
           if (hf == V_OUTER) begin
             a_row <= AW'(hc.w1); ars <= hc.w5[15:0];
           end

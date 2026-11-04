@@ -66,8 +66,14 @@ module otpu_fpga_top_ld #(
   parameter logic [31:0] ARCH_HASH = 32'h0, // its arch_hash (CFG_HASH; create_project.tcl)
   parameter int TRACE_DEPTH = 16384,        // trace records (a power of two; 0: no trace buffer,
                                             // CAPS trace bit 0: run_vivado.sh TRACE_DEPTH)
-  parameter bit COLL_GATHER = 1'b1          // 0: the collective unit without GATHER (CAPS2 bit0 0:
+  parameter bit COLL_GATHER = 1'b1,         // 0: the collective unit without GATHER (CAPS2 bit0 0:
                                             // run_vivado.sh COLL_GATHER)
+  // CAPS2 bits 1..3 as the build reports them (create_project.tcl's generics; the datapaths are
+  // in every build of this tree). r4 (bb27096f) lacked these three: its CAPS2 read 0
+  parameter bit TPAIR = 1'b0,               // TMM PAIR
+  parameter bit TQUAD = 1'b0,               // TMM QUAD
+  parameter bit TFN   = 1'b0,               // the table functions and VOP MAC (with DSTEP)
+  parameter bit TGSC  = 1'b0                // native ternary group scales (CAPS2 bit4)
 ) (
   // board
   input  logic        SYS_CLK,              // 50 MHz, AA28
@@ -291,7 +297,8 @@ module otpu_fpga_top_ld #(
                     .ULANES(ULANES), .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID), .DDR_MTS(DDR_MTS),
                     .DSTEP(DSTEP), .HOSTCAL(1'b1), .XREG(PCIE_GEN == 2),
                     .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
-                    .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER)) u_sys (
+                    .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
+                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC)) u_sys (
     .clk(core_clk), .clk_f, .rst(core_rst), .ctl_mrst(lrs2), .xclk(xdma_aclk), .xrst,
     .calib, .ded, .temp(device_temp), .led(board_led), .i2c_lo, .i2c_pin({lm73_alert_n, i2c_lvl}),
     .s_ctl_awaddr(ctl_awaddr[11:0]), .s_ctl_awvalid(ctl_awvalid), .s_ctl_awready(ctl_awready),

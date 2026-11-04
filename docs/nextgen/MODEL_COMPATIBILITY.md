@@ -1,0 +1,36 @@
+# Model compatibility and end-to-end evidence
+
+## New workload families requested
+
+Updated 2026-10-19 (feature HEAD after the `9bd4d83c` upstream merge).
+
+| Family | Selected checkpoint / revision | Current evidence in this branch | Status |
+|---|---|---|---|
+| BitNet b1.58 | `microsoft/bitnet-b1.58-2B-4T` (sha256 `8143ae11…3975b`, offline `AutoBitLinear`) | **On the card (r3, 2026-10-20):** the whole 30-layer model, prompt "The capital of France is": greedy 16/16 tokens equal to HF transformers (hybrid and the one-run-a-token engine), first-token cosine 0.9958 / 0.9923 vs HF; 1 layer card = ISA bit for bit; engine 145.8 ms card / token (271.5 ms wall, PCIe x4), TMM 124.9 ms. BITNET_COMPAT.md | `PHYSICAL FPGA VERIFIED` (greedy generation, logits vs HF) |
+| YOLO / CNN | **YOLOX-Nano** (Megvii-BaseDetection/YOLOX, Apache-2.0; `yolox_nano.pth` sha256 `cd28f55fbbc1829f99d9ac9b38a16d259a22889739c8728ea877610201feff7b`; 416², 0.91 M params, COCO mAP 25.8 per its README) | `opentpu/kernels/conv.py` (Conv2D implicit GEMM on the MXU; depthwise, max pool, upsample on the VPU), `tools/yolox_run.py` (the model's own PyTorch forward with every Conv2d / MaxPool2d / Upsample on the kernels). ISA simulator, 416² `assets/dog.jpg`: 113 convolutions = 100% of the 522.6 M MACs on the device; detections dog 0.843 / car 0.817 / bicycle 0.812 vs float 0.829 / 0.809 / 0.808 (the float model's 4th, cat 0.380, is missed); per-layer error 1.2-2.4% on float inputs, 19% median accumulated over the graph (uncalibrated int8). Whole graph on the device (`opentpu/cnngraph.py`, `tools/yolox_graph.py --strict-fpga`): 126 device ops incl. box decode; host = input write, readout, NMS. With `--wsplit` (int8 hi+lo weights): head rel L2 0.092, all 4 float detections (IoU ≥ 0.977). **COCO val2017, first 500 images (`tools/yolox_coco.py`, host run 2, 2026-10-20, card r3 0xe9727303): mAP50-95 float 0.2844, emul 0.2840, emul --wsplit 0.2828, card 0.2821 (0.44 s/image), card --wsplit 0.2852 (0.41 s/image)** — the card at the float model's accuracy | `ISA SIMULATED (whole model)`; kernels `RTL SIMULATED`; **COCO mAP `PHYSICAL FPGA VERIFIED`** (per-launch card = ISA check of the whole graph: re-run in claude_run.sh v10) |
+| Vision-language | MiniCPM-V (upstream `opentpu/llm/minicpmv.py`, `opentpu/kernels/vit.py`) | Upstream code and tests in the branch. `tests/test_minicpmv.py` on the merged tree (2026-10-20, ISA simulator, no Verilator): 39 passed, 1 failed — `test_warm_entries_are_found_by_the_first_start` fails identically on pristine upstream `9bd4d83c` (program-cache disk hits 26 vs 13: an upstream issue, not NextGen). Image-conditioned check on a real checkpoint not run here | `UPSTREAM CODE; SOFTWARE TESTS RUN (1 upstream failure)`; real model `NOT RUN` |
+| Vision-language-action | **SmolVLA** (LeRobot `7abbc995`, Apache-2.0; checkpoint `lerobot/smolvla_base` to run on the host) | `opentpu/torchdev.py` + `kernels/linear.py`: the policy's own `sample_actions` (SigLIP tower, connector, VLM prefix + KV cache, the action expert's 10 Euler steps) with every nn.Linear and the patch-embedding conv as device kernels, the rest counted on the host. `tools/smolvla_run.py --tiny` (random tiny SmolVLA built offline at the real architecture; ISA simulator): 100% of MACs on the device (linears, patch conv, every attention via `kernels/sdpa.py`; host: elementwise / norm ops only), actions rel L2 0.021 vs float32 (stage 1 with host attention: 96.1%, 0.016); `tests/test_torchdev.py`. **Card (host run 2, r3): the tiny policy, 553 kernel runs, every one equal to the ISA simulator bit for bit, 100% of MACs on the device, actions rel L2 0.0205 vs float32, 3.8 M card cycles.** `smolvla_base` on the card failed to compile (a 12,288-wide linear: ACT_ROWS rows did not fit TMEM; fixed, the kernel takes fewer rows; re-run in v10). Inputs synthetic (recorded LeRobot frames: next) | tiny **`PHYSICAL FPGA VERIFIED`** (card = ISA, framework compared); `smolvla_base` `NOT RUN` |
+| vLLM | **vLLM 0.32.0** out-of-tree platform `opentpu/vllm` (entry point `vllm.platform_plugins`) | Qwen3 / Llama-likes with KV slots, BitNet b1.58 with one slot (its `BitNetForCausalLM` architecture and `bitnet` quantization registered as stand-ins vLLM only inspects); vLLM's scheduler, continuous batching, preemption (recompute), abort, streaming OpenAI server; greedy tokens and sample logprobs == openTPU Engine; unsupported sampling features refused (400). LFM2 / Qwen3.5 / Gemma 4 / MoE / VLM refused. `tests/test_vllm_plugin.py` (9 passed). Host run 2: the tests ended in vLLM's shutdown on the host's CPU-only torch (`torch.accelerator.empty_cache`) and the card smoke stopped at a wrong XDMA node check; both fixed | `SOFTWARE VERIFIED` (ISA simulator); card `NOT RUN` (v10) |
+| MoE / MTP | Upstream `opentpu/llm/moe.py`, `mtp.py`, offload (`docs/offload.md`) | Upstream code and tests in the branch. Re-run on the merged tree (2026-10-20, ISA, no Verilator): `test_mtp` 38 passed, 4 skipped (Verilator); the MoE suites: see PROGRESS.md | `UPSTREAM CODE; SOFTWARE TESTS RUN` (partial) |
+
+## Existing LLM support
+
+The repository README and model-specific docs record existing on-card LLM operation, including
+INT8 and 4-bit formats for named model families. Those are upstream baseline claims and were not
+retested in this task. This branch makes no new claim about model accuracy, checkpoint
+compatibility, RTL execution fraction, or device performance.
+
+Before adding a row as supported, record the exact checkpoint repository/revision and file hashes,
+converter/quantizer, tokenizer/processor, operator graph, hardware execution locations, golden
+reference comparisons, and reproducible run command.
+
+## Diffusion Policy (LeRobot) -- 2026-10-26
+
+`tools/diffusion_run.py`: LeRobot's Diffusion Policy (ResNet-18 image encoder with GroupNorm and
+spatial softmax, conditional 1-D U-Net, DDPM) with every nn.Conv2d, nn.Conv1d,
+nn.ConvTranspose1d and nn.Linear on the device (torchdev `DeviceConv1d` / `DeviceConvTranspose1d`:
+im2col / col2im on the host, the GEMM on the MXU). GroupNorm, Mish, spatial softmax and the
+scheduler's update on the host (counted). ISA SIMULATED: a random small policy (12.3 M params,
+5 steps): 100.00% of the MACs on the device, actions rel L2 0.018 vs float32
+(`tests/test_conv1d_diffusion.py`). lerobot/diffusion_pusht on the card: `models_r5.sh` (not run
+yet). Image diffusion (a U-Net / DiT for pictures) is not in the tree.
