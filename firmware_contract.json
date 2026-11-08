@@ -60,6 +60,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8: m8 133.33 MHz, r7 + VRAND / TCQ / TATAN / QST4 / LDX / TD5 / VBFLY / VAFF / QST6 / VCSWP (source a4138552; sha256 after the build)",
+      "build_id": "pending",
+      "cfg_hash": "0x93e29b18",
+      "bitstream_sha256": "pending",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }

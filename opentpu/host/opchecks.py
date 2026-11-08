@@ -166,6 +166,8 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
     for f, name in I.VFUNCS.items():
         if f in (I.V_OUTER, I.V_ARGMAX, I.V_SEL) or f in I.TFN_FUNCS:
             continue
+        if f in (I.V_BFLY, I.V_CSWP, I.V_AFF):     # their own operand forms (below)
+            continue
         if f in (I.V_CMP_GT, I.V_CMP_EQ) and not getattr(cfg, "VCMP", False):
             continue
         if f in I.READS_B:
@@ -187,6 +189,19 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
     if getattr(cfg, "VCMP", False):
         add("vpu", "VOP SEL column mask",
             _p(I.sel(RES, A, B, 2048, 3, 200, 256, 256, 256), I.st(OUT, RES, 3 * 256)))
+    if getattr(cfg, "VBFLY", False):
+        for st in (1, 4, 64):
+            add("vpu-r8", f"VOP BFLY stride {st}",
+                _p(I.bfly(RES, A, 3, 128, 128, 256, st), I.st(OUT, RES, 3 * 128)))
+    if getattr(cfg, "VCSWP", False):
+        for st, k in ((1, 0), (2, 8), (32, 64)):
+            add("vpu-r8", f"VOP CSWP stride {st} direction {k}",
+                _p(I.cswp(RES, A, 3, 128, 128, 256, st, k), I.st(OUT, RES, 3 * 128)))
+    if getattr(cfg, "VAFF", False) and getattr(cfg, "aff_available", False):
+        for bias in (True, False):
+            add("vpu-r8", f"VOP AFF{'' if bias else ' no bias'}",
+                _p(I.li(3, 2048), I.aff(RES, A, B, 16, 3, 200, 256, 256, 1, bias=bias, rd=3),
+                   I.st(OUT, RES, 3 * 256)))
     for dname in ("scalar", "column", "one"):
         add("vpu-new", f"VOP OUTER {dname}",
             _p(I.vop(I.V_COPY, RES, A, 0, 4, 64, 64, 64, 0),

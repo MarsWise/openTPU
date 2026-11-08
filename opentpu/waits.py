@@ -286,7 +286,9 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
                 rd.append(_mk(SP_TMEM, w[1], p0 + cols))
             if f in (I.V_MAC, I.V_SEL):
                 rd.append(_mk(SP_TMEM, w[6], cols))
-            if f in I.BINARY or f in (I.V_RDOT, I.V_OUTER):
+            if f == I.V_AFF:                    # AFF's G, then H (none with DONE): otpu_pkg's
+                rd.append(_mk(SP_TMEM, w[6], cols if fl & I.F_DONE else 2 * cols))
+            if f in I.BINARY or f in (I.V_RDOT, I.V_OUTER, I.V_AFF):
                 if bm == I.B_FULL:
                     rd.append(_mk(SP_TMEM, w[2], p1 + cols))
                 elif bm == I.B_ROW:

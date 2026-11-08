@@ -671,3 +671,23 @@ def test_an_rld_bound_narrows_the_footprints_and_the_isa_simulator_checks_it():
         else:
             with pytest.raises(SimError, match="outside its bound"):
                 Machine(cfg, [p], [None]).run()
+
+
+@pytest.mark.parametrize("bias", [True, False])
+def test_aff_waits_for_its_scale_and_gh_tables(bias):
+    """VOP AFF reads A, its per-row scale (operand B, ROW) and the G / H columns at R[rd] + gh
+    (H none without bias): otpu_pkg footprint()'s three reads. A load of any of them before it
+    is waited for (r8 on the board model: a qwen3 RMSNorm's AFF ran past the LD of its G / H
+    table, the sequencer's WAITC assertion)."""
+    cols = 8
+    for i, (at, n) in enumerate(((100, cols), (300, 1), (500, cols), (500 + cols, cols))):
+        if i == 3 and not bias:
+            continue
+        prog = [I.ld(0, at, n), I.li(3, 400), I.aff(200, 100, 300, 100, 1, cols, cols, cols,
+                                                    bias=bias, rd=3), I.halt()]
+        w = W.wait_counts(prog, args=[0] * 8)
+        assert k(w, 2)[W.U_DMA] == 1, (i, bias)
+    # past the table (G and H: 2 cols words at 500): no wait
+    prog = [I.ld(0, 500 + 2 * cols, cols), I.li(3, 400),
+            I.aff(200, 100, 300, 100, 1, cols, cols, cols, rd=3), I.halt()]
+    assert k(W.wait_counts(prog, args=[0] * 8), 2)[W.U_DMA] == 0
