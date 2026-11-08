@@ -47,7 +47,11 @@ S_STOP = 8                                        # 8 stop ids (-1: none)
 N_STOP = 8
 S_HALT = 16                                       # the host's stop word (1.0: stop)
 S_PEN, S_PENINV = 17, 18                          # the repetition penalty R and 1 / R
-SLOT = {"tok": S_TOK, "tpos": S_TPOS, "ring": S_RING}
+S_VQ, S_VGS, S_VGA = 48, 49, 50                  # a 6-bit V cache's group (qwen3.RunPos.v6pos):
+#                                                   the slot p mod 4, the group's first token
+#                                                   in the bucket's block, its plane byte
+SLOT = {"tok": S_TOK, "tpos": S_TPOS, "ring": S_RING, "vq": S_VQ, "vgs": S_VGS, "vga": S_VGA}
+V6_SLOTS = slice(S_VQ, S_VGA + 1)
 OUT_MARK = 0xFFFFFFFF                             # out[] before the token lands (the device
                                                   # stores ids, never this NaN)
 
@@ -163,14 +167,17 @@ def rules(spec, block: int) -> dict:
     the others count (step, modulus). tpos = p mod block (it wraps to 0 as the last token of a
     bucket moves the position into the next one, whose program the run chains to); ring =
     (p + 1) mod K (LFM2's convolution ring, qwen3.RunPos)."""
-    return {"tok": None, "tpos": (1, block), "ring": (1, getattr(spec, "conv_k", 1))}
+    return {"tok": None, "tpos": (1, block), "ring": (1, getattr(spec, "conv_k", 1)),
+            "vq": (1, 4), "vgs": "group", "vga": "group"}
 
 
 def check_args(run_args, spec, block: int) -> None:
     """Every run-time variable has an update rule and stays an exact fp32 integer in the state
     block (below 2^24); RLD MUL forms c * var in the sequencer, mod 2^32 as the host's
     arg_words."""
-    bound = {"tok": spec.vocab, "tpos": block, "ring": getattr(spec, "conv_k", 1)}
+    from .qwen3 import V6_STRIDE
+    bound = {"tok": spec.vocab, "tpos": block, "ring": getattr(spec, "conv_k", 1), "vq": 4,
+             "vgs": block, "vga": max(1, block // 128) * V6_STRIDE}
     for v, c in run_args:
         if v.name not in bound:
             raise CompileError(f"run-time variable {v.name}: no update rule (generate.rules)")
@@ -190,6 +197,9 @@ def state_words(spec, tok: int, p: int, n: int, stop_ids, block: int,
     st[S_TOK], st[S_TPOS] = tok, p % block
     st[S_RING] = (p + 1) % getattr(spec, "conv_k", 1)
     st[S_LEFT] = n
+    from .qwen3 import RunPos
+    v6 = RunPos.values(tok, p, 1, block)
+    st[S_VQ], st[S_VGS], st[S_VGA] = v6["vq"], v6["vgs"], v6["vga"]
     st[S_STOP:S_STOP + N_STOP] = -1.0
     st[S_STOP:S_STOP + len(ids)] = ids
     if samp is not None:
@@ -626,7 +636,7 @@ def _token_end(b, g, st, pos, spec, block, samp, sink, tok, split: bool = False)
     used = set(SLOT) if split else {v.name for v, _ in b.run_seen}
     for name, slot in SLOT.items():
         rule = rl[name]
-        if rule is None or name not in used:
+        if rule is None or name not in used or rule == "group":
             continue
         stepv, mod = rule
         v = st[slot:slot + 1]
@@ -634,6 +644,20 @@ def _token_end(b, g, st, pos, spec, block, samp, sink, tok, split: bool = False)
         if mod:            # v - mod * [v >= mod], exact for small integers
             w = ol.minimum(ol.maximum(v + float(1 - mod), 0.0), 1.0)
             v.set(v - w * float(mod))
+    if used & {"vgs", "vga"}:
+        # a 6-bit V group (qwen3.RunPos.v6pos): a new group when vq wrapped to 0 -- its first
+        # token 4 on (mod the block, as tpos), its byte: (vgs >= 128) * V6_STRIDE + (vgs mod
+        # 128) / 4 (blocks of at most two D-blocks; exact small integers)
+        from .qwen3 import V6_STRIDE
+        if block > 256:
+            raise CompileError("a 6-bit V group in the generate loop: blocks of at most 256")
+        vq, vgs, vga = (st[x:x + 1] for x in (S_VQ, S_VGS, S_VGA))
+        carry = ol.minimum(vq, 1.0) * -1.0 + 1.0
+        vgs.set(vgs + carry * 4.0)
+        w = ol.minimum(ol.maximum(vgs + float(1 - block), 0.0), 1.0)
+        vgs.set(vgs - w * float(block))
+        hi = ol.minimum(ol.maximum(vgs - 127.0, 0.0), 1.0)
+        vga.set(hi * float(V6_STRIDE - 32) + vgs * 0.25)
     left = st[S_LEFT:S_LEFT + 1]
     left.set(left - 1.0)
 
@@ -692,6 +716,7 @@ def _generate(m, pos, block, step, spec, chain, samp=None, debug=False):
     _arguments(b, body, mark, st, spec, block)
     b.end_loop(loop)
     ol.store(g.state[:S_HALT], st[:S_HALT])      # not the host's stop word
+    ol.store(g.state[V6_SLOTS], st[V6_SLOTS])      # (a 6-bit V group's words)
     if chain:              # tokens left: on to the next bucket's program (chain table)
         _chain(b, ptab_addr(g.addr, int(samp is not None)) + 8 * (pos.blocks + 1),
                cond=ol.minimum(left, 1.0))
@@ -734,6 +759,7 @@ def _generate_head(m, pos, block, step, spec, samp=None, debug=False):
     _token_end(b, g, st, pos, spec, block, samp, sink, tok, split=True)
     _arguments(b, body, mark, st, spec, block)
     ol.store(g.state[:S_HALT], st[:S_HALT])      # not the host's stop word
+    ol.store(g.state[V6_SLOTS], st[V6_SLOTS])      # (a 6-bit V group's words)
     left = st[S_LEFT:S_LEFT + 1]
     wrap = ol.minimum(st[S_TPOS:S_TPOS + 1], 1.0) * -16.0 + 16.0   # 16 bytes: the next bucket
     _chain(b, ptab2_addr(g.addr, int(samp is not None)) + 8 * (2 * pos.blocks),

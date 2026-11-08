@@ -118,10 +118,14 @@ class _Head:
         self.G = G
         self.k6 = getattr(kv, "kfmt", "int8") == "kv6"     # 6-bit K: three planes (KVDesc.k6)
         self.K = kv.k6(h) if self.k6 else kv.k(h)
-        self.VT, self.VS = kv.vt(h), kv.vscale(h)
+        self.v6 = getattr(kv, "vfmt", "int8") == "kv6"     # 6-bit V: three planes (KVDesc.v6)
+        self.kv, self.h = kv, h
+        self.VT = None if self.v6 else kv.vt(h)
+        self.VS = kv.vscale(h)
         self.m = ol.full([G], -1e30)
         self.l = ol.zeros([G])
-        self.acc = ol.zeros([G, self.VT.shape[0]])   # V's head_dim (q and K may be padded)
+        self.acc = ol.zeros([G, kv.dv if self.v6 else self.VT.shape[0]])   # V's head_dim
+        #                                                  (q and K may be padded)
         self.buf = {}                                # block index -> score buffer
         self.S = None                                # the hardware loop's score buffers
         self.rowmax = {}                             # masked block t0 -> its scores' row maxima
@@ -162,7 +166,10 @@ class _Head:
                 self.blocks[i] = (t0, n4)
                 self.masks[t0] = RowMasks([(0, G, n)])
         self.groups = max(0, (nfull + 1 - depth) // depth)
-        if self.VT.tiles is not None:            # V^T in tiles of tb tokens (KVDesc)
+        if self.v6:                              # 6-bit V^T: blocks of D tokens (KVDesc.v6)
+            if block % kv.D:
+                raise ol.CompileError(f"6-bit V: attention block {block} a multiple of D")
+        elif self.VT.tiles is not None:          # V^T in tiles of tb tokens (KVDesc)
             tb = self.VT.tiles[0]
             if tb % block:
                 raise ol.CompileError(f"attention block {block} must divide the V^T tile {tb}")
@@ -173,7 +180,7 @@ class _Head:
 def _kdot(st, t0, n, out, acc: bool = False, rowmax: bool = False):
     """q.K^T of tokens [t0, t0+n) into `out` (acc: added to it): one MM, or a 6-bit K's three
     TMM CQ2 GRQs (KVDesc.k6), adding up, the row maxima on the last."""
-    if not st.k6:
+    if not getattr(st, "k6", False):
         if acc:
             return ol.dot(st.qs, st.K[t0:t0 + n, :], acc=out, rowmax=rowmax)
         return ol.dot(st.qs, st.K[t0:t0 + n, :], out=out, rowmax=rowmax)
@@ -228,8 +235,16 @@ def _finish(st, s, t0, n):
         pp = ol.zeros([G, npad])
         pp[:, :n].set(p * vs[None, :])
         pq = ol.quantize(pp)
-    vt = st.VT.padded_cols(0, st.VT.shape[0], t0, npad, n)             # zero-padded P
-    ol.dot(pq, vt, acc=st.acc, acc_scale=alpha)                         # acc*alpha + P.V
+    if getattr(st, "v6", False):
+        # 6-bit V^T (KVDesc.v6): acc * alpha on the VPU (TMM GSC has no ASCALE), then P'.V's
+        # three plane sums (P' = P * S: each token's S folded as int8 V's scale above; its
+        # tokens past n are +0 there, whatever their codes)
+        st.acc.set(st.acc * alpha[:, None])
+        for vj in st.kv.v6(st.h, t0, npad):
+            ol.dot(pq, vj, acc=st.acc)
+    else:
+        vt = st.VT.padded_cols(0, st.VT.shape[0], t0, npad, n)         # zero-padded P
+        ol.dot(pq, vt, acc=st.acc, acc_scale=alpha)                     # acc*alpha + P.V
     st.m.set(m_new)                                           # the next block needs m first
     st.l.set(st.l * alpha + ol.sum(p, axis=1))                # off the critical path
 

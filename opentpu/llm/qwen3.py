@@ -39,7 +39,8 @@ from .. import quant as Q
 from .. import waits as WC
 from .. import language as ol
 from ..compiler import (Affine, CompileError, DevVar, KVDesc, QTensor, RunVar, Tensor, arg_words,
-                        Words, current, k_scale_bytes, kv6_k_bytes, trace_fit)
+                        Words, current, k_scale_bytes, kv6_k_bytes, kv6_v_bytes,
+                        trace_fit)
 from . import formats as FM
 from . import generate as G
 from . import rope_parameters
@@ -769,7 +770,17 @@ def _v_parts(v):
     return np.clip(np.rint(v / np.where(a == 0, 1, a / 127)), -127, 127), a[..., 0] / 127
 
 
-def _pv(pp, Vq, vs, D: int = 128, block: int | None = None, start: int = 0):
+def _v6_parts(v):
+    """V rows [..., d] as a 6-bit V cache holds them (QST Q6T: per token q = clamp(rne(x *
+    31/amax), -31, 31) over the whole row, S = amax/31): (q, S)."""
+    v = np.asarray(v, np.float32)
+    lead, d = v.shape[:-1], v.shape[-1]
+    q, S = F.quantize_q4(v.reshape(-1, d), 31)
+    return q.astype(np.float64).reshape(*lead, d), S.astype(np.float64).reshape(lead)
+
+
+def _pv(pp, Vq, vs, D: int = 128, block: int | None = None, start: int = 0,
+        exact: bool = False):
     """P.V as the device's flash attention takes it (kernels/attention.py _attend_heads): per
     attention block of `block` tokens (ATTN_BLOCK) the softmax numerators pp [T] times V's row
     scales vs [T] (folded in by QACT CSCALE), quantized as one QACT (the last block padded with
@@ -789,7 +800,10 @@ def _pv(pp, Vq, vs, D: int = 128, block: int | None = None, start: int = 0):
         seg[o:o + n] = pp[t0:t0 + n] * vs[t0:t0 + n]
         vt = np.zeros((npad, Vq.shape[-1]))
         vt[o:o + n] = Vq[t0:t0 + n]
-        out = out + Q.mx_matmul(_fake_q(seg, D), vt.T, None, I.MX_W[I.W8], D)
+        if exact:                                   # TMM (6-bit V): window 11, no weight offsets
+            out = out + Q.mx_matmul(_fake_q(seg, D), vt.T, None, 11, D)
+        else:
+            out = out + Q.mx_matmul(_fake_q(seg, D), vt.T, None, I.MX_W[I.W8], D)
         t0 += n
     return out
 
@@ -827,7 +841,8 @@ def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "i
     offsets per D/4; the down projection's in its F chunks, kernels.mlp.down_chunk of a slice's
     F), int8 K (per token: ROW at d = D, else an offset per D-block) and V (per token), P per
     attention block with V's per-token scales folded in (_pv), and MM's window's drops. kv
-    "kv6": the 6-bit K (_fake_k6; TMM CQ's exact integer sums, no window).
+    "kv6": the 6-bit K (_fake_k6; TMM CQ's integer sums, window 11); "k6v6": and the 6-bit V
+    (_v6_parts).
     Separates quantization error from kernel bugs. steer: (vectors [L, H], words) activation
     steering after each attention and MLP (kernels/steering.py reference)."""
     d, G = spec.head_dim, spec.n_q // spec.n_kv
@@ -873,20 +888,21 @@ def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "i
                 q, k = norm(q, qk[i][0]), norm(k, qk[i][1])
             if i not in spec.nope:
                 q, k = rot(q), rot(k)
-            Kc[i].append((_fake_k6(k, D), None) if kv == "kv6" else _fake_k(k, D))
-            Vc[i].append(_v_parts(v))
+            Kc[i].append((_fake_k6(k, D), None) if kv != "int8" else _fake_k(k, D))
+            Vc[i].append(_v6_parts(v) if kv == "k6v6" else _v_parts(v))
             K = np.stack([a for a, _ in Kc[i]], 1)
             dK = None if Kc[i][0][1] is None else np.stack([b for _, b in Kc[i]], 1)
             Vq, Vs = (np.stack(z, 1) for z in zip(*Vc[i]))
             o = np.zeros((spec.n_q, d))
             for hq in range(spec.n_q):
-                if kv == "kv6":
-                    sc = np.asarray(_fake_q(q[hq] / math.sqrt(d), D)) @ K[hq // G].T
+                if kv != "int8":
+                    sc = Q.mx_matmul(_fake_q(q[hq] / math.sqrt(d), D), K[hq // G], None, 11,
+                                     D)                 # TMM (6-bit K): window 11
                 else:
                     sc = _qk(_fake_q(q[hq] / math.sqrt(d), D), K[hq // G], None if dK is None
                              else dK[hq // G], D)
                 pp = np.exp(sc - sc.max())
-                o[hq] = _pv(pp, Vq[hq // G], Vs[hq // G], D) / pp.sum()
+                o[hq] = _pv(pp, Vq[hq // G], Vs[hq // G], D, exact=kv == "k6v6") / pp.sum()
             x = x + w(p + "self_attn.o_proj.weight") @ _fake_q(o.reshape(-1), D)
             if steer is not None:
                 x = ST.reference(x, steer[0][i], steer[1], ST.ATTN)
@@ -960,11 +976,14 @@ class Image(EmbedHost):
         spec.check(cfg)
         import os
         kv = kv if kv is not None else os.environ.get("OTPU_KV", "int8") or "int8"
-        if kv not in ("int8", "kv6"):
-            raise ValueError(f"KV cache format {kv!r}: int8 or kv6")
-        if kv == "kv6" and not (getattr(cfg, "QST6", False) and getattr(cfg, "TCQ", False)
+        if kv not in ("int8", "kv6", "k6v6"):
+            raise ValueError(f"KV cache format {kv!r}: int8, kv6 (6-bit K) or k6v6 (6-bit K "
+                             f"and V)")
+        if kv == "k6v6" and -(-spec.head_dim // cfg.D) * cfg.D != 128:
+            raise ValueError("a 6-bit V cache (k6v6): head dim 128 (RunPos.vga's stride)")
+        if kv != "int8" and not (getattr(cfg, "QST6", False) and getattr(cfg, "TCQ", False)
                                 and getattr(cfg, "TGRQ", False)):
-            raise ValueError("a 6-bit K cache (kv6) needs Config.QST6, TCQ and TGRQ (r8)")
+            raise ValueError(f"a 6-bit KV cache ({kv}) needs Config.QST6, TCQ and TGRQ (r8)")
         self.kv = kv
         if cap % cfg.D:
             raise ValueError("KV capacity must be a multiple of D")
@@ -995,6 +1014,9 @@ class Image(EmbedHost):
         self.io = {"x": b.alloc(4 * H * R), "cos": b.alloc(2 * rd * R),
                    "sin": b.alloc(2 * rd * R), "gf": b.alloc(4 * H),
                    "logits": b.alloc(4 * spec.vocab * R)}
+        self.v6planes = ATTN_BLOCK // D
+        if kv == "k6v6":                    # the GRQ scale planes of P'.V (fp32 1.0, KVDesc.v6)
+            self.io["v6ones"] = b.alloc(4 * dk * self.v6planes)
         from .prefill import tile_scratch   # a tiled run's attention outputs, a part at a time
         if tile_scratch(spec, layer_runs=False):    # (tiled.py; a dense image's)
             self.io["o"] = b.alloc(4 * cfg.act_rows * self.nq_loc * d)
@@ -1026,11 +1048,19 @@ class Image(EmbedHost):
             L["wd"] = [(lb.alloc(self.h_loc * rb(C, mf["wd"])),
                         lb.alloc(self.h_loc * Q.scale_bytes(C, mf["wd"], D)))
                        for _ in range(F_ // C)]
-            if kv == "kv6":                         # K's planes and S planes (KVDesc.k6)
+            if kv != "int8":                        # K's planes and S planes (KVDesc.k6)
                 kpb, ksb = kv6_k_bytes(cap, dk, D)
-                L["kvs"] = [[{"kp": lb.alloc(kpb), "ks": lb.alloc(ksb),
-                              "vt": lb.alloc(dk * cap), "vs": lb.alloc(4 * cap)}
-                             for _ in range(self.nkv_loc)] for _ in range(batch)]
+                vpb, vgb = kv6_v_bytes(cap, dk, D)
+
+                def head6():
+                    e = {"kp": lb.alloc(kpb), "ks": lb.alloc(ksb)}
+                    if kv == "k6v6":                # V^T's planes, the group's rows (KVDesc.v6)
+                        e.update(vp=lb.alloc(vpb), vg=lb.alloc(vgb))
+                    else:
+                        e["vt"] = lb.alloc(dk * cap)
+                    e["vs"] = lb.alloc(4 * cap)
+                    return e
+                L["kvs"] = [[head6() for _ in range(self.nkv_loc)] for _ in range(batch)]
             else:
                 L["kvs"] = [[{"k": lb.alloc(cap * dk),
                               "ks": lb.alloc(cap * k_scale_bytes(dk, D)),
@@ -1057,8 +1087,9 @@ class Image(EmbedHost):
                 for e in range(len(unit)):
                     self.loc[first + it * len(unit) + e] = (base, us, it, offs[e])
             b.next = base + reps * us
-        head = (sum(kv6_k_bytes(cap, dk, D)) if kv == "kv6" else
-                cap * dk + cap * k_scale_bytes(dk, D)) + dk * cap + 4 * cap
+        head = (sum(kv6_k_bytes(cap, dk, D)) if kv != "int8" else
+                cap * dk + cap * k_scale_bytes(dk, D)) + \
+            (sum(kv6_v_bytes(cap, dk, D)) if kv == "k6v6" else dk * cap) + 4 * cap
         self.kv_bytes = spec.layers * self.nkv_loc * head         # per sequence
         self.head = (b.alloc(self.v_loc * Q.row_bytes(H, self.head_format, D)),
                      b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)))
@@ -1099,6 +1130,10 @@ class Image(EmbedHost):
         def put(s, addr, a):
             v = np.ascontiguousarray(a).view(np.uint8).reshape(-1)
             imgs[s][addr:addr + v.size] = v
+
+        if "v6ones" in self.io:
+            for s_ in range(S):
+                put(s_, self.io["v6ones"], np.ones(self.dk * self.v6planes, np.float32))
 
         qb = QC.Batch()                 # the matrices, quantized in worker processes
 
@@ -1255,7 +1290,9 @@ class Image(EmbedHost):
                             parts[0].srs, D, parts=parts, pw=C, wf=parts[0].wf)
             ns.kvs = [KVDesc({sid + j * cfg.S: {k: off + v for k, v in r.items()}
                               for j, r in enumerate(heads)}, self.cap, self.dk, D, cfg.S, sid, dv=d,
-                             kfmt=self.kv)
+                             kfmt="int8" if self.kv == "int8" else "kv6",
+                             vfmt="kv6" if self.kv == "k6v6" else "int8",
+                             vones=self.io.get("v6ones"), vplanes=self.v6planes)
                       for heads in lofs["kvs"]]
             ns.kv = ns.kvs[0]
             ns.steer = None
@@ -1331,6 +1368,9 @@ def _load_opt(desc):
     return None if desc is None else ol.load(desc)
 
 
+V6_STRIDE = 3 * 128 * 128 // 4     # a 6-bit V^T's D-block of three planes, head dim 128
+
+
 class RunPos:
     """The decode position as a run-time value (docs/isa.md "Arguments"): one program serves
     every position p of a bucket, lo <= p < blocks * block, whose attention spans `blocks`
@@ -1350,12 +1390,21 @@ class RunPos:
         self.t0 = (blocks - 1) * block
         self.tpos = RunVar("tpos", bound=min(block, cap - self.t0))
         self.pos = self.tpos + self.t0
+        # a 6-bit V append's group (KVDesc.v6_group): the slot p mod 4, the group's D-block in
+        # the bucket's last block and its byte ((p - p mod 4) mod D) / 4 (values)
+        # (one run-time value an address: vga = the block's plane offset + the byte, at the
+        # KVDesc.v6_group stride of a 128-wide head, V6_STRIDE; Image k6v6 needs head dim 128)
+        self.vq, self.vgs = RunVar("vq", bound=4), RunVar("vgs", bound=block)
+        self.vga = RunVar("vga", bound=max(1, block // 128) * V6_STRIDE)
+        self.v6pos = (self.vq, self.vgs + self.t0, Affine(self.t0 // 128), self.vga)
         # the mask row of a block at t0' starts at entry cap - 1 - p + t0' of the table
         self.bucket = Bucket(blocks, Affine(zmask + 4 * (cap - 1 - self.t0)) + self.tpos * -4)
 
     @staticmethod
     def values(token: int, p: int, K: int = 1, block: int = ATTN_BLOCK) -> dict:
-        return {"tpos": p % block, "tok": token, "ring": (p + 1) % K}
+        g = p - p % 4                           # (D = 128: the 6-bit V group's block, byte)
+        return {"tpos": p % block, "tok": token, "ring": (p + 1) % K, "vq": p % 4,
+                "vgs": g % block, "vga": (g % block) // 128 * V6_STRIDE + (g % 128) // 4}
 
     def offset(self, r: int) -> "RunPos":
         """Row r of a run of rows from this position, in its attention block (a layer-major
@@ -1440,7 +1489,8 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
         def emit():
             # the head's V^T append (byte-strided, the quantizer's slowest store) just ahead of
             # its queries: head j's scores start after K and V_0..V_j, not after all V appends
-            ol.kv_append(kv, heads[j], kpos, None, vh[j:j + 1, :])
+            ol.kv_append(kv, heads[j], kpos, None, vh[j:j + 1, :],
+                         v6pos=pos.v6pos if isinstance(pos, RunPos) else None)
             return _rope_padded(_norm_heads(qps[j].reshape(G, d), qn, eps), c, s_)
         return emit
 

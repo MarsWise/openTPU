@@ -480,7 +480,57 @@ def static_range(*args):
 
 
 # ---- KV cache
-def kv_append(kv: KVDesc, h: int, pos, k: Tile | None, v: Tile | None) -> None:
+def _kv6_append_v(kv: KVDesc, h: int, pos, v: Tile, v6pos) -> None:
+    """V rows [n, d] at token `pos` of a 6-bit V cache (KVDesc vfmt kv6): QST Q6T writes a
+    group of four tokens' byte whole, so each group is written from its first token. A group
+    the rows start inside (or a run-time position: one row, v6pos = (slot, g, gb, go), the
+    token's slot pos mod 4, its group's first token g, D-block gb and byte (g mod D) / 4) goes
+    through the group's fp32 rows in DRAM (KVDesc.v6_rows: the row is stored at its slot, the
+    four rows loaded, all re-quantized: each token's codes and S depend on its row alone); a
+    group the rows start at is written from the rows themselves, and its rows are kept in the
+    group's DRAM rows when the group is not complete."""
+    b = current()
+    D, d = kv.D, kv.d
+    if v.cols != d:
+        raise CompileError(f"kv_append: V rows of {v.cols} into a 6-bit cache of d {d}")
+    grows = kv.v6_rows(h)
+
+    def qst_group(t, dst, sdst, ps):
+        for j in builtins.range(3):
+            b.store_quantized(t, dst + j * ps, sdst, 1, D // 4, row_scale=True, q6=j, q6t=True)
+
+    def via_rows(vr, slot, g, gb, go):
+        store(Tensor(grows.base + Affine.of(slot) * (4 * d), (1, d), (d, 1)), vr)
+        dst, ps, sdst = kv.v6_group(h, g, gb, go)    # (go: the byte, or the block and byte)
+        qst_group(load(grows), dst, sdst, ps)
+
+    if not isinstance(pos, int):
+        p = Affine.of(pos)
+        if not p.terms:
+            pos = p.const
+        else:
+            if v6pos is None or v.rows != 1:
+                raise CompileError("a 6-bit V append at a run-time token: one row and v6pos "
+                                   "(slot, group start, its block, its byte)")
+            via_rows(v, *v6pos)
+            return
+    r0 = 0
+    while r0 < v.rows:
+        t = pos + r0
+        g, slot = t - t % 4, t % 4
+        n = min(v.rows - r0, 4 - slot)
+        if slot:                                    # the group started before these rows
+            for i in builtins.range(n):
+                via_rows(v[r0 + i:r0 + i + 1, :], slot + i, g, g // D, (g % D) // 4)
+        else:
+            dst, ps, sdst = kv.v6_group(h, g, g // D, (g % D) // 4)
+            qst_group(v[r0:r0 + n, :], dst, sdst, ps)
+            if n < 4:                               # the group goes on in a later append
+                store(Tensor(grows.base, (n, d), (d, 1)), v[r0:r0 + n, :])
+        r0 += n
+
+
+def kv_append(kv: KVDesc, h: int, pos, k: Tile | None, v: Tile | None, v6pos=None) -> None:
     """Quantize and append rows of k, v ([n, d]) at token position `pos` of KV head `h` (either
     may be None: only the other is appended).
 
@@ -507,6 +557,9 @@ def kv_append(kv: KVDesc, h: int, pos, k: Tile | None, v: Tile | None) -> None:
         b.store_quantized(k, kd.data + pos * kd.rs, kd.scale + pos * kd.srs, kd.rs, 1,
                           row_scale=kd.rsc)
     if v is None:
+        return
+    if getattr(kv, "vfmt", "int8") == "kv6":
+        _kv6_append_v(kv, h, pos, v, v6pos)
         return
     vt = kv.vt(h)
     vs = kv.vscale(h)

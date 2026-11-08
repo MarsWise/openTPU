@@ -127,7 +127,7 @@ def test_kv6_refusals(W, monkeypatch):
     monkeypatch.setenv("OTPU_KV", "kv6")
     with pytest.raises(ValueError, match="QST6"):
         SPEC.image(device_config(SPEC, 256, TCQ=True, TGRQ=True, TGSC=True), 256)
-    with pytest.raises(ValueError, match="int8 or kv6"):
+    with pytest.raises(ValueError, match="int8, kv6"):
         SPEC.image(device_config(SPEC, 256, **R8), 256, kv="kv5")
     kv = KVDesc({0: {"kp": 0, "ks": 0, "vt": 0, "vs": 0}}, 256, 128, 128, 1, 0, kfmt="kv6")
     with pytest.raises(CompileError, match="kv6"):
@@ -154,6 +154,96 @@ def test_kv6_token_on_board_rtl_is_bit_exact(have_verilator, W, monkeypatch):
     toks = [int(t) for t in np.random.default_rng(5).integers(0, 1000, 262)]
     eng = Engine(SPEC, W, cap=512, cfg=cfg, resident=True)
     assert eng.image.kv == "kv6"
+    eng.prefill(toks[:-1])
+    n, isa = eng.image.nbytes, eng.backend
+    rtl = RtlBackend(eng.cfg, [s.dram[:n] for s in isa.machine.slices],
+                     uarch=rtlsim.BOARD_UARCH, axi=True, boot=True)
+    want = eng.step(toks[-1])
+    eng.backend, eng.pos = rtl, eng.pos - 1
+    got = eng.step(toks[-1])
+    assert np.array_equal(want.view(np.uint32), got.view(np.uint32))
+    assert np.array_equal(isa.machine.slices[0].dram[:n], rtl.drams[0][:n])
+
+
+# ---- 6-bit K and V (Image kv="k6v6"): V^T as QST Q6T's planes, a group of four tokens a byte
+# written from its first token (the group's fp32 rows in DRAM), P'.V as three TMM CQ2 GRQs
+
+def test_k6v6_decode_follows_the_6bit_emulation(W, monkeypatch):
+    toks = [int(t) for t in np.random.default_rng(0).integers(0, 1000, 10)]
+    eng = _engine(W, "k6v6", monkeypatch=monkeypatch)
+    assert eng.image.kv == "k6v6"
+    dev = np.array([eng.step(t) for t in toks])
+    emu = emulated_logits(SPEC, W, toks, kv="k6v6")
+    assert _cos(dev, emu).min() > 0.9995
+    assert (dev.argmax(-1) == emu.argmax(-1)).all()
+    prog = eng.backend.machine.slices[0].prog
+    assert len([p for p in prog if p.op == I.QST and "kv6 V store" in p.comment]) == 3
+    assert len([p for p in prog if p.op == I.TMM and p.w[3] & I.TMM_GRQ]) == 6
+    k6 = _engine(W, "kv6", monkeypatch=monkeypatch)
+    assert eng.image.kv_bytes < k6.image.kv_bytes
+
+
+def test_k6v6_resident_prefill_and_generate_are_bit_exact(W, monkeypatch):
+    """The resident decode (the group's slot, first token and byte as run arguments), a
+    chunked prefill (groups the chunk starts inside go through the group's rows) and the
+    on-card generate loop (the group words stepped on the device, across the bucket boundary
+    256) against the per-position programs / host steps."""
+    toks = [int(t) for t in np.random.default_rng(1).integers(0, 1000, 262)]
+    a = _engine(W, "k6v6", cap=512, monkeypatch=monkeypatch, resident=True)
+    b = _engine(W, "k6v6", cap=512, monkeypatch=monkeypatch)
+    la, lb = [], []
+    for t in toks[:3]:
+        la.append(a.step(t))
+        lb.append(b.step(t))
+    pa, pb = a.prefill(toks[3:252]), b.prefill(toks[3:252])
+    assert np.array_equal(np.asarray(pa).view(np.uint32), np.asarray(pb).view(np.uint32))
+    for t in toks[252:]:
+        la.append(a.step(t))
+        lb.append(b.step(t))
+    la, lb = np.array(la), np.array(lb)
+    assert np.array_equal(la.view(np.uint32), lb.view(np.uint32))
+    emu = emulated_logits(SPEC, W, toks, kv="k6v6")
+    sel = np.concatenate([emu[:3], emu[252:]])
+    assert _cos(la, sel).min() > 0.999 and (la.argmax(-1) == sel.argmax(-1)).all()
+    for pre in (20, 250):
+        e = _engine(W, "k6v6", cap=512, monkeypatch=monkeypatch, resident=True)
+        e.prefill(toks[:pre - 1])
+        card = e.generate_card(toks[pre - 1], 12, stop_ids=())
+        f = _engine(W, "k6v6", cap=512, monkeypatch=monkeypatch, resident=True)
+        f.prefill(toks[:pre - 1])
+        host, t = [], toks[pre - 1]
+        for _ in range(12):
+            t = int(np.argmax(f.step(t)))
+            host.append(t)
+        assert card == host
+
+
+def test_k6v6_refusals(W, monkeypatch):
+    """A 6-bit V needs head dim 128 (the run-time group byte's stride) and has no int8 V^T."""
+    from dataclasses import replace
+    monkeypatch.setenv("OTPU_KV", "k6v6")
+    with pytest.raises(ValueError, match="head dim 128"):
+        replace(SPEC, head_dim=256).image(device_config(replace(SPEC, head_dim=256), 256,
+                                                        **R8), 256, kv="k6v6")
+    kv = KVDesc({0: {"kp": 0, "ks": 0, "vp": 0, "vg": 0, "vs": 0}}, 256, 128, 128, 1, 0,
+                kfmt="kv6", vfmt="kv6", vones=4096, vplanes=2)
+    with pytest.raises(CompileError, match="kv6"):
+        kv.vt(0)
+    assert len(kv.v6(0, 0, 256)) == 3
+    with pytest.raises(CompileError, match="D-blocks"):
+        kv.v6(0, 0, 384)
+
+
+def test_k6v6_token_on_board_rtl_is_bit_exact(have_verilator, W, monkeypatch):
+    """A resident token at position 261 over 6-bit K and V on the board RTL == ISA: the logits
+    and the whole DRAM image (the K and V planes, the group's rows)."""
+    from opentpu import rtlsim
+    from opentpu.isasim import board_config
+    from opentpu.llm.rtl_backend import RtlBackend
+    monkeypatch.setenv("OTPU_KV", "k6v6")
+    cfg = board_config(DRAM_BYTES=1 << 26, MCOLS=8, **R8)
+    toks = [int(t) for t in np.random.default_rng(5).integers(0, 1000, 262)]
+    eng = Engine(SPEC, W, cap=512, cfg=cfg, resident=True)
     eng.prefill(toks[:-1])
     n, isa = eng.image.nbytes, eng.backend
     rtl = RtlBackend(eng.cfg, [s.dram[:n] for s in isa.machine.slices],
