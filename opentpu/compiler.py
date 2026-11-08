@@ -472,7 +472,7 @@ class QTensor:
                            self.scale + r0 * 4 + kp * self.srs, (nr, nc), self.rs, self.srs,
                            self.D, wf=self.wf, ternary=True, gsc=True, grq=True,
                            hsigns=None if self.hsigns is None else self.hsigns + c0 * 4,
-                           hblock=self.hblock)
+                           hblock=self.hblock, cq=self.cq, lut=self.lut)
         if self.ternary:
             bpc = 5 if self.dense else 8 if self.binary else 2 if self.cq >= 3 else 4
             data = self.data + r0 * self.rs + c0.div_exact(bpc * self.D) * self.D
@@ -549,6 +549,17 @@ def k_scale_bytes(d: int, D: int) -> int:
     return Q.scale_bytes(d, "int8", D, rsc=d == D)
 
 
+KV6_LUTS = ((0, 1, 2, 3), (0, 4, 8, 12), (-32, -16, 0, 16))   # kernels/kv6.LUTS: q = sum_j LUT_j
+
+
+def kv6_k_bytes(cap: int, d: int, D: int) -> tuple[int, int]:
+    """Bytes of a 6-bit K cache head (KVDesc kfmt "kv6"): its three 2-bit planes a D-block
+    (kernels/kv6.py: plane (3k + j) at (3k + j) * cap*D/4), and its S planes (one fp32 a
+    token a block, cap words a block)."""
+    kb = d // D
+    return 3 * kb * cap * D // 4, kb * cap * 4
+
+
 class KVDesc:
     """Per-slice view of a KV cache whose heads are dealt round-robin over slices.
 
@@ -559,12 +570,23 @@ class KVDesc:
     token's column stays within a few DRAM rows at any capacity); one V scale per token [cap]
     (folded into P before P.V). With head_dim < D the rows are zero-padded to d = D and
     dv = head_dim: P.V reads only the first dv rows of V^T.
+
+    kfmt "kv6" (Config.QST6 + TCQ + TGRQ): K is 6-bit, kernels/kv6.py's layout -- per head "kp"
+    the three 2-bit planes of every D-block (TMM CQ2's GRQ layout, four tokens a D-byte chunk)
+    and "ks" one fp32 S a (token, block); q.K^T is three TMM CQ2 GRQs (k6), each token's
+    row appended on its own (QST Q6, one plane each). V stays int8 (V^T as above).
     """
 
     def __init__(self, heads: dict, cap: int, d: int, D: int, S: int, sid: int,
-                 dv: int | None = None):
+                 dv: int | None = None, kfmt: str = "int8"):
         self.heads, self.cap, self.d, self.D, self.S, self.sid = heads, cap, d, D, S, sid
         self.dv = d if dv is None else dv
+        if kfmt not in ("int8", "kv6"):
+            raise CompileError(f"KV cache K format {kfmt!r}: int8 or kv6")
+        if kfmt == "kv6" and (cap % 4 or d % D or D != 128):
+            raise CompileError(f"6-bit K cache: cap % 4 == 0, d a multiple of D = 128 "
+                               f"(cap {cap}, d {d}, D {D})")
+        self.kfmt = kfmt
 
     def owned_heads(self, n_kv_heads: int):
         return builtins.range(self.sid, n_kv_heads, self.S)
@@ -574,10 +596,34 @@ class KVDesc:
             raise CompileError(f"KV head {h} does not live on slice {self.sid}")
         return self.heads[h]
 
+    def k6(self, h: int) -> list:
+        """K [cap, d] of a 6-bit cache as its three planes: [QTensor j] TMM CQ2 GRQ matrices
+        (LUT KV6_LUTS[j], plane j of block k at kp + (3k + j) * cap*D/4, S plane k at ks +
+        k * 4cap) whose dots add up to q.K^T (q = c0 + 4 c1 + 16 c2 - 32)."""
+        if self.kfmt != "kv6":
+            raise CompileError("k6: not a 6-bit K cache")
+        e = self._h(h)
+        ps = self.cap * self.D // 4
+        return [QTensor(Affine.of(e["kp"]) + j * ps, Affine.of(e["ks"]), (self.cap, self.d),
+                        3 * ps, 4 * self.cap, self.D, wf=I.W8, ternary=True, gsc=True,
+                        grq=True, cq=2, lut=KV6_LUTS[j]) for j in builtins.range(3)]
+
+    def k6_store(self, h: int, j: int, pos) -> tuple:
+        """(plane j of block 0's address of token `pos`'s row, its S's, the next block's
+        plane stride, the next block's S plane stride) -- QST Q6's destinations."""
+        e = self._h(h)
+        ps = self.cap * self.D // 4
+        pos = Affine.of(pos)
+        return (Affine.of(e["kp"]) + j * ps + pos * (self.D // 4), Affine.of(e["ks"]) + pos * 4,
+                3 * ps, 4 * self.cap)
+
     def k(self, h: int) -> QTensor:
         """K [cap, d]: int8 rows, a token's scale row per row (k_scale_bytes): at d = D its
         fp32 scale alone (QST ROW, MM RSC), else an int8 scale row (QST: the token's S and an
         offset per block)."""
+        if self.kfmt != "int8":
+            raise CompileError(f"this K cache is {self.kfmt}: its planes are k6(h) (an int8 K "
+                               f"path does not read it)")
         e = self._h(h)
         return QTensor(Affine.of(e["k"]), Affine.of(e["ks"]), (self.cap, self.d), self.d,
                        k_scale_bytes(self.d, self.D), self.D, rsc=self.d == self.D)
@@ -2315,9 +2361,20 @@ class Builder:
         return out
 
     def store_quantized(self, x: Tile, dst: Affine, sdst: Affine, drs: int, es: int,
-                        row_scale: bool, half: bool = False) -> None:
+                        row_scale: bool, half: bool = False, q6: int | None = None) -> None:
         self.check_live(x)
         D = self.cfg.D
+        if q6 is not None:          # QST Q6 (kernels/kv6.py): plane q6 of every row, a block
+            if not getattr(self.cfg, "QST6", False):
+                raise CompileError("QST Q6 (a 6-bit K cache) requires Config.QST6 / new firmware")
+            if x.cols != D or not row_scale or es != 1 or drs != D // 4:
+                raise CompileError("QST Q6: one D-block a store, ROW, es 1, D/4 bytes a row")
+            rb, dimm = self.addr(dst)
+            rc, simm = self.addr(sdst)
+            rs = x.rs if len(x.shape) == 2 else x.cols
+            self.emit(I.qst(x.base, dimm, simm, x.rows, 1, rs, drs, 1, row=True, q6=q6,
+                            rb=rb, rc=rc, comment=f"kv6 K store plane {q6}"))
+            return
         if x.cols % D:
             raise CompileError("quantized stores need a multiple of D elements per row")
         rb, dimm = self.addr(dst)

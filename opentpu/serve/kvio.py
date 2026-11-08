@@ -68,6 +68,9 @@ def kv_arrays(image, seq: int = 0) -> list[Array]:
         kv = kvs[seq]
         if kv.cap != image.cap:
             continue
+        if getattr(kv, "kfmt", "int8") != "int8":
+            raise NotImplementedError(f"saving / restoring a {kv.kfmt} KV cache (its K planes) "
+                                      f"is not implemented: run with the int8 KV cache")
         for h in sorted(kv.heads):
             e = kv.heads[h]
             k = _static(e["k"])

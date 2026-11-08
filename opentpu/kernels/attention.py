@@ -116,7 +116,9 @@ class _Head:
         else:
             self.qs = ol.quantize(qh * ol.full([d], scale)[None, :])
         self.G = G
-        self.K, self.VT, self.VS = kv.k(h), kv.vt(h), kv.vscale(h)
+        self.k6 = getattr(kv, "kfmt", "int8") == "kv6"     # 6-bit K: three planes (KVDesc.k6)
+        self.K = kv.k6(h) if self.k6 else kv.k(h)
+        self.VT, self.VS = kv.vt(h), kv.vscale(h)
         self.m = ol.full([G], -1e30)
         self.l = ol.zeros([G])
         self.acc = ol.zeros([G, self.VT.shape[0]])   # V's head_dim (q and K may be padded)
@@ -145,6 +147,20 @@ class _Head:
             nfull, tail = divmod(seq_len, block)
             self.blocks = [(i * block, block) for i in range(nfull)] + \
                 ([(nfull * block, tail)] if tail else [])
+        if self.k6:
+            # TMM GRQ reads four cache rows a chunk: a block of n % 4 tokens scores n4 = n
+            # rounded up, the n4 - n past it -inf (a RowMasks fill: s + -inf = -inf), and P.V
+            # takes them as tokens of weight +0 (the cache's rows there are finite: written
+            # tokens or zeros)
+            for i, (t0, n) in enumerate(self.blocks):
+                if n % 4 == 0:
+                    continue
+                if t0 in self.masks or (self.masked is not None and self.masked[0] == t0):
+                    raise ol.CompileError(f"6-bit K: a masked block of {n} tokens (a multiple "
+                                          f"of 4 needed)")
+                n4 = -(-n // 4) * 4
+                self.blocks[i] = (t0, n4)
+                self.masks[t0] = RowMasks([(0, G, n)])
         self.groups = max(0, (nfull + 1 - depth) // depth)
         if self.VT.tiles is not None:            # V^T in tiles of tb tokens (KVDesc)
             tb = self.VT.tiles[0]
@@ -152,6 +168,21 @@ class _Head:
                 raise ol.CompileError(f"attention block {block} must divide the V^T tile {tb}")
             if (depth * block) % tb:             # a loop step must be whole tiles
                 self.groups = 0
+
+
+def _kdot(st, t0, n, out, acc: bool = False, rowmax: bool = False):
+    """q.K^T of tokens [t0, t0+n) into `out` (acc: added to it): one MM, or a 6-bit K's three
+    TMM CQ2 GRQs (KVDesc.k6), adding up, the row maxima on the last."""
+    if not st.k6:
+        if acc:
+            return ol.dot(st.qs, st.K[t0:t0 + n, :], acc=out, rowmax=rowmax)
+        return ol.dot(st.qs, st.K[t0:t0 + n, :], out=out, rowmax=rowmax)
+    for j, Kj in enumerate(st.K):
+        if acc or j:
+            ol.dot(st.qs, Kj[t0:t0 + n, :], acc=out, rowmax=rowmax and j == 2)
+        else:
+            ol.dot(st.qs, Kj[t0:t0 + n, :], out=out)
+    return out
 
 
 def _scores(st, t0, n, out):
@@ -166,18 +197,18 @@ def _scores(st, t0, n, out):
             row = bk.row(t0, n) if bk.add is None else bk.add
     if isinstance(row, Additive):                   # the mask tile, then q.K^T added
         ol.load(row.tile(st.G, n), out=out)
-        ol.dot(st.qs, st.K[t0:t0 + n, :], acc=out, rowmax=True)
+        _kdot(st, t0, n, out, acc=True, rowmax=True)
         return out
     if isinstance(row, (RowMasks, RowTiles)):       # built in place, then q.K^T added
         row.fill(out, n)
-        ol.dot(st.qs, st.K[t0:t0 + n, :], acc=out, rowmax=True)
+        _kdot(st, t0, n, out, acc=True, rowmax=True)
         return out
     if row is not None:
-        ol.dot(st.qs, st.K[t0:t0 + n, :], out=out)
+        _kdot(st, t0, n, out)
         s = ol.minimum(out, ol.load(row)[None, :])
         st.rowmax[t0] = ol.max(s, axis=1)
         return s
-    ol.dot(st.qs, st.K[t0:t0 + n, :], out=out, rowmax=True)
+    _kdot(st, t0, n, out, rowmax=True)
     return out
 
 

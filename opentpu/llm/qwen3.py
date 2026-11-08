@@ -39,7 +39,7 @@ from .. import quant as Q
 from .. import waits as WC
 from .. import language as ol
 from ..compiler import (Affine, CompileError, DevVar, KVDesc, QTensor, RunVar, Tensor, arg_words,
-                        Words, current, k_scale_bytes, trace_fit)
+                        Words, current, k_scale_bytes, kv6_k_bytes, trace_fit)
 from . import formats as FM
 from . import generate as G
 from . import rope_parameters
@@ -145,9 +145,10 @@ class Spec:
     def image(self, cfg: Config, cap: int, batch: int = 1, rows: int = 1,
               wformat: str = "int8", head_format: str | None = None,
               lookup: bool = False, embed_host: bool | None = None,
-              formats: str | None = None, steering: bool = False) -> "Image":
+              formats: str | None = None, steering: bool = False,
+              kv: str | None = None) -> "Image":
         return Image(self, cfg, cap, batch, rows, wformat, head_format, lookup, embed_host,
-                     formats, steering)
+                     formats, steering, kv)
 
 
 def finite(v: np.ndarray, name: str) -> np.ndarray:
@@ -744,6 +745,16 @@ def _fake_k(k, D: int = 128):
     return np.asarray(a).view(np.ndarray), a.da
 
 
+def _fake_k6(k, D: int = 128):
+    """K rows [..., d] as a 6-bit cache holds them (QST Q6, kernels/kv6.py): per (row, D-block)
+    q = clamp(rne(x * 31/amax), -31, 31) and S = amax/31 (fp32, as the quantizer's), q * S."""
+    k = np.asarray(k, np.float32)
+    lead, d = k.shape[:-1], k.shape[-1]
+    b = k.reshape(-1, D)
+    q, S = F.quantize_q4(b, 31)
+    return (q.astype(np.float64) * S.astype(np.float64)[:, None]).reshape(*lead, d)
+
+
 def _qk(qq, K, dw, D: int = 128):
     """The scores q.K^T of a query row qq (an MXAct, _fake_q) against K rows [T, d] (_fake_k's
     values, dw [T, d / (D/8)] or None): MM's sums with the int8 window's drops."""
@@ -809,13 +820,14 @@ def weight_kind(n: str) -> tuple:
 
 def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "int8",
                     head_format: str | None = None, formats: str | None = None,
-                    S: int = 1, steer: tuple | None = None) -> np.ndarray:
+                    S: int = 1, steer: tuple | None = None, kv: str = "int8") -> np.ndarray:
     """float64 decode that applies openTPU's quantization points but none of its rounding: the
     weights in their MXU formats (`wformat`, `head_format`, `formats` as in Image), every MM
     input quantized as QACT does on S slices (the card's 1; the design's 2: a row scale and
     offsets per D/4; the down projection's in its F chunks, kernels.mlp.down_chunk of a slice's
     F), int8 K (per token: ROW at d = D, else an offset per D-block) and V (per token), P per
-    attention block with V's per-token scales folded in (_pv), and MM's window's drops.
+    attention block with V's per-token scales folded in (_pv), and MM's window's drops. kv
+    "kv6": the 6-bit K (_fake_k6; TMM CQ's exact integer sums, no window).
     Separates quantization error from kernel bugs. steer: (vectors [L, H], words) activation
     steering after each attention and MLP (kernels/steering.py reference)."""
     d, G = spec.head_dim, spec.n_q // spec.n_kv
@@ -861,15 +873,18 @@ def emulated_logits(spec: Spec, W: dict, tokens, D: int = 128, wformat: str = "i
                 q, k = norm(q, qk[i][0]), norm(k, qk[i][1])
             if i not in spec.nope:
                 q, k = rot(q), rot(k)
-            Kc[i].append(_fake_k(k, D))
+            Kc[i].append((_fake_k6(k, D), None) if kv == "kv6" else _fake_k(k, D))
             Vc[i].append(_v_parts(v))
             K = np.stack([a for a, _ in Kc[i]], 1)
             dK = None if Kc[i][0][1] is None else np.stack([b for _, b in Kc[i]], 1)
             Vq, Vs = (np.stack(z, 1) for z in zip(*Vc[i]))
             o = np.zeros((spec.n_q, d))
             for hq in range(spec.n_q):
-                sc = _qk(_fake_q(q[hq] / math.sqrt(d), D), K[hq // G], None if dK is None
-                         else dK[hq // G], D)
+                if kv == "kv6":
+                    sc = np.asarray(_fake_q(q[hq] / math.sqrt(d), D)) @ K[hq // G].T
+                else:
+                    sc = _qk(_fake_q(q[hq] / math.sqrt(d), D), K[hq // G], None if dK is None
+                             else dK[hq // G], D)
                 pp = np.exp(sc - sc.max())
                 o[hq] = _pv(pp, Vq[hq // G], Vs[hq // G], D) / pp.sum()
             x = x + w(p + "self_attn.o_proj.weight") @ _fake_q(o.reshape(-1), D)
@@ -933,14 +948,24 @@ class Image(EmbedHost):
     (default: the same) for the LM head: "int8", or 4-bit "int4" / "fp4". `formats` sets a
     kind's format over wformat per layer range (opentpu/llm/formats.py, KINDS; None:
     OTPU_FORMATS, else spec.formats): a layer block layout per combination, a run (a loop)
-    per range of one layout. The KV cache and the activations stay int8.
+    per range of one layout. The activations stay int8, and so does the KV cache unless `kv`
+    (None: OTPU_KV, else "int8") is "kv6": K 6-bit (compiler.KVDesc kfmt kv6, kernels/kv6.py:
+    three 2-bit planes and an S a token a block; Config.QST6, TCQ, TGRQ), V int8.
     """
 
     def __init__(self, spec: Spec, cfg: Config, cap: int, batch: int = 1, rows: int = 1,
                  wformat: str = "int8", head_format: str | None = None, lookup: bool = False,
                  embed_host: bool | None = None, formats: str | None = None,
-                 steering: bool = False):
+                 steering: bool = False, kv: str | None = None):
         spec.check(cfg)
+        import os
+        kv = kv if kv is not None else os.environ.get("OTPU_KV", "int8") or "int8"
+        if kv not in ("int8", "kv6"):
+            raise ValueError(f"KV cache format {kv!r}: int8 or kv6")
+        if kv == "kv6" and not (getattr(cfg, "QST6", False) and getattr(cfg, "TCQ", False)
+                                and getattr(cfg, "TGRQ", False)):
+            raise ValueError("a 6-bit K cache (kv6) needs Config.QST6, TCQ and TGRQ (r8)")
+        self.kv = kv
         if cap % cfg.D:
             raise ValueError("KV capacity must be a multiple of D")
         if spec.ctx and cap > spec.ctx:
@@ -1001,9 +1026,16 @@ class Image(EmbedHost):
             L["wd"] = [(lb.alloc(self.h_loc * rb(C, mf["wd"])),
                         lb.alloc(self.h_loc * Q.scale_bytes(C, mf["wd"], D)))
                        for _ in range(F_ // C)]
-            L["kvs"] = [[{"k": lb.alloc(cap * dk), "ks": lb.alloc(cap * k_scale_bytes(dk, D)),
-                          "vt": lb.alloc(dk * cap), "vs": lb.alloc(4 * cap)}
-                         for _ in range(self.nkv_loc)] for _ in range(batch)]
+            if kv == "kv6":                         # K's planes and S planes (KVDesc.k6)
+                kpb, ksb = kv6_k_bytes(cap, dk, D)
+                L["kvs"] = [[{"kp": lb.alloc(kpb), "ks": lb.alloc(ksb),
+                              "vt": lb.alloc(dk * cap), "vs": lb.alloc(4 * cap)}
+                             for _ in range(self.nkv_loc)] for _ in range(batch)]
+            else:
+                L["kvs"] = [[{"k": lb.alloc(cap * dk),
+                              "ks": lb.alloc(cap * k_scale_bytes(dk, D)),
+                              "vt": lb.alloc(dk * cap), "vs": lb.alloc(4 * cap)}
+                             for _ in range(self.nkv_loc)] for _ in range(batch)]
             L["kv"] = L["kvs"][0]
             self.bofs[key], self.bsize[key] = L, (lb.next + 4095) // 4096 * 4096
         self.lofs, self.LS = self.bofs[self.lf[0]], self.bsize[self.lf[0]]   # layer 0's
@@ -1025,7 +1057,8 @@ class Image(EmbedHost):
                 for e in range(len(unit)):
                     self.loc[first + it * len(unit) + e] = (base, us, it, offs[e])
             b.next = base + reps * us
-        head = cap * dk + cap * k_scale_bytes(dk, D) + dk * cap + 4 * cap
+        head = (sum(kv6_k_bytes(cap, dk, D)) if kv == "kv6" else
+                cap * dk + cap * k_scale_bytes(dk, D)) + dk * cap + 4 * cap
         self.kv_bytes = spec.layers * self.nkv_loc * head         # per sequence
         self.head = (b.alloc(self.v_loc * Q.row_bytes(H, self.head_format, D)),
                      b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)))
@@ -1041,6 +1074,8 @@ class Image(EmbedHost):
                                     waitc=cfg.SEQ_WC) if lookup else {}
         self.choices = {"embed_host": self.embed_host,          # (the compile worker's
                         "formats": self.formats}                # image)
+        if kv != "int8":
+            self.choices["kv"] = kv
         # activation steering (kernels/steering.py): a vector a layer [L, H] and four words
         # (s_attn, p_attn, s_mlp, p_mlp) the host writes; without it nothing is compiled in
         self.steer = None
@@ -1219,7 +1254,8 @@ class Image(EmbedHost):
             ns.wd = QTensor(parts[0].data, parts[0].scale, (n, spec.ffn), parts[0].rs,
                             parts[0].srs, D, parts=parts, pw=C, wf=parts[0].wf)
             ns.kvs = [KVDesc({sid + j * cfg.S: {k: off + v for k, v in r.items()}
-                              for j, r in enumerate(heads)}, self.cap, self.dk, D, cfg.S, sid, dv=d)
+                              for j, r in enumerate(heads)}, self.cap, self.dk, D, cfg.S, sid, dv=d,
+                             kfmt=self.kv)
                       for heads in lofs["kvs"]]
             ns.kv = ns.kvs[0]
             ns.steer = None

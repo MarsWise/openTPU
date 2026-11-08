@@ -491,7 +491,18 @@ def kv_append(kv: KVDesc, h: int, pos, k: Tile | None, v: Tile | None) -> None:
     """
     b = current()
     pos = Affine.of(pos)
-    if k is not None:
+    if k is not None and getattr(kv, "kfmt", "int8") == "kv6":
+        # 6-bit K (KVDesc kfmt kv6, kernels/kv6.py): QST Q6 of each D-block's three planes,
+        # every token's row on its own D/4 bytes (its S in the block's S plane)
+        D = kv.D
+        if k.cols != kv.d:
+            raise CompileError(f"kv_append: K rows of {k.cols} into a 6-bit cache of d {kv.d}")
+        for j in builtins.range(3):
+            dst, sdst, prs, srs = kv.k6_store(h, j, pos)
+            for kb in builtins.range(kv.d // D):
+                b.store_quantized(k[:, kb * D:(kb + 1) * D], dst + kb * prs, sdst + kb * srs,
+                                  D // 4, 1, row_scale=True, q6=j)
+    elif k is not None:
         kd = kv.k(h)
         b.store_quantized(k, kd.data + pos * kd.rs, kd.scale + pos * kd.srs, kd.rs, 1,
                           row_scale=kd.rsc)
