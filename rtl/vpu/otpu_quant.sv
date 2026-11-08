@@ -60,7 +60,8 @@ endmodule
 
 module otpu_qscale
   import otpu_fp::*;
-#(parameter int LM = 2, parameter int LA = 4, parameter int TW = 2) (
+#(parameter int LM = 2, parameter int LA = 4, parameter int TW = 2,
+  parameter bit Q6 = 1'b0) (
   input  logic          clk,
   input  logic          rst,
   input  logic          en,
@@ -108,12 +109,12 @@ module otpu_qscale
   assign y[0] = y0;
   assign k1[0] = kx;
   for (genvar i = 0; i < 2; i++) begin : g_it
-    otpu_fmadd #(.LM(LM), .LA(LA)) u_t (.clk, .en, .a(k1[i]), .b(y[i]), .c(F_TWO), .y(t[i]));
+    otpu_fmadd #(.LM(LM), .LA(LA)) u_t (.clk, .en, .a(k1[i]), .b(y[i]), .c(otpu_fp::F_TWO), .y(t[i]));
     otpu_qdly #(.W(32), .N(SL)) u_yd (.clk, .rst, .en, .d(y[i]), .q(yd[i]));
     otpu_qdly #(.W(32), .N(P)) u_k (.clk, .rst, .en, .d(k1[i]), .q(k1[i + 1]));
     otpu_fmul #(.LAT(LM)) u_y (.clk, .en, .a(yd[i]), .b(t[i]), .y(y[i + 1]));
   end
-  otpu_fmadd #(.LM(LM), .LA(LA)) u_e (.clk, .en, .a(k1[2]), .b(y[2]), .c(F_ONE), .y(e));
+  otpu_fmadd #(.LM(LM), .LA(LA)) u_e (.clk, .en, .a(k1[2]), .b(y[2]), .c(otpu_fp::F_ONE), .y(e));
   otpu_qdly #(.W(32), .N(SL)) u_yd2 (.clk, .rst, .en, .d(y[2]), .q(yd[2]));
   otpu_fmadd #(.LM(LM), .LA(LA)) u_y3 (.clk, .en, .a(yd[2]), .b(e), .c(yd[2]), .y(y[3]));
   // inv = 127 * (y * 2^ek) (y in [0.5, 1]) is (127 * y) * 2^ek bit for bit: 127 * y is in
@@ -124,9 +125,11 @@ module otpu_qscale
   logic zd, bd, zd2, bd2;
   logic [8:0] ekd, ek2, fe;
   otpu_qdly #(.W(11), .N(LAT - LM)) u_f (.clk, .rst, .en, .d({zero, big, ek}), .q({zd, bd, ekd}));
-  // (Q4: 7 * y in [3.5, 7], normal too: the same exponent handling)
-  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(q4 ? F_7 : F_127), .b(y[3]), .y(invm));
-  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(q4 ? F_INV7 : F_INV127), .y(scm));
+  // Q6 is an experimental elaboration-time mode; production uses the default
+  // Q6=0. Its caller must enforce the separately validated finite range.
+  // Q4: 7*y and Q6: 31*y remain normal before the exponent adjustment.
+  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(Q6 ? 32'h41f8_0000 : (q4 ? otpu_fp::F_7 : otpu_fp::F_127)), .b(y[3]), .y(invm));
+  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(Q6 ? 32'h3d04_2108 : (q4 ? otpu_fp::F_INV7 : otpu_fp::F_INV127)), .y(scm));
   otpu_delay #(.W(32), .N(LAT - LM)) u_scd (.clk, .en, .d(scm), .q(scd));
   otpu_delay #(.W(11), .N(LM)) u_z2 (.clk, .en, .d({zd, bd, ekd}), .q({zd2, bd2, ek2}));
   otpu_delay #(.W(1 + TW), .N(LAT + 1)) u_v (.clk, .en, .d({iv_q, itag_q}), .q({ov, otag}));
