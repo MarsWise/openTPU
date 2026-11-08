@@ -61,6 +61,11 @@ class Config:
     def act_rows(self) -> int:
         return self.ACT_ROWS or self.MCOLS
 
+    @property
+    def aff_available(self) -> bool:
+        # otpu_slice HAS_SS and otpu_vpu C8: the composite engine needs 8 lanes.
+        return bool(self.VAFF and (self.DSTEP or self.STREAM) and self.LANES == 8 and self.D >= 32)
+
 
 def design_config(**kw) -> Config:
     """The Kintex-7 design point: 2 slices, 128-deep MXU (x 8 columns), 16 VPU lanes / TMEM
@@ -888,6 +893,8 @@ class Slice:
         if func == I.V_AFF:
             if not getattr(self.cfg, "VAFF", False):
                 raise SimError("VOP AFF: needs Config.VAFF")
+            if not self.cfg.aff_available:
+                raise SimError("VOP AFF: needs the 8-lane stream engine")
             if bmode != I.B_ROW or cols > I.OUTER_MAX_COLS:
                 raise SimError("VOP AFF: P per row (bmode ROW), cols <= 256")
             Gv = self.tget(np.broadcast_to(w7 + c, (1, cols)))          # read before writes

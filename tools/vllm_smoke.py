@@ -39,6 +39,9 @@ def main():
     a = ap.parse_args()
     os.environ.setdefault("OTPU_VLLM_BACKEND", "isa")
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    if a.temperature > 0 or a.logprobs is not None:
+        # Worker.options() is read during LLM construction, not during generate().
+        os.environ["OTPU_VLLM_FPGA_ONLY"] = "1"
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
     rng = np.random.default_rng(0)
@@ -51,8 +54,6 @@ def main():
               max_num_seqs=a.slots, additional_config={"opentpu": {"slots": a.slots,
                                                 "head_format": a.head_format}})
     print(f"vLLM engine up in {time.time() - t0:.1f}s on {os.environ['OTPU_VLLM_BACKEND']}")
-    if a.temperature > 0:
-        os.environ["OTPU_VLLM_FPGA_ONLY"] = "1"
     sps = [SamplingParams(temperature=a.temperature, top_k=a.top_k, top_p=a.top_p,
                           repetition_penalty=a.repetition_penalty, seed=1000 + i,
                           max_tokens=a.tokens, ignore_eos=True, detokenize=False,
@@ -105,7 +106,7 @@ def main():
                     lg = e.step(ref[-1])
             m = g == ref
             if a.logprobs is not None:
-                m = m and glp[i] is not None and lp_ok and lp_err < 2e-2
+                m = m and glp[i] is not None and len(glp[i]) == a.tokens and lp_ok and lp_err < 2e-2
                 print(f"logprobs prompt[{len(p)}]: top {a.logprobs} ids and ranks "
                       f"{'equal' if lp_ok else 'DIFFER'}, max |d logprob| {lp_err:.2e}")
             ok &= m

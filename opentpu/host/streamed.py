@@ -175,7 +175,8 @@ def engine(model, cfg, backend="isa", cap: int = 4096, pool=None, experts: int =
            em_pass: int | None = None, ahead_part: int | None = None,
            idle_parts: str = "v2", willneed: bool = True, pool_map: bool = True,
            release_weights: bool = True, create: bool = False, W=None, mtp: bool = False,
-           mtp_from=None, vision_staged: bool | None = None, vision_warm: bool = True, **kw):
+           mtp_from=None, vision_staged: bool | None = None, vision_warm: bool = True,
+           vision_device_prep: int | None = None, **kw):
     """The Engine of the MoE checkpoint at `model` on `backend` ("isa", or a backend factory
     as Engine takes: the card's BoardBackend) with configuration `cfg` (the card's 4 GiB), its
     experts streamed from `pool` (a path; DEFAULT: the checkpoint's, default_pool; None: packed
@@ -210,6 +211,9 @@ def engine(model, cfg, backend="isa", cap: int = 4096, pool=None, experts: int =
     if idle_parts not in IDLE_PARTS:
         raise ValueError(f"idle parts {idle_parts!r}: one of {', '.join(IDLE_PARTS)}")
     spec = load_spec(model)                     # a MoE's Spec.embed: "int8" (from_hf)
+    if vision_device_prep is not None:
+        from opentpu.llm.minicpmv import with_device_prep
+        spec = with_device_prep(spec, vision_device_prep)
     if not streams(spec):
         raise ValueError(f"{model}: not a mixture-of-experts model")
     if formats is not None:

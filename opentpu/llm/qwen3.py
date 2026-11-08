@@ -127,12 +127,14 @@ class Spec:
 
     def check(self, cfg: Config) -> None:
         S, D = cfg.S, cfg.D
-        need = [(self.head_dim % D == 0, f"head_dim {self.head_dim} % D {D}"),
+        need = [(self.head_dim > 0 and (self.head_dim <= D or self.head_dim % D == 0)
+                 and self.head_dim % 2 == 0,
+                 f"head_dim {self.head_dim}: at most D or a multiple of D {D}"),
+                (self.n_q * self.head_dim % D == 0, "n_q * head_dim % D"),
                 (self.hidden % (S * D) == 0, f"hidden {self.hidden} % S*D"),
                 (self.ffn % (S * D) == 0, f"ffn {self.ffn} % S*D"),
                 (self.n_kv % S == 0, f"n_kv {self.n_kv} % S"),
                 (self.n_q % self.n_kv == 0, "n_q % n_kv"),
-                (self.n_q // self.n_kv <= cfg.MCOLS, "query group larger than MXU columns"),
                 (self.vocab % S == 0, f"vocab {self.vocab} % S"),
                 (max(self.ffn, self.n_q * self.head_dim, self.hidden) <= cfg.ACT_BLOCKS * D,
                  "an inner dimension exceeds ACT RAM")]
@@ -946,6 +948,8 @@ class Image(EmbedHost):
                              f"a sliding window)")
         S, D = cfg.S, cfg.D
         H, d, F_ = spec.hidden, spec.head_dim, spec.ffn
+        dk = -(-d // D) * D  # the cache stores padded heads, as in LFM2
+        self.dk = dk
         self.spec, self.cfg, self.cap = spec, cfg, cap
         wformat, formats = FM.named(spec, wformat, formats)
         fmt = FM.resolver(formats, KINDS, spec.formats, wformat, head_format)
@@ -997,8 +1001,8 @@ class Image(EmbedHost):
             L["wd"] = [(lb.alloc(self.h_loc * rb(C, mf["wd"])),
                         lb.alloc(self.h_loc * Q.scale_bytes(C, mf["wd"], D)))
                        for _ in range(F_ // C)]
-            L["kvs"] = [[{"k": lb.alloc(cap * d), "ks": lb.alloc(cap * k_scale_bytes(d, D)),
-                          "vt": lb.alloc(d * cap), "vs": lb.alloc(4 * cap)}
+            L["kvs"] = [[{"k": lb.alloc(cap * dk), "ks": lb.alloc(cap * k_scale_bytes(dk, D)),
+                          "vt": lb.alloc(dk * cap), "vs": lb.alloc(4 * cap)}
                          for _ in range(self.nkv_loc)] for _ in range(batch)]
             L["kv"] = L["kvs"][0]
             self.bofs[key], self.bsize[key] = L, (lb.next + 4095) // 4096 * 4096
@@ -1021,7 +1025,7 @@ class Image(EmbedHost):
                 for e in range(len(unit)):
                     self.loc[first + it * len(unit) + e] = (base, us, it, offs[e])
             b.next = base + reps * us
-        head = cap * d + cap * k_scale_bytes(d, D) + d * cap + 4 * cap   # k, k scales, v^T, v's
+        head = cap * dk + cap * k_scale_bytes(dk, D) + dk * cap + 4 * cap
         self.kv_bytes = spec.layers * self.nkv_loc * head         # per sequence
         self.head = (b.alloc(self.v_loc * Q.row_bytes(H, self.head_format, D)),
                      b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)))
@@ -1215,7 +1219,7 @@ class Image(EmbedHost):
             ns.wd = QTensor(parts[0].data, parts[0].scale, (n, spec.ffn), parts[0].rs,
                             parts[0].srs, D, parts=parts, pw=C, wf=parts[0].wf)
             ns.kvs = [KVDesc({sid + j * cfg.S: {k: off + v for k, v in r.items()}
-                              for j, r in enumerate(heads)}, self.cap, d, D, cfg.S, sid)
+                              for j, r in enumerate(heads)}, self.cap, self.dk, D, cfg.S, sid, dv=d)
                       for heads in lofs["kvs"]]
             ns.kv = ns.kvs[0]
             ns.steer = None

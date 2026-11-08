@@ -1185,7 +1185,8 @@ def test_the_processor_on_the_card(tiny_tower, vu8):
     img = np.stack([127 + 120 * np.sin(x / 7 + c) * np.cos(y / 9 + 2 * c) for c in range(3)], -1)
     img = np.clip(img + np.random.default_rng(1).normal(0, 4, img.shape), 0, 255).astype(np.uint8)
     cache = {}
-    got, sizes, grid = vi.encode_pixels(be, img, proj_gelu=gelu_tanh, cache=cache)
+    got, sizes, grid = vi.encode_pixels(be, img, proj_gelu=gelu_tanh, cache=cache,
+                                        device_only=vu8)
     crops, grid_h = MV.crops(torch.from_numpy(img).permute(2, 0, 1).contiguous(), vs)
     assert grid == grid_h and len(got) == len(crops) == 3
     host_be = IsaBackend(cfg, [image])
@@ -1197,6 +1198,14 @@ def test_the_processor_on_the_card(tiny_tower, vu8):
     _, e = vi.host_rows(MV.patches(crops[-1].numpy()), (h, w))
     E = be.read(0, vi.work["E"], 4 * h * w * vs.hidden).view(np.float32).reshape(h * w, -1)
     assert np.array_equal(E, e)
+    if vu8:
+        # The chat keeps embeddings on device; skipping readback must not change them.
+        no_read, sizes2, grid2 = vi.encode_pixels(be, img, proj_gelu=gelu_tanh, cache=cache,
+                                                  device_only=True, readback=False)
+        assert no_read == [None] * len(got) and (sizes2, grid2) == (sizes, grid)
+        expected = np.concatenate(got)
+        stored = be.read(0, vi.work["vis"], expected.nbytes).view(np.float32).reshape(expected.shape)
+        np.testing.assert_array_equal(stored, expected)
 
 
 def test_prepare_for_the_device_has_the_hosts_text():

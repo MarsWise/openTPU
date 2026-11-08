@@ -295,7 +295,7 @@ class OpenTPUWorker(WorkerBase):
         if not self.free:
             raise RuntimeError(f"openTPU: no free KV slot for {rid} ({self.B} slots)")
         if rid in self.kept:
-            params, rng = self.kept.pop(rid)
+            params, rng = self.kept[rid]
         else:
             rng = np.random.default_rng(seed)
         ds = device_sampling(params)
@@ -304,6 +304,11 @@ class OpenTPUWorker(WorkerBase):
                               "temperature, top-k, top-p, repetition penalty); this request's "
                               "options (prompt logprobs, min-p, presence / frequency penalties, logit "
                               "bias ...) need the host: it refuses CPU sampling")
+        if self.opts["fpga_only"] and float(getattr(params, "temperature", 0.0) or 0.0) >= 1e-5:
+            from ..llm import generate as G
+            if not G.device_rng(self.eng.cfg):
+                raise Unsupported("openTPU FPGA-only sampling needs device RNG (VRAND)")
+        self.kept.pop(rid, None)
         s = self.free.pop()
         self.eng.reset(seq=s)
         if self.steps is not None and ds.ok:
@@ -391,7 +396,12 @@ class OpenTPUWorker(WorkerBase):
             n0 = self.steps.runs
             # each request's seeded uniform (VOP RAND: none, the device draws them)
             from opentpu.llm import generate as G
-            uni = None if G.device_rng(eng.cfg) else [float(r.rng.random()) for r in dev]
+            if self.opts["fpga_only"] and not G.device_rng(eng.cfg):
+                if any(float(getattr(r.params, "temperature", 0.0) or 0.0) >= 1e-5 for r in dev):
+                    raise Unsupported("openTPU FPGA-only sampling needs device RNG (VRAND)")
+                uni = None                    # greedy needs no random draw
+            else:
+                uni = None if G.device_rng(eng.cfg) else [float(r.rng.random()) for r in dev]
             picks = self.steps.run([(r.slot, eng.poss[r.slot]) for r in dev],
                                    [r.tokens[-1] for r in dev], uni)
             for r, t in zip(dev, picks):

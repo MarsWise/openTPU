@@ -258,7 +258,7 @@ def rand(counters, key: int = 0, key_reg: int = 0) -> Tile:
 
 def has_aff() -> bool:
     """The target has VOP AFF, the fused row/column affine (Config.VAFF)."""
-    return bool(getattr(current().cfg, "VAFF", False))
+    return current().cfg.aff_available
 
 
 def aff(x, p, g, h=None, out=None) -> Tile:

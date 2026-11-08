@@ -1,5 +1,16 @@
 # vLLM integration status
 
+## Strict RNG guard (2026-11-04, integration worktree)
+
+In `OTPU_VLLM_FPGA_ONLY=1`, a temperature-sampling request now fails before
+reserving a slot unless the device configuration exposes VOP RAND (`VRAND`).
+Strict greedy requests without VRAND no longer generate host uniform values.
+Rejected resumed requests retain their saved preemption state. The non-strict
+compatibility path can still supply host-generated uniforms. Focused tests use
+stubbed vLLM interfaces on Windows; they do not establish real vLLM or hardware
+execution. A device seed may still be prepared on the host. Full strict backend
+auditing, model validation, and physical measurements remain outstanding.
+
 ## r6 update (2026-10-29)
 
 Set `OTPU_VLLM_FPGA_ONLY=1` to require device-side greedy token selection from

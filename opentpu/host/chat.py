@@ -497,6 +497,8 @@ class Chat:
     def attach(self, src) -> None:
         """An image (a path, a data: URL, base64 or PIL) for the next message: a model with a
         vision side only (MiniCPM-V, minicpmv.Image)."""
+        if self.strict_first:
+            raise ValueError("strict FPGA-only: image preprocessing in chat uses the host")
         if getattr(getattr(self.eng, "image", None), "vision", None) is None:
             raise ValueError("this model takes no images")
         self.pending.append(src)
@@ -518,10 +520,30 @@ class Chat:
         from opentpu.llm import minicpmv as MV
         if self.vision is None:
             self.vision = MV.Vision(self.eng)
+            self.vision.cache.update(getattr(self, "_vision_prep_cache", {}))
         t0 = time.perf_counter()
         vis = self.vision.prompt(ids, self.images, n)
         turn.vision_s += time.perf_counter() - t0
         return vis
+
+    def _prepare_images(self, images):
+        """Use the device processor when the image reserves its workspace."""
+        from opentpu.llm import minicpmv as MV
+        vision = getattr(self.eng.image, "vision", None)
+        device = bool(getattr(vision, "device_prep", 0))
+        prepared = [MV.prepare(src, self.eng.spec.vision, self.max_slices,
+                               image_id=len(self.images) + i, device=device)
+                    for i, src in enumerate(images)]
+        if device:
+            cache = getattr(self, "_vision_prep_cache", None)
+            if cache is None:
+                cache = self._vision_prep_cache = {}
+            if self.vision is not None:
+                cache = self.vision.cache
+            for im in prepared:
+                h, w = im.pixels.shape[:2]
+                vision.prep_programs(h, w, im.max_slices, cache)
+        return prepared
 
     def reply_start(self, ids) -> int | None:
         """Where the next turn's rendering will start to differ from `ids` (this turn's, with
@@ -564,15 +586,15 @@ class Chat:
         card runs the next step (Engine.step's on_start), so the interface draws during the
         run, not while the host starts it; at the end of the reply it comes at once. stop()
         is polled between runs (the reply so far is kept)."""
+        if self.strict_first and (self.pending or self.images):
+            raise ValueError("strict FPGA-only: image preprocessing in chat uses the host")
         on_update = on_update or (lambda delta, turn: None)
         t0 = time.perf_counter()
         turn = Turn(clock_mhz=self.clock_mhz, cap=self.eng.cap, context=self.eng.pos)
-        imgs, self.pending = self.pending, []
+        imgs = self.pending
         if imgs:                            # (MiniCPM-V: the images before the text, as HF's)
-            from opentpu.llm import minicpmv as MV
-            vs = self.eng.spec.vision
-            imgs = [MV.prepare(src, vs, self.max_slices, image_id=len(self.images) + i)
-                    for i, src in enumerate(imgs)]
+            imgs = self._prepare_images(imgs)
+            self.pending = []
             self.images += imgs
             turn.images = len(imgs)
             self.history.append({"role": "user", "content": [{"type": "image"}] * len(imgs) +
@@ -972,7 +994,8 @@ def load_tokenizer(path):
 
 
 def make_backend(name: str, spec, cap: int, dev: str, model: str | None = None,
-                 lookup: bool = False, wformat: str = "int8", head_format: str | None = None):
+                 lookup: bool = False, wformat: str = "int8", head_format: str | None = None,
+                 guard_ecc: bool = False):
     """(backend, configuration) for Engine (lookup: room for the resident decode's tables;
     the weight formats size the board model's DRAM where an int8 image would not fit)."""
     if name == "isa":
@@ -982,7 +1005,8 @@ def make_backend(name: str, spec, cap: int, dev: str, model: str | None = None,
                                         device_config)
         tr = XdmaTransport(dev)
         cfg = device_config(Board(tr, lock=False).info())     # MCOLS / LANES of the bitstream
-        return (lambda c, imgs: BoardBackend(c, imgs, transport=tr, model=model)), cfg
+        return (lambda c, imgs: BoardBackend(c, imgs, transport=tr, model=model,
+                                             guard_ecc=guard_ecc)), cfg
     if name == "board-sim":
         from opentpu.host.board import BoardBackend, SimTransport, sim_config
         cfg = sim_config(spec, cap, lookup=lookup, wformat=wformat, head_format=head_format)
@@ -1158,11 +1182,15 @@ def main(argv=None):
                     help="an image's slices at most besides its thumbnail (default the "
                          "processor's 9): the latency knob, each crop about 3.7 s of vision at "
                          "MCOLS 4 and 64 prompt tokens; 1 or less: the thumbnail alone")
+    ap.add_argument("--vision-device-prep-mib", type=int, default=None,
+                    help="experimental MiniCPM-V device image preprocessing workspace in MiB")
     moe.add_argument("--poll-idle", metavar="spin|S|predict",
                      help="the host's polls while a run is in flight and no expert is asked "
                           "for: spin (the default), sleep S seconds, or predict each gap "
                           "(docs/offload.md 10.10): less host CPU, the same speed on Gen2")
     a = ap.parse_args(argv)
+    if a.vision_device_prep_mib is not None and a.vision_device_prep_mib <= 0:
+        ap.error("--vision-device-prep-mib must be positive")
     if a.strict_fpga_only and a.host_first_token:
         ap.error("--strict-fpga-only: the first token on the device, not --host-first-token")
     if a.top_p is not None and not 0 <= a.top_p <= 1:     # (Hugging Face's range)
@@ -1176,6 +1204,14 @@ def main(argv=None):
                          f"feed the turns' text as is")
     tokenizer = load_tokenizer(path)        # (on a thread, while the model loads)
     spec = load_spec(path)
+    vision_prep_bytes = None
+    if a.vision_device_prep_mib is not None:
+        from opentpu.llm.minicpmv import with_device_prep
+        vision_prep_bytes = a.vision_device_prep_mib * (1 << 20)
+        try:
+            spec = with_device_prep(spec, vision_prep_bytes)
+        except ValueError as e:
+            ap.error(str(e))
     bitnet = getattr(spec, "subln", False)  # BitNet b1.58 (opentpu/llm/bitnet.py): its own image
     if bitnet:                              # formats, every projection a TMM
         from opentpu.llm.bitnet import IMAGE
@@ -1229,7 +1265,8 @@ def main(argv=None):
                             head_format=a.head_format, formats=formats,
                             embed_host=None if a.embed_table is None else a.embed_table == "host",
                             layer_major=a.layer_major, prog_cache=not a.no_prog_cache,
-                            snapshots=SNAPSHOTS, mtp=a.mtp, mtp_from=a.mtp_from)
+                            snapshots=SNAPSHOTS, mtp=a.mtp, mtp_from=a.mtp_from,
+                            vision_device_prep=vision_prep_bytes)
             ST.poll_idle(eng, a.poll_idle)
             print(f"experts: {ST.describe(eng, eng.pool_path)}", flush=True)
         elif a.mtp:

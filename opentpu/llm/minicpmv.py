@@ -18,7 +18,7 @@ import hashlib
 import itertools
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +26,14 @@ import numpy as np
 from .. import quant as Q
 
 TOWER, MERGER = "model.vision_tower.", "model.merger."
+
+
+def with_device_prep(spec, size: int):
+    """Reserve device-preprocessing workspace in a vision model's immutable spec."""
+    if (not isinstance(size, int) or isinstance(size, bool) or size <= 0 or
+            not hasattr(spec, "vision_device_prep") or getattr(spec, "vision", None) is None):
+        raise ValueError("device image preprocessing needs a vision model and positive workspace bytes")
+    return replace(spec, vision_device_prep=size)
 
 
 # =============================================================================== the spec
@@ -1020,7 +1028,7 @@ class VisionImage:
         return p, self.tables["pos"][position_ids(h, w, self.vs.side)[o]]
 
     def encode(self, backend, P: np.ndarray, size, vis_row: int = 0, proj_gelu=None,
-               cache: dict | None = None, s: int = 0) -> np.ndarray:
+               cache: dict | None = None, s: int = 0, readback: bool = True) -> np.ndarray | None:
         """One crop through the tower and projector on `backend` (a qwen3 backend: write, run
         or start / wait, read; one that runs words gets each program assembled once); its
         rows go to vis[vis_row:]; returns them ([h w / 16, out] fp32). cache: the programs by
@@ -1054,6 +1062,8 @@ class VisionImage:
             else:
                 start(prog, args=arg_words(ra, vals))
                 backend.wait()
+        if not readback:
+            return None
         n = h * w // 16
         return backend.read(s, self.work["vis"] + 4 * vis_row * self.vs.out,
                             4 * n * self.vs.out).view(np.float32).reshape(n, self.vs.out)
@@ -1114,17 +1124,29 @@ class VisionImage:
             cache[key] = got
         return got
 
-    def encode_pixels(self, backend, img, vis_row: int = 0, max_slices=None, proj_gelu=None,
-                      cache: dict | None = None, s: int = 0) -> tuple:
-        """An image's every crop through the processor, tower and projector on the device: the
-        host writes its RGB pixels (uint8 [H, W, 3], as fp32) and the filters (constants per
-        size) only. Returns ([each crop's rows], the crops' (h, w), the grid)."""
+    def preflight_pixels(self, img, max_slices=None, cache=None, device_only: bool = False):
+        """Validate input and workspace before writes; return compiled preparation programs."""
+        if device_only and (not isinstance(img, np.ndarray) or img.dtype != np.uint8 or
+                            img.ndim != 3 or img.shape[2] != 3):
+            raise ValueError("device-only image preprocessing requires H x W x 3 uint8 pixels")
         img = np.asarray(img)
         H, W = img.shape[:2]
         pr, progs, crops = self.prep_programs(H, W, max_slices, cache)
         u8 = _up(pr.top, 4096)
-        if getattr(self.cfg, "VU8", False) and u8 + _up(3 * H * W, 4) <= \
-                self.prep + self.device_prep:
+        has_vu8 = bool(getattr(self.cfg, "VU8", False))
+        u8_fits = u8 + _up(3 * H * W, 4) <= self.prep + self.device_prep
+        if device_only and not (has_vu8 and u8_fits):
+            raise ValueError("device-only image preprocessing requires VU8 and sufficient workspace")
+        return img, pr, progs, crops, u8, has_vu8 and u8_fits
+
+    def encode_pixels(self, backend, img, vis_row: int = 0, max_slices=None, proj_gelu=None,
+                      cache: dict | None = None, s: int = 0, device_only: bool = False,
+                      readback: bool = True) -> tuple:
+        """Prepare RGB and run the tower; optionally read the resulting rows to the host."""
+        img, pr, progs, crops, u8, use_u8 = self.preflight_pixels(
+            img, max_slices, cache, device_only=device_only)
+        H, W = img.shape[:2]
+        if use_u8:
             from ..kernels import u8_input
             raw = np.zeros(_up(3 * H * W, 4), np.uint8)       # the bytes, converted on the card
             raw[:3 * H * W] = np.asarray(img, np.uint8).reshape(-1)
@@ -1139,7 +1161,7 @@ class VisionImage:
         for (h, w), cp in zip(pr.sizes, crops):
             self._run_plain(backend, cp)
             out.append(self.encode(backend, None, (h, w), vis_row=r, proj_gelu=proj_gelu,
-                                   cache=cache, s=s))
+                                   cache=cache, s=s, readback=readback))
             r += h * w // 16
         return out, pr.sizes, pr.grid
 
@@ -1335,16 +1357,26 @@ class Vision:
     M-RoPE positions (positions). The host only moves data: the patch rows it cut, the vis
     rows the card computed (by their index), the table entries the image was built with."""
 
-    def __init__(self, eng):
+    def __init__(self, eng, device_only: bool = False):
         img = eng.image
         if getattr(img, "vision", None) is None:
             raise ValueError("the engine's image has no vision side (minicpmv.Spec.vision)")
         img.check_room()
         self.eng, self.img, self.vs = eng, img, eng.spec.vision
+        self.device_only = device_only
         self.table = img.rope_table()
         self.cache = {}                     # VisionImage's programs by patch count
         self.dev = np.tile(np.arange(img.cap), (3, 1))  # the device table's positions, a slot
         self.seconds = 0.0                  # the encodes' wall time
+
+    def _preflight_images(self, images):
+        if self.device_only:
+            for im in images:
+                pixels = getattr(im, "pixels", None)
+                if pixels is None:
+                    raise ValueError("device-only image preprocessing requires raw uint8 pixels")
+                self.img.vision.preflight_pixels(pixels, max_slices=im.max_slices,
+                                                 cache=self.cache, device_only=True)
 
     def encode(self, images: list, row: int = 0) -> int:
         """Each ImageInput's crops in order (thumbnail, slices) into vis rows from `row`: their
@@ -1358,6 +1390,7 @@ class Vision:
                              f"{v.out_rows} (Spec.vision_rows)")
         if not images:
             return 0
+        self._preflight_images(images)
         if not v.resident:
             self.stage()
         try:
@@ -1367,11 +1400,12 @@ class Vision:
                         raise ValueError("an image prepared for the device's processor: the "
                                          "model's Spec.vision_device_prep is 0")
                     v.encode_pixels(self.eng.backend, im.pixels, vis_row=r,
-                                    max_slices=im.max_slices, cache=self.cache)
+                                    max_slices=im.max_slices, cache=self.cache,
+                                    device_only=self.device_only, readback=False)
                     r += im.tokens
                     continue
                 for P, size in zip(im.patches, im.sizes):
-                    v.encode(self.eng.backend, P, size, vis_row=r, cache=self.cache)
+                    v.encode(self.eng.backend, P, size, vis_row=r, cache=self.cache, readback=False)
                     r += size[0] * size[1] // 16
         finally:
             if not v.resident:
@@ -1400,6 +1434,7 @@ class Vision:
         if not images:
             self.pristine()
             return None
+        self._preflight_images(images)
         self.positions(ids, [s for im in images for s in im.sizes])
         at, j, k = [], 0, 0                 # each image token's (image, its k-th row)
         for t in ids:

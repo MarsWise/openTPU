@@ -9,6 +9,7 @@ import pytest
 
 from opentpu import isa as I
 from opentpu import language as ol
+from opentpu.compiler import CompileError
 from opentpu.isasim import Config, Machine, SimError
 from opentpu.kernels import eltwise as E
 from opentpu.runtime import Input, Output, compile_kernel, run
@@ -66,6 +67,20 @@ def test_semantics_and_refusals():
     with pytest.raises(SimError, match="VAFF"):
         Machine(_cfg(False), [[I.aff(512, 0, 0, 0, 1, 8, 0, 0), I.Instr(I.HALT)]],
                 [None]).run()
+
+
+@pytest.mark.parametrize("changes", [{"DSTEP": False, "STREAM": False}, {"LANES": 16}])
+def test_aff_rejects_absent_composite_engine(changes):
+    cfg = dataclasses.replace(_cfg(), **changes)
+    with pytest.raises(SimError, match="stream engine"):
+        Machine(cfg, [[I.aff(512, 0, 0, 0, 1, 8, 0, 0), I.Instr(I.HALT)]], [None]).run()
+    x = np.ones((2, 32), dtype=np.float32)
+    with pytest.raises(CompileError, match="stream engine"):
+        compile_kernel(_aff, cfg, x=Input(x), p=Input(x[:, 0]), g=Input(x[0]), h=Input(x[0]),
+                       y=Output(x.shape), bias=False)
+    got, _ = _norm("rms_norm", x, x[0], x[0], cfg)
+    ref, _ = _norm("rms_norm", x, x[0], x[0], dataclasses.replace(cfg, VAFF=False))
+    np.testing.assert_array_equal(got, ref)
 
 
 @pytest.mark.parametrize("kind", ["layer_norm", "rms_norm"])

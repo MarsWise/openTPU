@@ -1625,6 +1625,8 @@ class Builder:
         laid out once). 256 columns a VOP."""
         if not getattr(self.cfg, "VAFF", False):
             raise CompileError("aff: the target has no VOP AFF (Config.VAFF)")
+        if not self.cfg.aff_available:
+            raise CompileError("aff: VOP AFF needs the 8-lane stream engine")
         if h is not None:
             g, h = self.aff_params(g, h), None
         x = self.materialize(x)
