@@ -49,7 +49,7 @@ RATES = {"RUNNING": 0.80, "MXU_BUSY": 0.60, "MXU_MAC": 0.50, "VPU_BUSY": 0.12,
 def _target_cfg(D: int, MCOLS: int, LANES: int, pair: bool, dstep: bool, stream: bool,
                 act_rows: int = 0, seq_wc: bool = False, tgsc: bool = False,
                 vcmp: bool = False, tbin: bool = False, tbgsc: bool = False, vu8: bool = False,
-                tgrq: bool = False, vrand: bool = False, tcq: bool = False, tatan: bool = False, qst4: bool = False, ldx: bool = False, td5: bool = False, vbfly: bool = False, vaff: bool = False) -> dict:
+                tgrq: bool = False, vrand: bool = False, tcq: bool = False, tatan: bool = False, qst4: bool = False, ldx: bool = False, td5: bool = False, vbfly: bool = False, vaff: bool = False, qst6: bool = False) -> dict:
     """The CFG_* registers of the current target's build with these VERSION / CAPS values."""
     from ..target import arch_hash, current
     t = current()
@@ -64,7 +64,7 @@ def _target_cfg(D: int, MCOLS: int, LANES: int, pair: bool, dstep: bool, stream:
                      "ACT_ROWS": act_rows if act_rows > MCOLS else 0, "PAIR": pair,
                      "DSTEP": dstep, "STREAM": stream, "SEQ_WC": seq_wc, "TGSC": tgsc,
                      "VCMP": vcmp, "TBIN": tbin, "TBGSC": tbgsc, "VU8": vu8,
-                     "TGRQ": tgrq, "VRAND": vrand, "TCQ": tcq, "TATAN": tatan, "QST4": qst4, "LDX": ldx, "TD5": td5, "VBFLY": vbfly, "VAFF": vaff})
+                     "TGRQ": tgrq, "VRAND": vrand, "TCQ": tcq, "TATAN": tatan, "QST4": qst4, "LDX": ldx, "TD5": td5, "VBFLY": vbfly, "VAFF": vaff, "QST6": qst6})
     cfg["hash"] = arch_hash(full)
     return cfg
 
@@ -86,7 +86,7 @@ class FakeTransport:
                  gather: bool = True, seq_wc: bool = False, tpair: bool = False,
                  tquad: bool = False, tfn: bool = False, tgsc: bool = False, vcmp: bool = False,
                  tbin: bool = False, tbgsc: bool = False, vu8: bool = False,
-                 tgrq: bool = False, vrand: bool = False, tcq: bool = False, tatan: bool = False, qst4: bool = False, ldx: bool = False, td5: bool = False, vbfly: bool = False, vaff: bool = False):
+                 tgrq: bool = False, vrand: bool = False, tcq: bool = False, tatan: bool = False, qst4: bool = False, ldx: bool = False, td5: bool = False, vbfly: bool = False, vaff: bool = False, qst6: bool = False):
         self.ch = [np.zeros(ch_bytes, np.uint8) for _ in range(2)]
         self.v, self.devname, self.dev = regmap, devname, devname and f"/dev/{devname}"
         self.run_s, self.cycles_per_run = run_s, cycles
@@ -106,7 +106,7 @@ class FakeTransport:
         self.act_rows = act_rows        # > MCOLS: CAPS bit24 and the ACT_ROWS register
         self.cfg_words = R.cfg_words(cfg or _target_cfg(D, MCOLS, LANES, pair, dstep, stream,
                                                         act_rows, seq_wc, tgsc, vcmp, tbin, tbgsc, vu8,
-                                                        tgrq, vrand, tcq, tatan, qst4, ldx, td5, vbfly, vaff))
+                                                        tgrq, vrand, tcq, tatan, qst4, ldx, td5, vbfly, vaff, qst6))
         self.slices = R.cfg(self.cfg_words)["S"] if regmap >= R.CFG_SINCE else 1
         if self.slices > 1:             # two channels per slice (board.channel_map)
             self.ch = [np.zeros(ch_bytes, np.uint8) for _ in range(2 * self.slices)]
@@ -137,6 +137,7 @@ class FakeTransport:
         self.td5 = td5          # CAPS2 bit15: TMM T5 dense trits
         self.vbfly = vbfly      # CAPS2 bit16: VOP BFLY, the Hadamard butterfly stage
         self.vaff = vaff        # CAPS2 bit17: VOP AFF, the fused row/column affine
+        self.qst6 = qst6        # CAPS2 bit18: QST Q6, 6-bit ROW rows as nibble and 2-bit planes
         self.calib = list(calib)        # STATUS CALIB0 / CALIB1
         self.ecc_ded = ecc_ded          # STATUS ECC_DED
         self.regs = {R.R_CTRL: 0, R.R_PROG_ADDR: 0, R.R_PROG_N: 0, R.R_SCRATCH: 0,
@@ -266,7 +267,8 @@ class FakeTransport:
                 | (R.CAP2_LDX if self.ldx else 0) \
                 | (R.CAP2_TD5 if self.td5 else 0) \
                 | (R.CAP2_VBFLY if self.vbfly else 0) \
-                | (R.CAP2_VAFF if self.vaff else 0)
+                | (R.CAP2_VAFF if self.vaff else 0) \
+                | (R.CAP2_QST6 if self.qst6 else 0)
         if off == R.R_CAPS:
             return (R.CAP_TRACE | R.CAP_TEMP | (R.CAP_I2C if self.i2c else 0)
                     | (R.CAP_DDR if self.ddr_mts else 0) | (R.CAP_W4 if self.w4 else 0)

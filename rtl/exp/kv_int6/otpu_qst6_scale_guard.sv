@@ -31,7 +31,7 @@ module otpu_qst6_scale_guard (
   assign scale_o = invalid_o ? 32'b0 : core_scale;
   assign inv_o = invalid_o ? 32'b0 : core_inv;
   otpu_qscale #(.LM(2), .LA(4), .TW(2), .Q6(1'b1)) u_core (
-    .clk(clk), .rst(rst), .en(en), .q4(1'b0), .iv(in_valid_i && !rst),
+    .clk(clk), .rst(rst), .en(en), .q4(1'b0), .q6(1'b0), .iv(in_valid_i && !rst),
     .itag(tag_i), .amax(bad_in ? 32'b0 : amax_i), .ov(core_valid),
     .otag(core_tag), .sc(core_scale), .inv(core_inv)
   );

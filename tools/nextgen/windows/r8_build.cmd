@@ -1,5 +1,5 @@
 @echo off
-rem Claude: build r8 (m8, 133.33 MHz; r7 + VRAND, TCQ, TATAN, QST4, LDX, TD5, VBFLY, VAFF) with Vivado in
+rem Claude: build r8 (m8, 133.33 MHz; r7 + VRAND, TCQ, TATAN, QST4, LDX, TD5, VBFLY, VAFF, QST6) with Vivado in
 rem the checkout containing this script: tools\build_r8_133.ps1.
 rem   r8_build.cmd            full build (several hours); otpu.bit only if setup/hold pass
 rem   r8_build.cmd Synth      synthesis + structural checks only (about an hour): try this first
@@ -13,6 +13,7 @@ set "PLAN="
 if /i "%MODE%"=="Plan" (set "MODE=Build" & set "PLAN=-Plan")
 cd /d "%~dp0..\..\.." || (echo Cannot locate the checkout containing this script & pause & exit /b 1)
 findstr /c:"VAFF" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no VAFF capability & pause & exit /b 1)
+findstr /c:"QST6" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no QST6 capability & pause & exit /b 1)
 if not defined PLAN (
     tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo a Vivado process is running: stop & pause & exit /b 1)
 )
@@ -26,7 +27,7 @@ echo === the python the build uses (CFG_HASH):
 where python
 python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'numpy', numpy.__version__)"
 if errorlevel 1 goto nopy
-python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True, QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True)), '08x'))"
+python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True, QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True, QST6=True)), '08x'))"
 if errorlevel 1 goto nohash
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & '.\tools\build_r8_133.ps1' -Mode '%MODE%' %PLAN% *>&1 | Tee-Object -FilePath $env:OTPU_R8_LOG -Append; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 0 } catch { Write-Error $_; exit 1 }"
 set RC=%errorlevel%

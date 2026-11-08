@@ -44,6 +44,9 @@ TMM_T5 = TMM_BIN | TMM_CQ4      # TMM word 4 (the pair, CQ clear): dense trits, 
 #                                 D-element blocks a D-byte chunk (opentpu/trits.py; Config.TD5)
 F_HALF = 0x2                    # QST, ROW mode: write only the first half of each row
 F_Q4 = 0x4                      # QST, ROW mode, es 1: 4-bit rows (int4, S = amax/7; Config.QST4)
+F_Q6 = 0x8                      # QST, ROW mode, es 1: one 2-bit plane j (flags[5:4]) of 6-bit rows
+#                                 (S = amax/31; Config.QST6): the codes ((q + 32) >> 2j) & 3
+Q6_PLANE_SHIFT = 4
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
 F_BOUND = 0x4                   # RLD: w3 <= the value <= w4 (the waits pass's; the hardware ignores it)
@@ -531,17 +534,19 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
 
 
 def tmm_cq(sa, ssa, out, n, kb, rs, ors, m, ab, srs, bits: int, acc=False, rmax=False,
-           ra=0, rb=0, rc=0, comment="tmm cq"):
+           ra=0, rb=0, rc=0, comment="tmm cq", grq=False):
     """TMM CQ (Config.TCQ): GSC's per-(row, D-element block) fp32 scales with codebook weights:
     each code (bits 1: the BIN layout, eight blocks a chunk; 2: the ternary layout, four; 3 or
     4: 4-bit codes, two blocks a chunk, block 2c + h in half h, element i at nibble i of the
     half: byte i/2's low nibble for even i) selects the int8 LUT entry the last LUTSETs loaded
     (tmm_lut). The value of a weight is LUT[code] * Sw[n, k], as a ternary GSC weight's
     code * Sw[n, k]: Cactus CQ's norm[n, g] * codebook[code] with the codebook's int8 scale in
-    Sw (opentpu/cq.py)."""
+    Sw (opentpu/cq.py). grq (bits 2, Config.TGRQ): TMM GRQ's block-major layout and scale
+    planes (four rows a D-byte chunk, every chunk read once)."""
     _check(bits in (1, 2, 3, 4), f"TMM CQ: {bits}-bit codes")
+    _check(not grq or bits == 2, "TMM CQ GRQ: 2-bit codes")
     ins = tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, acc=acc, rmax=rmax, ra=ra, rb=rb, rc=rc,
-              comment=comment, gsc=True, binary=bits == 1)
+              comment=comment, gsc=True, binary=bits == 1, grq=grq)
     ins.w[3] |= TMM_CQ | (TMM_CQ4 if bits >= 3 else 0)
     return ins
 
@@ -581,15 +586,23 @@ def qact(src, rows, ab, kb, srs, row=False, cscale=None, rscale=None, dup=False,
 
 
 def qst(src, dst, sdst, rows, kb, srs, drs, es, row=False, half=False, q4=False, ra=0, rb=0,
-        rc=0, comment=""):
+        rc=0, comment="", q6=None):
     """QST; q4 (Config.QST4): ROW mode, es 1, every row's elements as int4 nibbles, two a byte
     (element c in byte dst + r*drs + c/2, the low nibble for even c), S = amax * f32(1/7) and
-    q = clamp(rne(x * (7 * recip(amax))), -7, 7): an int4 MM operand with RSC (a K cache)."""
+    q = clamp(rne(x * (7 * recip(amax))), -7, 7): an int4 MM operand with RSC (a K cache).
+    q6 (Config.QST6): the plane j in 0..2 of the 6-bit rows q = clamp(rne(x * (31 *
+    recip(amax))), -31, 31), S = amax * f32(1/31) (every plane writes the same S): the 2-bit
+    codes ((q + 32) >> 2j) & 3, four a byte (element c in byte dst + r*drs + c/4, bits
+    2*(c%4)), D/4 bytes a D-element block: TMM CQ2's GRQ layout, four rows a D-byte chunk.
+    q = sum_j LUT_j[code_j] with LUT_j = 4^j c (j < 2), LUT_2 = 16 c - 32: three TMM CQ2 GRQs
+    accumulate the int6 dot (kernels/kv6.py)."""
     _check(0 < rows < 65536 and 0 < kb < 65536, f"QST: rows {rows}, kb {kb}")
     _check(row or not half, "QST: HALF needs ROW mode")
     _check(not q4 or (row and es == 1 and not half), "QST Q4: ROW mode, es 1, not HALF")
+    _check(q6 in (None, 0, 1, 2) and (q6 is None or (row and es == 1 and not half and not q4)),
+           "QST Q6: plane 0..2, ROW mode, es 1, not HALF, not q4")
     return Instr(QST, ra=ra, rb=rb, rc=rc, flags=(F_ROW if row else 0) | (F_HALF if half else 0)
-                 | (F_Q4 if q4 else 0),
+                 | (F_Q4 if q4 else 0) | (0 if q6 is None else F_Q6 | q6 << Q6_PLANE_SHIFT),
                  w=_w(src, dst, sdst, rows | (kb << 16), srs, drs, es), comment=comment)
 
 

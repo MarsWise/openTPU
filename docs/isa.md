@@ -324,7 +324,7 @@ position q's uniform as `uniform(bits(float(q)), seed)` with the seed in state w
 (`generate.Sampler.uniform`); `opentpu.kernels.randn` builds normals (Box-Muller with VPU
 operations only).
 
-`TMM CQ` (CAPS2 bit 11 / `Config.TCQ`; word 4 bit 27, GSC only, not GRQ): codebook-quantized
+`TMM CQ` (CAPS2 bit 11 / `Config.TCQ`; word 4 bit 27, GSC only; GRQ with 2-bit codes only): codebook-quantized
 weights (Cactus CQ1..CQ4, `opentpu/cq.py`). Each code selects an int8 entry of the slice's
 16-entry LUT; the weight is `LUT[code] * Sw[n, k]` with GSC's fp32 scale per (row, D-block), so a
 Cactus matrix `norm[n, g] * codebook[code]` is `LUT = round(codebook / s)`, `Sw = norm * s`,
@@ -422,6 +422,19 @@ the other bytes of those beats while it runs. Flag bit1 `HALF` (`ROW` mode only)
 still the whole row's, but only elements `c < KB*D/2` are written (a V^T append of a head half
 as wide as its padded row, LFM2's 64 of 128, then writes its 64 real rows instead of 128
 byte-strided ones; a quantizer without `HALF` writes the zero padding too, which nothing reads).
+
+Flag bit2 `Q4` (CAPS2 bit 13, `Config.QST4`; `ROW`, `es = 1`, not `HALF`, `dst` and `drs` word
+aligned): `S = amax * f32(1/7)`, `q = clamp(rne(x * (7 * recip(amax))), -7, 7)`, two nibbles a
+byte (element `c` in byte `dst + r*drs + c/2`, the low nibble for even `c`).
+
+Flag bit3 `Q6` (CAPS2 bit 18, `Config.QST6`; the same constraints, not with `Q4`): one 2-bit
+plane `j = flags[5:4]` (0..2) of 6-bit rows, `S = amax * f32(1/31)`,
+`q = clamp(rne(x * (31 * recip(amax))), -31, 31)`: the codes `((q + 32) >> 2j) & 3`, four a byte
+(element `c` in byte `dst + r*drs + c/4`, bits `2*(c % 4)`). Every plane writes the same `S`.
+With `drs = D/4` the rows of a D-block are TMM CQ2's GRQ layout (four rows a D-byte chunk), so
+`q = LUT0[c0] + LUT1[c1] + LUT2[c2]` (`LUTj = 4^j c`, `LUT2 = 16 c - 32`) is three accumulated
+TMM CQ GRQs: the 6-bit K cache of `opentpu/kernels/kv6.py` (6 bits a value; three chunk reads
+per four rows, MM W8 four).
 
 Timing only (the result is the same): a QST with `drs = 1`, `es` a multiple of 4, `dst` word
 aligned and rows of at most 1024 elements (the V^T appends of the attention caches) runs the

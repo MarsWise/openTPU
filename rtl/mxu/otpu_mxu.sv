@@ -117,7 +117,8 @@ module otpu_tmm_gsc
         m_cmd.w2 = sb;
         m_cmd.w5 = 32'(D);
         m_cmd.w7 = 32'd16;
-        m_cmd.w4 = {3'd0, 1'b1, 4'd0, 8'd1, 2'b00, held.w4[15:2]};
+        // (CQ GRQ, 2-bit codes: the LUT's entries, the same block-major layout; kv6.py)
+        m_cmd.w4 = {cq, 2'd0, 1'b1, 4'd0, 8'd1, 2'b00, held.w4[15:2]};
       end
     end
   end
@@ -192,8 +193,8 @@ module otpu_tmm_gsc
     if (start && gsc && cmd.w4[30] && (cmd.w4 != 32'h4001_0001 || cmd.w6[31:1] != 31'h0000_8000))
       $fatal(1, "TMM LUTSET: N = KB = M = 1, half ors[0]");
     if (start && gsc && !cmd.w4[30] && (cmd.w4[29] && !(cmd.w4[26] && !cmd.w4[27] && !cmd.w4[28]) &&
-        (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) || cmd.w4[27] && cmd.w4[28]))
-      $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; CQ not with GRQ (T5: BIN + CQ4 alone)");
+        (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) || cmd.w4[27] && cmd.w4[28] && (cmd.w4[29] || cmd.w4[26])))
+      $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; GRQ only with 2-bit CQ (T5: BIN + CQ4 alone)");
     if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
         cmd.w4[31:30] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
         cmd.w4[15:0] == 0 ||
@@ -348,9 +349,9 @@ module otpu_mxu
     if (cmd_ternary && !cmd_binary && !cmd_t5 && {cmd.w4[30], cmd.w4[27:24]} != 0 &&
         ({cmd.w4[30], cmd.w4[27:26]} != 0 || cmd.w4[23:16] != 1 || cmd_pair || cmd_quad))
       $fatal(1, "otpu_mxu: quarter select requires one unpaired block");
-    if (cmd_cq && (cmd.w4[23:16] != 1 || cmd_pair || cmd_quad || cmd_grq || !cmd.flags[7] ||
-                   (cmd_cq4 && cmd.w4[25])))
-      $fatal(1, "otpu_mxu: TMM CQ subcommands are RSC, KB 1, unpaired (CQ4: half 0 / 1)");
+    if (cmd_cq && (cmd.w4[23:16] != 1 || cmd_pair || cmd_quad || (cmd_grq && cmd_cq4) ||
+                   !cmd.flags[7] || (cmd_cq4 && cmd.w4[25])))
+      $fatal(1, "otpu_mxu: TMM CQ subcommands are RSC, KB 1, unpaired (CQ4: half 0 / 1, not GRQ)");
     if (cmd_grq && (cmd.w4[27:24] != 0 || cmd.w4[23:16] != 1 || !cmd.flags[7] || cmd.flags[0] ||
                     cmd_pair || cmd_quad || int'(cmd.w6[23:16]) > MCOLS || cmd.w7 != 32'd16 ||
                     cmd.w2[3:0] != 0))

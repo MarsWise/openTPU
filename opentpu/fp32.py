@@ -297,18 +297,24 @@ def mx_offset(a, amax):
 INV7 = np.float32(1.0 / 7.0)
 
 
-def quantize_q4(x):
+INV31 = np.float32(1.0 / 31.0)
+
+
+def quantize_q4(x, qmax: int = 7):
     """QST Q4 of the rows of x [rows, n]: S = amax * f32(1/7), inv = 7 * recip(amax), q =
-    clamp(rne(x * inv), -7, 7) (NaN -> 0). Returns (int8 q [rows, n], fp32 S [rows])."""
+    clamp(rne(x * inv), -7, 7) (NaN -> 0). Returns (int8 q [rows, n], fp32 S [rows]).
+    qmax 31: QST Q6's S = amax * f32(1/31), inv = 31 * recip(amax), q in [-31, 31]."""
+    assert qmax in (7, 31)
+    inv_q = INV7 if qmax == 7 else INV31
     x = ftz(x)
     ax = bits(fabs(x))
     amax = from_bits(np.max(ax, axis=1))
     zero = amax == 0
-    s = np.where(zero, F32(0), mul(amax, INV7)).astype(np.float32)
-    inv = np.where(zero, F32(0), mul(F32(7), recip(amax))).astype(np.float32)
+    s = np.where(zero, F32(0), mul(amax, inv_q)).astype(np.float32)
+    inv = np.where(zero, F32(0), mul(F32(qmax), recip(amax))).astype(np.float32)
     y = mul(x, inv[:, None])
     with np.errstate(invalid="ignore"):
-        q = np.clip(np.rint(np.nan_to_num(y, nan=0.0)), -7, 7).astype(np.int8)
+        q = np.clip(np.rint(np.nan_to_num(y, nan=0.0)), -qmax, qmax).astype(np.int8)
     return q, s
 
 

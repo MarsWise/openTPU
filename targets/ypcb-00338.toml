@@ -41,6 +41,7 @@ LDX = false                       # LDX indexed row gather (CAPS2 bit14)
 TD5 = false                       # TMM T5 dense trits (CAPS2 bit15)
 VBFLY = false                     # VOP BFLY, the Hadamard butterfly stage (CAPS2 bit16)
 VAFF = false                      # VOP AFF, the fused row/column affine (CAPS2 bit17)
+QST6 = false                      # QST Q6, 6-bit ROW rows as nibble and 2-bit planes (CAPS2 bit18)
 DSTEP = true
 STREAM = true
 SEQ_WC = true                   # the sequencer's wait entries (WAITC v2, docs/seq_vpu.md; release r2):

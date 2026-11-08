@@ -41,6 +41,7 @@ class Config:
     TCQ: bool = False        # TMM CQ: codebook codes through a 16-entry int8 LUT (CAPS2 bit11)
     TATAN: bool = False      # TFN atan on [0, 1] (VOP 0x2A, table 8; CAPS2 bit12)
     QST4: bool = False       # QST Q4: 4-bit ROW rows (a 4-bit K cache; CAPS2 bit13)
+    QST6: bool = False       # QST Q6: 6-bit ROW rows as a nibble and a 2-bit plane (CAPS2 bit18)
     LDX: bool = False        # LDX, the DMA's indexed row gather from DRAM (CAPS2 bit14)
     TD5: bool = False        # TMM T5: dense trits, five a byte (opentpu/trits.py; CAPS2 bit15)
     VBFLY: bool = False      # VOP BFLY, the Hadamard butterfly stage (kernels/hadamard.py; CAPS2 bit16)
@@ -109,6 +110,7 @@ def board_config(**kw) -> Config:
                 TCQ=bool(int(env.get("OTPU_TCQ", 0))),
                 TATAN=bool(int(env.get("OTPU_TATAN", 0))),
                 QST4=bool(int(env.get("OTPU_QST4", 0))),
+                QST6=bool(int(env.get("OTPU_QST6", 0))),
                 LDX=bool(int(env.get("OTPU_LDX", 0))),
                 TD5=bool(int(env.get("OTPU_TD5", 0))),
                 VBFLY=bool(int(env.get("OTPU_VBFLY", 0))),
@@ -644,8 +646,9 @@ class Slice:
             raw = np.array([w[4], w[6]], np.uint32).view(np.int8)
             self.cq_lut[8 * h:8 * h + 8] = raw
             return
-        if (cq or cq4) and (not cfg.TCQ or not gsc or grq or (cq4 and (binary or not cq))):
-            raise SimError("TMM CQ: needs Config.TCQ and GSC (not GRQ); CQ4 not with BIN")
+        if (cq or cq4) and (not cfg.TCQ or not gsc or grq and (cq4 or binary) or
+                            (cq4 and (binary or not cq))):
+            raise SimError("TMM CQ: needs Config.TCQ and GSC (GRQ: 2-bit codes); CQ4 not with BIN")
         w3 = w[3] & ~(I.TMM_CQ | I.TMM_CQ4 | (I.TMM_BIN if dense else 0))
         quarter = (w3 >> 24) & 3 if binary else (w3 >> 24) & ~(I.TMM_GRQ >> 24)
         if dense and (grq or pair or quad or quarter or not gsc):
@@ -831,22 +834,29 @@ class Slice:
         half = bool(ins.flags & I.F_HALF)
         if half and not row_mode:
             raise SimError("QST: HALF needs ROW mode")
-        if ins.flags & I.F_Q4:                     # 4-bit rows: two elements a byte
-            if not cfg.QST4 or not row_mode or half or es != 1 or dst % 4 or drs % 4 or \
-                    cfg.LANES < 8:
-                raise SimError("QST Q4: needs Config.QST4, ROW mode, es 1, not HALF, word-aligned "
-                               "rows (dst, drs), LANES >= 8")
+        q6 = bool(ins.flags & I.F_Q6)
+        plane = (ins.flags >> I.Q6_PLANE_SHIFT) & 3
+        if ins.flags & (I.F_Q4 | I.F_Q6):          # 4-bit rows: two elements a byte (Q6: four)
+            if q6 and not cfg.QST6 or not q6 and not cfg.QST4 or not row_mode or half or es != 1 \
+                    or dst % 4 or drs % 4 or cfg.LANES < 8 or q6 and (ins.flags & I.F_Q4 or plane > 2) \
+                    or not q6 and ins.flags & 0xF0:
+                raise SimError("QST Q4/Q6: needs Config.QST4 (Q6: QST6), ROW mode, es 1, not HALF, "
+                               "word-aligned rows (dst, drs), LANES >= 8")
             x = self.tget(src + np.arange(rows)[:, None] * srs + np.arange(KB * cfg.D)[None, :])
-            q, s = F.quantize_q4(x)
-            nb = KB * cfg.D // 2
+            q, s = F.quantize_q4(x, 31 if q6 else 7)
+            nb = KB * cfg.D // (4 if q6 else 2)
             baddr = dst + np.arange(rows)[:, None] * drs + np.arange(nb)[None, :]
             sa = sdst + np.arange(rows)[:, None] * 4 + np.arange(4)[None, :]
             if np.any(baddr >= cfg.DRAM_BYTES) or sdst % 4 or np.any(sa >= cfg.DRAM_BYTES):
                 raise SimError("QST Q4: address out of range")
             if _overlap(baddr, sa.reshape(-1)):
                 raise SimError("QST: the data and scale ranges overlap")
-            u = (q.astype(np.int16) & 15).astype(np.uint8)
-            self.dram[baddr] = u[:, 0::2] | (u[:, 1::2] << 4)
+            if q6:                                 # the 2-bit codes ((q + 32) >> 2j) & 3, four a byte
+                u = (((q.astype(np.int16) + 32) >> (2 * plane)) & 3).astype(np.uint8)
+                self.dram[baddr] = u[:, 0::4] | (u[:, 1::4] << 2) | (u[:, 2::4] << 4) | (u[:, 3::4] << 6)
+            else:
+                u = (q.astype(np.int16) & 15).astype(np.uint8)
+                self.dram[baddr] = u[:, 0::2] | (u[:, 1::2] << 4)
             self.dram[sa] = s[:, None].view(np.uint8)
             return
         q, s, d = self._quant_rows(src, rows, KB, srs, cfg.D, row_mode)

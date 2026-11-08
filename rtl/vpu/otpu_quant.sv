@@ -66,6 +66,7 @@ module otpu_qscale
   input  logic          rst,
   input  logic          en,
   input  logic          q4,          // QST Q4: inv = 7 * recip(amax), S = amax * f32(1/7)
+  input  logic          q6,          // QST Q6: inv = 31 * recip(amax), S = amax * f32(1/31)
   input  logic          iv,
   input  logic [TW-1:0] itag,
   input  f32_t          amax,        // >= 0 (an absolute value)
@@ -128,8 +129,11 @@ module otpu_qscale
   // Q6 is an experimental elaboration-time mode; production uses the default
   // Q6=0. Its caller must enforce the separately validated finite range.
   // Q4: 7*y and Q6: 31*y remain normal before the exponent adjustment.
-  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(Q6 ? 32'h41f8_0000 : (q4 ? otpu_fp::F_7 : otpu_fp::F_127)), .b(y[3]), .y(invm));
-  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(Q6 ? 32'h3d04_2108 : (q4 ? otpu_fp::F_INV7 : otpu_fp::F_INV127)), .y(scm));
+  // Q6 (the parameter: the experimental rtl/exp blocks' mode; q6: QST Q6, CAPS2 bit18): 31 and
+  // f32(1/31) = 0x3d042108. q4 and q6 are the command's, constant while it runs.
+  wire q6x = Q6 || q6;
+  otpu_fmul #(.LAT(LM)) u_inv (.clk, .en, .a(q6x ? 32'h41f8_0000 : (q4 ? otpu_fp::F_7 : otpu_fp::F_127)), .b(y[3]), .y(invm));
+  otpu_fmul #(.LAT(LM)) u_sc (.clk, .en, .a(ax), .b(q6x ? 32'h3d04_2108 : (q4 ? otpu_fp::F_INV7 : otpu_fp::F_INV127)), .y(scm));
   otpu_delay #(.W(32), .N(LAT - LM)) u_scd (.clk, .en, .d(scm), .q(scd));
   otpu_delay #(.W(11), .N(LM)) u_z2 (.clk, .en, .d({zd, bd, ekd}), .q({zd2, bd2, ek2}));
   otpu_delay #(.W(1 + TW), .N(LAT + 1)) u_v (.clk, .en, .d({iv_q, itag_q}), .q({ov, otag}));
@@ -244,13 +248,15 @@ module otpu_quant
   logic        pass;
   logic        wide;                         // QST pass 1: four contiguous bytes (a word) a cycle
   logic        q4;                           // QST Q4: eight elements a word (two a byte)
+  logic        q6;                           // QST Q6: eight elements two bytes (four a byte)
+  logic [1:0]  q6p;                          // ... the plane j: the codes ((q + 32) >> 2j) & 3
   logic        rd_wait;                      // waiting for the row's scale (and scale row)
   logic        rd_done;
   logic        sw_ph;                        // QST: the scale row's writes
   logic [15:0] sw_i;                         // ... its word
   // elements per read: QST pass 1 one byte (or one word) a cycle, everything else LANES
-  wire [31:0] ew = (is_st && pass && !t4) ? (wide ? (q4 ? 32'd8 : 32'd4) : 32'd1) : 32'(LANES);
-  wire [31:0] bstep = wide ? 32'd4 : es;     // QST pass 1: badr per read
+  wire [31:0] ew = (is_st && pass && !t4) ? (wide ? ((q4 || q6) ? 32'd8 : 32'd4) : 32'd1) : 32'(LANES);
+  wire [31:0] bstep = wide ? (q6 ? 32'd2 : 32'd4) : es;   // QST pass 1: badr per read
   wire [31:0] Gr = pass ? GW : G;            // the elements of this pass
   wire rlast = (e + ew >= Gr);
   // the elements left in the row, Gr - e, kept alongside e (set wherever e or the pass moves):
@@ -466,7 +472,7 @@ module otpu_quant
   f32_t        sq_amax, sq_sc, sq_inv;
   assign sq_iv   = mc.v && mc.last && !mc.pass;
   assign sq_amax = nmax;
-  otpu_qscale #(.LM(LM), .LA(LA), .TW(2)) u_sc (.clk, .rst, .en, .q4, .iv(sq_iv), .itag(mc.row[1:0]),
+  otpu_qscale #(.LM(LM), .LA(LA), .TW(2)) u_sc (.clk, .rst, .en, .q4, .q6, .iv(sq_iv), .itag(mc.row[1:0]),
     .amax(sq_amax), .ov(sq_ov), .otag(sq_ot), .sc(sq_sc), .inv(sq_inv));
   // the rows' S, inv and amax by bank (row r in r % NB: written at its scale's input / output,
   // read through its pass 1); sv: the bank's scale is out and its pass 1 not yet started
@@ -754,6 +760,15 @@ module otpu_quant
         if (q4) begin                             // Q4: eight nibbles, element 2j low in byte j
           for (int l = 0; l < 8; l++) a_wdata[4 * l +: 4] = qb[l][3:0];
           a_be = 4'hF;
+        end else if (q6) begin                    // Q6: eight 2-bit codes, element 4j + t in byte
+          logic [15:0] h;                         // j's bits 2t (the half at badr[1])
+          for (int l = 0; l < 8; l++) begin
+            logic [5:0] u;
+            u = {~qb[l][5], qb[l][4:0]};          // q + 32 (q in [-31, 31])
+            h[2 * l +: 2] = u[2 * q6p +: 2];
+          end
+          a_wdata = {h, h};
+          a_be = wqd.baddr[1] ? 4'b1100 : 4'b0011;
         end else if (wqd.mask[1]) begin           // a word (wide: the row is word aligned)
           a_wdata = {qb[3], qb[2], qb[1], qb[0]};
           a_be = 4'hF;
@@ -852,6 +867,8 @@ module otpu_quant
       nw = (32'(kb) + 32'd3) >> 2;                // d words of a scale row
       is_st <= qst;
       q4    <= qst && cmd.flags[2];
+      q6    <= qst && cmd.flags[3];
+      q6p   <= cmd.flags[5:4];
       rowm  <= cmd.flags[0];
       csf   <= !qst && cmd.flags[1];
       csb   <= cmd.w4;
@@ -884,7 +901,7 @@ module otpu_quant
       m0a <= '0;
       st_frz <= '0;
       bm <= XD > 0 && !qst && 32'(kb) * D <= 32'(XD) * LANES;
-      t4 <= TB > 0 && qst && !cmd.flags[2] && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
+      t4 <= TB > 0 && qst && !cmd.flags[2] && !cmd.flags[3] && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
             cmd.w2[1:0] == 2'd0 && 32'(kb) * D <= 32'(TB);
       t4_busy <= '0; t4_fin <= 1'b0; dv <= 1'b0; tq[0] <= '0; tq[1] <= '0;
       de <= '0; dh <= 1'b0;
