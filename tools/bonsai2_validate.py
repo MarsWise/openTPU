@@ -131,6 +131,7 @@ def main():
     else:
         from opentpu.host.chat import make_backend
         from opentpu.host import memcal
+        from opentpu.host.ecc_guard import require_clean_ecc
         from opentpu.llm.qwen3 import Engine
         ref = np.load(args.out/'reference.npz')
         if str(ref['config_sha256']) != data['config_sha256']:
@@ -139,7 +140,8 @@ def main():
         if len(ids) >= args.cap or expected.shape != (spec.vocab,):
             raise ValueError('CPU reference dimensions/capacity do not match')
         be, board_cfg = make_backend('board', spec, args.cap, args.dev, args.model.name,
-                                     lookup=True, wformat='ternary_gsc', head_format='ternary_gsc')
+                                     lookup=True, wformat='ternary_gsc', head_format='ternary_gsc',
+                                     guard_ecc=True)
         if not board_cfg.TGSC:
             raise ValueError('New TGSC firmware is required before loading native Bonsai 2')
         eng = None
@@ -151,16 +153,21 @@ def main():
             transport = eng.backend.board.t
             info = eng.backend.board.info()
             data.update(build_id=info.get('build_id'), core_khz=info.get('core_khz'),
-                        actual_cfg_hash=(info.get('cfg') or {}).get('hash'))
-            data['prior_ecc'] = memcal.ecc(transport, clear=True)
+                        actual_cfg_hash=(info.get('cfg') or {}).get('hash'),
+                        pre_scrub_ecc=eng.backend.pre_scrub_ecc)
+            data['prior_ecc'] = memcal.ecc(transport)
+            data['prior_status'] = eng.backend.board.info()['status']
+            require_clean_ecc(data['prior_ecc'], data['prior_status'])
             actual = eng.prefill(ids).astype(np.float64)
             data['ecc'] = memcal.ecc(transport)
+            data['status'] = eng.backend.board.info()['status']
+            require_clean_ecc(data['ecc'], data['status'])
             if not np.isfinite(actual).all():
                 raise ValueError('Nonfinite FPGA logits')
+            np.save(args.out/'board_logits.npy', actual)
             den = np.linalg.norm(actual)*np.linalg.norm(expected)
             cosine = float(actual @ expected/den) if den else 0.
-            clean = data['ecc'] is not None and all(c == 0 and d == 0 for c,d in data['ecc'])
-            data.update(cosine=cosine, passed=bool(clean and cosine >= .99),
+            data.update(cosine=cosine, passed=bool(cosine >= .99),
                         next_token=int(actual.argmax()), reference_next_token=int(expected.argmax()))
         except Exception as e:
             data['error'] = f'{type(e).__name__}: {e}'

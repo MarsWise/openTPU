@@ -215,10 +215,14 @@ def main(argv=None):
                     help="capture card counter deltas during decode; requires exclusive card use")
     ap.add_argument("--expected-build", type=lambda x: int(x, 0))
     ap.add_argument("--expected-hash", type=lambda x: int(x, 0))
+    ap.add_argument("--require-tgrq", action="store_true",
+                    help="require the loaded firmware to advertise TMM GRQ")
     a = ap.parse_args(argv)
     if a.device_counters and (a.backend != 'board' or a.expected_build is None or
                               a.expected_hash is None or not a.json):
         ap.error('--device-counters requires board, --expected-build, --expected-hash and --json')
+    if a.require_tgrq and not a.device_counters:
+        ap.error('--require-tgrq requires --device-counters')
     from transformers import AutoTokenizer
     path = model_dir(a.model)
     checkpoint = None
@@ -234,6 +238,7 @@ def main(argv=None):
         if a.device_counters:
             import fcntl
             from opentpu.host import memcal
+            from opentpu.host.ecc_guard import require_clean_ecc
             # This is also used by the existing Bonsai launchers. Keep the lock
             # alive until process exit and refuse concurrent use.
             card_lock = open('/tmp/claude_run.lock', 'a')
@@ -245,17 +250,21 @@ def main(argv=None):
             probe = B.Board(tr, check=True, lock=False, calibrate=False)
             profile_info = probe.info()
             ecc = memcal.ecc(tr)
+            try:
+                require_clean_ecc(ecc, tr.reg_read(R.R_STATUS))
+            except ValueError as e:
+                raise SystemExit(f'unclean ECC before profiling: {e}') from e
             if (profile_info['build_id'] != a.expected_build or
                     not profile_info['cfg'] or profile_info['cfg']['hash'] != a.expected_hash or
                     not profile_info['core_khz'] or profile_info['running'] or
                     not profile_info['calibrated'] or not profile_info['caps2'].get('tgsc') or
-                    ecc is None or any(sec or ded for sec, ded in ecc) or
-                    tr.reg_read(R.R_STATUS) & R.ST_ECC_DED or
+                    (a.require_tgrq and not profile_info['caps2'].get('tgrq')) or
                     tr.reg_read(R.R_SCRATCH) != R.DRAM_INIT):
                 raise SystemExit('firmware, TGSC, calibration or clean initialized ECC mismatch')
             ecc_preflight = ecc
             cfg = B.device_config(profile_info)
-            backend = lambda c, imgs: B.BoardBackend(c, imgs, transport=tr, model=path.name)
+            backend = lambda c, imgs: B.BoardBackend(c, imgs, transport=tr, model=path.name,
+                                                     guard_ecc=True)
         else:
             backend, cfg = C.make_backend("board", spec, a.cap, a.dev, path.name)
     else:
@@ -318,8 +327,7 @@ def main(argv=None):
             if a.device_counters:
                 from opentpu.llm.bonsai_profile import checked_snapshot
                 step0['ecc'] = memcal.ecc(eng.backend.board.t)
-                if step0['ecc'] is None or any(sec or ded for sec, ded in step0['ecc']):
-                    raise RuntimeError('ECC is not clean before decode')
+                require_clean_ecc(step0['ecc'], eng.backend.board.t.reg_read(R.R_STATUS))
                 step0['counters'] = checked_snapshot(eng.backend.board)
             step0["t"] = time.perf_counter()
             step0["n"] = len(eng.stats)
@@ -408,8 +416,7 @@ def main(argv=None):
         snap = checked_snapshot(eng.backend.board)
         ecc = memcal.ecc(eng.backend.board.t)
         status = eng.backend.board.t.reg_read(R.R_STATUS)
-        if ecc is None or any(sec or ded for sec, ded in ecc) or status & R.ST_ECC_DED:
-            raise RuntimeError('ECC is not clean after the measured interval')
+        require_clean_ecc(ecc, status)
         tokens = turn.decode_steps if a.card_loop else n
         measured = metrics(step0['counters'], snap, tokens, khz)
         prompt_metrics = (metrics(before_prompt, step0['counters'], turn.prefill_tokens, khz)

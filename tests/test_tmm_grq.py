@@ -73,6 +73,38 @@ def test_grq_layout_packers():
         pack_ternary_grq(w[:6], 128)
 
 
+@pytest.mark.parametrize("parallel_flag", [I.F_PAIR, I.F_QUAD])
+@pytest.mark.parametrize("grq", [False, True])
+def test_gsc_rejects_pair_quad_until_separate_block_scales_are_supported(parallel_flag, grq):
+    cfg, image, head, gsc, grq_op, _ = case(2, 1, False, 4)
+    with pytest.raises(ValueError, match="GSC"):
+        I.tmm(W_GRQ if grq else W_ROW, S_GRQ if grq else S_ROW, 8192, 4, 2, 128, 7, 1, 0,
+              16 if grq else 8, gsc=True, grq=grq,
+              pair=parallel_flag == I.F_PAIR, quad=parallel_flag == I.F_QUAD)
+    base = grq_op if grq else gsc
+    raw = dataclasses.replace(base, flags=base.flags | parallel_flag)
+    with pytest.raises(SimError, match="GSC"):
+        Machine(cfg, [head + [raw, I.halt()]], [image.copy()]).run()
+
+
+def test_gsc_requires_per_block_scaling_before_accumulation():
+    from opentpu import fp32 as F
+    cfg, image, head, gsc, _, (x, w, _, _, out, ors, *_) = case(2, 1, False, 4)
+    scales = np.tile(np.array([.25, 1.5], np.float32), (4, 1))
+    image[S_ROW:S_ROW + scales.nbytes] = scales.view(np.uint8).reshape(-1)
+    result = Machine(cfg, [head + [gsc, I.halt()]], [image]).run().slices[0]
+    actual = result.tmem[out:out + ors].view(np.float32)[:4]
+    q, row_scale, offsets = F.quantize_mx(x, 32)
+    dequant = (q.reshape(1, 8, 32).astype(np.float32) *
+               np.exp2(-offsets.astype(np.float32))[:, :, None] * row_scale[:, None, None]).reshape(1, 256)
+    a = dequant[:, :128] @ w[:, :128].T
+    b = dequant[:, 128:] @ w[:, 128:].T
+    expected = (a * .25 + b * 1.5).reshape(-1)
+    wrong_merged = ((a + b) * .25).reshape(-1)
+    assert np.linalg.norm(actual - expected) / np.linalg.norm(expected) < 5e-6
+    assert np.linalg.norm(actual - wrong_merged) / np.linalg.norm(expected) > .25
+
+
 def test_grq_refuses_bad_configuration():
     cfg, image, head, gsc, grq, (*_, rs, srs) = case(3, 2, False, 8)
     with pytest.raises(SimError, match="TGRQ"):
@@ -179,3 +211,35 @@ def test_grq_rtl_m8(have_verilator, m, acc):
     drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=35, seed=m)
     np.testing.assert_array_equal(tmems[0], ref.tmem)
     np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+@pytest.mark.parametrize("n,kb,m,acc", [(4, 8, 1, False), (28, 9, 7, True), (36, 15, 8, False)])
+def test_grq_full_precision_group_scales_and_tails(n, kb, m, acc):
+    cfg, img, head, gsc, grq, (*_, srs) = case(kb, m, acc, n, mcols=8)
+    rng = np.random.default_rng(8000 + n)
+    # Deliberately not FP16 values: distinct scales per row and K group, with zeros.
+    scales = rng.uniform(1e-4, 2, (n, kb)).astype(np.float32)
+    scales[0, ::2] = 0
+    img[S_ROW:S_ROW + scales.nbytes] = scales.view(np.uint8).reshape(-1)
+    planes, stride = grq_scales(scales)
+    assert stride == srs
+    for k in range(kb):
+        img[S_GRQ + k * srs:S_GRQ + (k + 1) * srs] = planes[k].view(np.uint8)
+    a = Machine(cfg, [head + [gsc, I.halt()]], [img.copy()]).run().slices[0]
+    b = Machine(cfg, [head + [grq, I.halt()]], [img.copy()]).run().slices[0]
+    np.testing.assert_array_equal(a.tmem, b.tmem)
+
+
+@pytest.mark.parametrize("waitc", [False, True])
+def test_grq_weight_write_hazard_with_long_axi_stalls_rtl(have_verilator, waitc):
+    from opentpu import rtlsim
+    cfg, img, head, gsc, grq, (*_, rs, srs) = case(5, 2, True, 20)
+    cfg = dataclasses.replace(cfg, SEQ_WC=waitc)
+    # A DMA write overlaps a later GRQ weight plane; preserve the packed bytes
+    # so the test also exercises ordering without inventing reserved symbols.
+    prog = head + [I.ld(W_GRQ + rs, 20000, 32), I.st(W_GRQ + rs, 20000, 32),
+                   grq, I.st(S_GRQ + 4 * srs, 10000, 12), gsc, I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run().slices[0]
+    dram, tmem, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=70, seed=991)
+    np.testing.assert_array_equal(dram[0], ref.dram)
+    np.testing.assert_array_equal(tmem[0], ref.tmem)

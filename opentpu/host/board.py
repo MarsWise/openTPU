@@ -1632,12 +1632,19 @@ class BoardBackend:
     /tmp/otpu/<dev>.json (runstate.RunnerStatus) until close() or exit."""
 
     def __init__(self, cfg, images: list, transport=None, model: str | None = None,
-                 status: bool = True):
+                 status: bool = True, guard_ecc: bool = False):
         from opentpu import isa as I
         self.I = I
         self.cfg = cfg
         self.board = Board(transport)
-        self.board.scrub()
+        try:
+            if guard_ecc:
+                from .ecc_guard import check_board_ecc
+                self.pre_scrub_ecc = check_board_ecc(self.board)
+            self.board.scrub()
+        except Exception:
+            self.board.close()
+            raise
         info = self.info = self.board.info()
         try:
             check_fits(cfg, info)
