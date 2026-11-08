@@ -1139,8 +1139,10 @@ module otpu_mxu
     for (int i = 0; i < D; i++)
       wd[i] <= wq_qd ? {8'd0, w0[2 * (3 * D + i) +: 2], w0[2 * (2 * D + i) +: 2],
                         w0[2 * (D + i) +: 2], w0[2 * i +: 2]} :
+               // (the high byte only feeds PAIR's high-block columns: never a CQ command, which
+               // has no PAIR / QUAD; its CQ lookup would only double the D LUT muxes)
                {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts,
-                     wq_cq, wq_c4, cq_lut, wq_t5),
+                     1'b0, 1'b0, cq_lut, wq_t5),
                 wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut, wq_t5)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
