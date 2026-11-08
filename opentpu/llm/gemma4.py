@@ -138,6 +138,7 @@ class Spec:
     expert_ffn: int = 0
     k_rows: bool = False    # sliding K rows at their own stride, not the RoPE row's (Image.ks):
                             # 26B-A4B's 8 KV heads x 25 layers, 414 -> 146 MB at 1152 slots
+    v_norm: bool = True     # V's weightless RMSNorm (Gemma 4); Gemma 3 has none
 
     @property
     def layers(self) -> int:
@@ -171,6 +172,8 @@ class Spec:
     def from_hf(model_dir) -> "Spec":
         top = json.loads((Path(model_dir) / "config.json").read_text())
         c = top.get("text_config", top)
+        if c.get("model_type") == "gemma3_text":
+            return Spec.from_gemma3(model_dir, c)
         L = c["num_hidden_layers"]
         kinds = tuple(FULL if t == "full_attention" else SLIDE for t in c["layer_types"])
         # the global layers' head size and KV heads: global_head_dim / num_global_key_value_
@@ -231,6 +234,38 @@ class Spec:
                     experts=c["num_experts"] if moe else 0,
                     top_k=c["top_k_experts"] if moe else 0,
                     expert_ffn=c["moe_intermediate_size"] if moe else 0, k_rows=moe)
+
+    @staticmethod
+    def from_gemma3(model_dir, c: dict) -> "Spec":
+        """Gemma 3 (gemma3_text: FunctionGemma 270M, Gemma 3 1B...) as this module's model: the
+        same blocks (four RMSNorms a layer, q / k norms, sliding and global layers, gelu_tanh MLP,
+        the embedding x sqrt(H), a tied head), with these differences, folded into the weights
+        by Gemma3Weights: the norms' gains are 1 + w; the attention scale
+        query_pre_attn_scalar^-1/2 multiplies q_norm's gain; no layer scalar (1.0). V has no
+        norm (v_norm False); global layers use the default RoPE over the whole head (theta
+        rope_theta), sliding ones theta rope_local_base_freq; no per-layer inputs, no KV
+        sharing, no MoE."""
+        if c.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
+            raise ValueError(f"activation {c['hidden_activation']} is not gelu_tanh")
+        if c.get("attn_logit_softcapping") or c.get("use_bidirectional_attention") or \
+                c.get("rope_scaling"):
+            raise ValueError("Gemma 3: attention soft-capping, bidirectional attention and "
+                             "RoPE scaling are not supported")
+        L, d = c["num_hidden_layers"], c["head_dim"]
+        kinds = tuple(FULL if t == "full_attention" else SLIDE for t in c["layer_types"])
+        eos, gc = [], Path(model_dir) / "generation_config.json"
+        for e in (c.get("eos_token_id", 1),
+                  json.loads(gc.read_text()).get("eos_token_id") if gc.exists() else None):
+            eos += e if isinstance(e, list) else [] if e is None else [e]
+        return Spec(hidden=c["hidden_size"], kinds=kinds, kv_src=tuple(range(L)),
+                    ffn=(c["intermediate_size"],) * L, n_q=c["num_attention_heads"],
+                    n_kv=c["num_key_value_heads"], head_dim=d, global_head_dim=d,
+                    vocab=c["vocab_size"], ple_dim=0, window=c["sliding_window"],
+                    theta=c.get("rope_local_base_freq", 1e4),
+                    global_theta=c.get("rope_theta", 1e6), global_rot=d // 2,
+                    eps=c.get("rms_norm_eps", 1e-6), softcap=c.get("final_logit_softcapping"),
+                    tied=c.get("tie_word_embeddings", True), bos=c.get("bos_token_id", 2),
+                    eos=tuple(dict.fromkeys(eos)), v_norm=False)
 
     def check(self, cfg: Config) -> None:
         D = cfg.D
@@ -365,7 +400,49 @@ def text_ids(tok, text: str, bos: int = 2) -> list:
 
 
 def load_weights(model_dir) -> Weights:
+    c = json.loads((Path(model_dir) / "config.json").read_text())
+    if c.get("text_config", c).get("model_type") == "gemma3_text":
+        return Gemma3Weights(model_dir)
     return Weights(model_dir)
+
+
+class Gemma3Weights(Weights):
+    """A Gemma 3 checkpoint as Gemma 4 names and meanings (Spec.from_gemma3): every RMSNorm
+    gain read as 1 + w, q_norm's also x query_pre_attn_scalar^-1/2 (the attention's scale, as
+    Gemma 4's is 1), and model.layers.i.layer_scalar = 1."""
+
+    def __init__(self, model_dir):
+        super().__init__(model_dir)
+        c = json.loads((Path(model_dir) / "config.json").read_text())
+        c = c.get("text_config", c)
+        self.qscale = np.float32(c.get("query_pre_attn_scalar", c["head_dim"]) ** -0.5)
+        self.L = c["num_hidden_layers"]
+        self._ls = {f"model.layers.{i}.layer_scalar" for i in range(self.L)}
+
+    def keys(self):
+        return list(self._files.keys()) + sorted(self._ls)
+
+    def __contains__(self, k):
+        return k in self._files or k in self._ls
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self):
+        return len(self._files) + len(self._ls)
+
+    def __getitem__(self, k):
+        if k in self._ls:
+            return np.ones(1, np.float32)
+        v = super().__getitem__(k)
+        if k.endswith("norm.weight"):              # (layernorm, q_norm, k_norm, model.norm)
+            v = (np.float32(1) + v).astype(np.float32)
+            if k.endswith("q_norm.weight"):
+                v = (v * self.qscale).astype(np.float32)
+        return v
+
+    def get(self, k, default=None):
+        return self[k] if k in self else default
 
 
 def _rows(W, k, idx) -> np.ndarray:
@@ -485,7 +562,7 @@ def reference_logits(spec: Spec, W, tokens) -> np.ndarray:
             k = (h @ W[a + "k_proj.weight"].T).reshape(T, nkv, d)
             v = k if spec.kv_same(i) else (h @ W[a + "v_proj.weight"].T).reshape(T, nkv, d)
             kv[i] = (_rot(_norm(k, W[a + "k_norm.weight"], spec.eps), cos, sin, d // 2),
-                     _norm(v, None, spec.eps))
+                     _norm(v, None, spec.eps) if spec.v_norm else v)
         k, v = kv[spec.kv_src[i]]
         o = np.zeros((T, spec.n_q, d), f32)
         for hq in range(spec.n_q):
@@ -579,7 +656,8 @@ def emulated_logits(spec: Spec, W, tokens, D: int = 128, wformat: str = "int8",
                 v = k if spec.kv_same(i) else (w(a + "v_proj.weight", fa) @ h).reshape(nkv, d)
                 k = _rot(_norm(k, W[a + "k_norm.weight"], spec.eps), c, s_, d // 2)
                 K.setdefault(i, []).append(_fake_k(k, D))
-                V.setdefault(i, []).append(_v_parts(_norm(v, None, spec.eps)))
+                V.setdefault(i, []).append(_v_parts(_norm(v, None, spec.eps) if spec.v_norm
+                                                    else v))
             src = spec.kv_src[i]
             lo = max(0, pos + 1 - spec.window) if kind == SLIDE else 0
             Kh = np.stack([a_ for a_, _ in K[src][lo:]], 1)
@@ -1624,7 +1702,8 @@ def _attention(x, lw, m, pos, ropes, block: int):
         for r in range(R):
             c, s_ = cos_sin(r)
             kr = _rope(rmsnorm(k[r, :].reshape(nkv, d), kn, eps), c, s_)
-            vr = rmsnorm(v[r, :].reshape(nkv, d), None, eps)
+            vr = rmsnorm(v[r, :].reshape(nkv, d), None, eps) if spec.v_norm else \
+                v[r, :].reshape(nkv, d)
             slot = _slot(m, lw.kind, pos[r] if isinstance(pos, list) else pos)
             for j in range(nkv):
                 ol.kv_append(kv, j, slot, kr[j:j + 1, :], vr[j:j + 1, :])

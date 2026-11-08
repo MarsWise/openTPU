@@ -277,6 +277,11 @@ def _gemma4(spec) -> bool:
     return type(spec).__module__.endswith(".gemma4")
 
 
+def _gemma3(spec) -> bool:
+    """A Gemma 3 checkpoint on gemma4's model (gemma4.Spec.from_gemma3)."""
+    return _gemma4(spec) and not spec.v_norm
+
+
 def unsupported(spec) -> str | None:
     """Why the golden cannot stand for this model's device, or None: a MoE's routers are int8
     in every format and its experts stream (Gemma 4 26B-A4B's too)."""
@@ -610,6 +615,9 @@ def run_device(name: str, spec, path: Path, cap: int, prompts, a, card=None, W=N
     devices (opened once); W: the weights (default: the checkpoint's at `path`)."""
     from opentpu.llm.qwen3 import Engine, load_weights
     kw = dict(cap=cap, wformat=a.wformat, head_format=a.head_format, resident=a.resident)
+    if W is None and _gemma3(spec):             # (Gemma 3: its gains read as gemma4's)
+        from opentpu.llm import gemma4 as G4
+        W = G4.load_weights(path)
     W = load_weights(path) if W is None else W
     if name == "board":
         eng = Engine(spec, W, cfg=card[1], backend=card[0], **kw)
@@ -645,7 +653,7 @@ def load_hf(path: Path, spec):
     weights copied in one tensor at a time (gemma4.load_weights)."""
     import torch
     import transformers
-    if not _gemma4(spec):
+    if not _gemma4(spec) or _gemma3(spec):
         return transformers.AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32)
     from opentpu.llm import gemma4 as G4
     c = transformers.AutoConfig.from_pretrained(path)

@@ -54,7 +54,7 @@ def load_spec(path):
         from .qwen35 import Spec
     elif t == "minicpmv4_7":            # (qwen35's Spec with the vision side)
         from .minicpmv import Spec
-    elif t in ("gemma4", "gemma4_text"):
+    elif t in ("gemma4", "gemma4_text", "gemma3_text"):   # (Gemma 3: gemma4.Spec.from_gemma3)
         from .gemma4 import Spec
     elif t == "bitnet":
         from .bitnet import spec_from_hf as bitnet_spec
