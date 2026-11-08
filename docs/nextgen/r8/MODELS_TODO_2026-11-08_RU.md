@@ -59,3 +59,26 @@
 6. **Исполнитель графа (YOLOX)** и **планировщик памяти.**
 7. **Cactus**, затем **Ouro**, затем **Dory**.
 8. **Kokoro**, затем **SD 1.5**, затем **MusicGen**, затем **PaddleOCR-VL**.
+
+## LFM3-1.7B: план графа устройства (8.11, вечер)
+
+**Сделано.** `llm/lfm3.py`: `Spec.from_hf` (текст LFM3 или `text_config` Omni), FRAME-эталон по `modeling_lfm3.py`; сверка с HF Lfm2 на общей структуре — `tests/test_lfm3.py`, 3 passed. Отдельного чекпойнта LFM3-1.7B на диске нет: текстовая часть `lfm3-omni` той же геометрии; совпадение весов не проверено.
+
+**Где что уже есть в движках:**
+
+| Часть LFM3 | Есть в | Как |
+|---|---|---|
+| gated short conv, k = 7 | `lfm2` (`conv_k` — параметр, кольцо состояния 2K строк) | без изменений |
+| SWA-256 + full, своя RoPE на тип слоя, QK-norm | `gemma4` (`SLIDE` / `FULL`, кольцо K/V на window + блок, `attention.Blocks`, две таблицы RoPE) | частичный RoPE LFM3 — zero-tail (пары i, i+64, частоты хвоста 0), это таблица cos = 1 / sin = 0 на хвосте; у Gemma 4 «proportional» RoPE другой — нужна своя таблица |
+| sandwich-нормы | `gemma4` (post-attention / post-ffn нормы) | то же место в слое |
+| sigmoid-гейт на голову | `qwen3._attention(gated)` — гейт на измерение | v1: строки `gate_proj` повторены по d (+2,7 % трафика весов); v2: [1, n_q] и умножение по строкам головы |
+| SwiGLU MLP | `qwen3._mlp` | без изменений |
+
+**Порядок:**
+
+1. Движок LFM3 = слои внимания Gemma 4 (SWA/FULL) + слой свёртки LFM2 в одном плане; новый вид слоя `conv` в `gemma4.Image`, или три вида в `lfm2.Image`. Решить по объёму правок — сначала прочитать, как `gemma4.plan` группирует виды.
+2. Таблица RoPE LFM3 (zero-tail, тета 1e6 у full, 1e4 у SWA) в I/O и в lookup (`cos_t` / `sin_t` для resident).
+3. Гейт v1 через `gated`.
+4. `emulated_logits` для LFM3: квантованные точки как у движка.
+5. Тесты: tiny LFM3 (numpy-веса) — ISA против эмуляции, resident и префилл бит в бит, `generate_card`; RTL-токен на board-RTL.
+6. Реальные веса Omni (текст, ~3,4 ГБ bf16): эталон по слоям лениво, затем ISA; память платы при 4 ГБ — посчитать до прогона.
