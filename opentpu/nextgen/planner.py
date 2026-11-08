@@ -55,10 +55,11 @@ class MemoryPlan:
     alignment: int
     allocations: tuple[Allocation, ...]
     high_watermark: int
+    reserve_bytes: int = 0
 
     @property
     def remaining_bytes(self) -> int:
-        return self.capacity_bytes - self.high_watermark
+        return self.capacity_bytes - self.reserve_bytes - self.high_watermark
 
     def address_of(self, name: str) -> int:
         matches = [a.address for a in self.allocations if a.name == name]
@@ -67,18 +68,38 @@ class MemoryPlan:
         return matches[0]
 
     def verify(self) -> None:
-        if self.high_watermark > self.capacity_bytes:
-            raise MemoryBudgetError("high watermark exceeds device capacity")
+        if self.alignment < 1 or self.alignment & (self.alignment - 1):
+            raise ValueError("alignment must be a power of two")
+        if (self.weights_bytes < 0 or self.capacity_bytes < 0 or self.reserve_bytes < 0 or
+                self.high_watermark < self.weights_bytes):
+            raise ValueError("invalid weights, capacity or high watermark")
+        limit = self.capacity_bytes - self.reserve_bytes
+        if limit < 0 or self.high_watermark > limit:
+            raise MemoryBudgetError("high watermark exceeds capacity after reserve")
+        names = set()
         for i, a in enumerate(self.allocations):
+            if not a.name or a.name in names or a.size <= 0 or a.first < 0 or a.last <= a.first:
+                raise ValueError(f"invalid buffer or lifetime: {a.name}")
+            names.add(a.name)
             if a.address < self.weights_bytes or a.address % self.alignment:
                 raise ValueError(f"invalid placement: {a.name}")
             if a.address + a.size > self.capacity_bytes:
                 raise MemoryBudgetError(f"outside DDR3: {a.name}")
-            for b in self.allocations[i + 1:]:
+            if a.address + a.size > self.high_watermark:
+                raise ValueError(f"high watermark does not cover: {a.name}")
+        # Only address-overlapping intervals need a lifetime comparison. Sorting
+        # keeps the common fully resident layout near O(n log n), even for many
+        # thousands of KV regions. Address aliasing still checks all candidates.
+        ordered = sorted(self.allocations, key=lambda item: item.address)
+        for i, a in enumerate(ordered):
+            j = i + 1
+            while j < len(ordered) and ordered[j].address < a.address + a.size:
+                b = ordered[j]
                 live_overlap = a.first < b.last and b.first < a.last
                 address_overlap = a.address < b.address + b.size and b.address < a.address + a.size
                 if live_overlap and address_overlap:
                     raise ValueError(f"live buffers overlap: {a.name} and {b.name}")
+                j += 1
 
 
 def plan_buffers(buffers: Iterable[Buffer], *, weights_bytes: int = 0,
@@ -155,7 +176,7 @@ def plan_buffers(buffers: Iterable[Buffer], *, weights_bytes: int = 0,
         result.append(alloc)
         active.append(alloc)
 
-    plan = MemoryPlan(weights_bytes, capacity_bytes, alignment, tuple(result), high)
+    plan = MemoryPlan(weights_bytes, capacity_bytes, alignment, tuple(result), high, reserve_bytes)
     plan.verify()
     return plan
 

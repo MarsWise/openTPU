@@ -5,6 +5,7 @@ claim hardware support for any new model or operator.
 """
 from .planner import (DDR3_BYTES, Buffer, Allocation, MemoryPlan, MemoryBudgetError,
                       plan_buffers, Stage, ExecutionTrace, HostComputeError)
+from .arena import DeviceArena
 
 __all__ = ["DDR3_BYTES", "Buffer", "Allocation", "MemoryPlan", "MemoryBudgetError",
-           "plan_buffers", "Stage", "ExecutionTrace", "HostComputeError"]
+           "plan_buffers", "Stage", "ExecutionTrace", "HostComputeError", "DeviceArena"]

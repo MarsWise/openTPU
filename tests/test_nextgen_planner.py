@@ -1,5 +1,6 @@
 """Pure-Python checks for the r7 memory and placement infrastructure."""
 import pytest
+from opentpu.nextgen.planner import Allocation, MemoryPlan
 
 from opentpu.nextgen import (
     Buffer, DDR3_BYTES, ExecutionTrace, HostComputeError,
@@ -43,6 +44,15 @@ def test_validation_and_empty_graph():
     assert plan_buffers([], capacity_bytes=DDR3_BYTES).remaining_bytes == DDR3_BYTES
 
 
+def test_reserved_capacity_is_not_reported_as_free_or_used_by_allocations():
+    plan = plan_buffers([Buffer("x", 64, 0, 1)], capacity_bytes=1024, reserve_bytes=256)
+    assert plan.reserve_bytes == 256
+    assert plan.remaining_bytes == 1024 - 256 - plan.high_watermark
+    bad = MemoryPlan(0, 1024, 64, (Allocation("x", 768, 64, 0, 1),), 832, reserve_bytes=256)
+    with pytest.raises(MemoryBudgetError):
+        bad.verify()
+
+
 def test_strict_trace_refuses_host_math():
     trace = ExecutionTrace()
     trace.add("load wav", "host-io")
@@ -60,3 +70,45 @@ def test_unknown_placement_rejected():
     trace = ExecutionTrace()
     with pytest.raises(ValueError):
         trace.add("mystery", "implicit-fallback")
+
+
+@pytest.mark.parametrize("plan", [
+    MemoryPlan(0, 1024, 64, (Allocation("x", 64, 64, 0, 1),), 64),
+    MemoryPlan(0, 1024, 64, (Allocation("x", 64, -1, 0, 1),), 128),
+    MemoryPlan(0, 1024, 64, (Allocation("x", 64, 64, 1, 1),), 128),
+    MemoryPlan(0, 1024, 64, (Allocation("x", 64, 64, 0, 1),
+                              Allocation("x", 128, 64, 1, 2)), 192),
+])
+def test_rejects_invalid_supplied_plan(plan):
+    with pytest.raises(ValueError):
+        plan.verify()
+
+
+def test_verify_address_sorted_overlap_with_disjoint_and_live_lifetimes():
+    allocations = (Allocation("later", 64, 128, 2, 4),
+                   Allocation("first", 64, 128, 0, 2),
+                   Allocation("safe", 192, 64, 0, 4))
+    MemoryPlan(0, 1024, 64, allocations, 256).verify()
+    overlapping = allocations + (Allocation("bad", 128, 64, 1, 3),)
+    with pytest.raises(ValueError, match="overlap"):
+        MemoryPlan(0, 1024, 64, overlapping, 256).verify()
+
+
+def test_overlap_verifier_matches_pairwise_reference():
+    import random
+    rng = random.Random(530)
+    for _ in range(200):
+        regions = []
+        for i in range(12):
+            first = rng.randrange(6)
+            regions.append(Allocation(str(i), rng.randrange(12) * 64,
+                                      rng.choice([64, 128, 192]), first, first + rng.randrange(1, 4)))
+        bad = any(a.address < b.address + b.size and b.address < a.address + a.size and
+                  a.first < b.last and b.first < a.last
+                  for i, a in enumerate(regions) for b in regions[i + 1:])
+        plan = MemoryPlan(0, 1024, 64, tuple(regions), 1024)
+        if bad:
+            with pytest.raises(ValueError, match="overlap"):
+                plan.verify()
+        else:
+            plan.verify()
