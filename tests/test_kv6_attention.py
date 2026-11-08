@@ -139,3 +139,27 @@ def test_kv6_refusals(W, monkeypatch):
     eng = _engine(W, "kv6", monkeypatch=monkeypatch)
     with pytest.raises(NotImplementedError, match="kv6"):
         kvio.Layout(eng.image, eng.cfg.S)
+
+
+def test_kv6_token_on_board_rtl_is_bit_exact(have_verilator, W, monkeypatch):
+    """A resident token at position 261 (score blocks of 256 and a masked bucket block) over a
+    6-bit K on the Verilator RTL (the board's memory path, m8 with r8's QST6 + TCQ + TGRQ)
+    equals the ISA simulator bit for bit: the logits and the whole DRAM image (the K planes and
+    S planes the token appended)."""
+    from opentpu import rtlsim
+    from opentpu.isasim import board_config
+    from opentpu.llm.rtl_backend import RtlBackend
+    monkeypatch.setenv("OTPU_KV", "kv6")
+    cfg = board_config(DRAM_BYTES=1 << 26, MCOLS=8, **R8)
+    toks = [int(t) for t in np.random.default_rng(5).integers(0, 1000, 262)]
+    eng = Engine(SPEC, W, cap=512, cfg=cfg, resident=True)
+    assert eng.image.kv == "kv6"
+    eng.prefill(toks[:-1])
+    n, isa = eng.image.nbytes, eng.backend
+    rtl = RtlBackend(eng.cfg, [s.dram[:n] for s in isa.machine.slices],
+                     uarch=rtlsim.BOARD_UARCH, axi=True, boot=True)
+    want = eng.step(toks[-1])
+    eng.backend, eng.pos = rtl, eng.pos - 1
+    got = eng.step(toks[-1])
+    assert np.array_equal(want.view(np.uint32), got.view(np.uint32))
+    assert np.array_equal(isa.machine.slices[0].dram[:n], rtl.drams[0][:n])
