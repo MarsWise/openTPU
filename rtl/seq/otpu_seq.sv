@@ -499,13 +499,15 @@ module otpu_seq
   always_comb dunit = (!STREAMS && (op == OP_DSTEP || op == OP_STREAM)) ? -1 : unit_of(op);
 
   // ---- dispatch pipeline: R (the instruction at pc: registers resolved) -> P (footprint
-  // partial products) -> S (products) -> Q (footprint ranges) -> C (dependencies on the window,
-  // slot allocation). In order; a stage holds while the next cannot take its instruction (C:
+  // partial products) -> S (products) -> Q (footprint ranges) -> T (the ranges registered:
+  // fp_seg and hz_coarse a stage of their own, off fp_ranges' adds and overflow flags) -> C
+  // (dependencies on the window, slot allocation). In order; a stage holds while the next cannot take its instruction (C:
   // the window is full). The stages stream, so they add latency only at the program start.
-  logic        p_v, s_v, q_v, c_v;
-  cmd_t        p_cmd, s_cmd, q_cmd, c_cmd;
-  logic [2:0]  p_unit, s_unit, q_unit, c_unit;
-  logic [31:0] p_pc, s_pc, q_pc, c_pc;
+  logic        p_v, s_v, q_v, t_v, c_v;
+  cmd_t        p_cmd, s_cmd, q_cmd, t_cmd, c_cmd;
+  logic [2:0]  p_unit, s_unit, q_unit, t_unit, c_unit;
+  logic [31:0] p_pc, s_pc, q_pc, t_pc, c_pc;
+  fp_t         t_fp;             // T: Q's ranges, registered
   fpp_t        s_pp;
   fpm_t        q_pr;
   fp_t         q_fp;             // Q's footprint ranges (otpu_pkg form)
@@ -513,13 +515,14 @@ module otpu_seq
   logic        have_free;
   logic        wc_hold;          // WAITC: a VPU instruction waits for the one VMW back
   wire         c_go = c_v && have_free && !wc_hold;
-  wire         q_adv = !c_v || c_go;            // Q hands its instruction to C
+  wire         t_adv = !c_v || c_go;            // T hands its instruction to C
+  wire         q_adv = !t_v || t_adv;           // Q hands its instruction to T
   wire         s_adv = !q_v || q_adv;           // S hands its instruction to Q
   // P hands its instruction to S (WAITC: to C, no footprint stages)
   wire         p_adv = WAITC ? (!c_v || c_go) : (!s_v || s_adv);
   logic [SWW-1:0] p_sync, c_sync;               // WAITC: the instruction's wait entry
   wire         r_take = !p_v || p_adv;          // P can take the instruction at R
-  wire         pipe_empty = !p_v && !s_v && !q_v && !c_v;
+  wire         pipe_empty = !p_v && !s_v && !q_v && !t_v && !c_v;
   // R retires a control instruction this cycle (NOP, HALT, LI, ADDI, a LOOP's second cycle)
   logic        r_ret;
 
@@ -907,7 +910,7 @@ module otpu_seq
       pc <= '0; sp <= '0; cyc <= '0;
       halted <= 1'b0; error <= 1'b0; stopping <= 1'b0;
       rl_wait <= 1'b0; ch_req <= 1'b0;
-      p_v <= 1'b0; s_v <= 1'b0; q_v <= 1'b0; c_v <= 1'b0; lp <= 1'b0;
+      p_v <= 1'b0; s_v <= 1'b0; q_v <= 1'b0; t_v <= 1'b0; c_v <= 1'b0; lp <= 1'b0;
       icount <= '0;
       sv <= '0; sstarted <= '0; sready <= '0;
       for (int i = 0; i < 8; i++) R[i] <= '0;
@@ -1107,19 +1110,27 @@ module otpu_seq
         sfp_raw[free_slot] <= c_raw;
 `endif
       end
+      // ---- T: the scoreboard's segments of the registered ranges
+      if (!WAITC && t_adv) begin
+        c_v <= t_v;
+        if (t_v) begin
+          c_cmd <= t_cmd; c_unit <= t_unit; c_pc <= t_pc;
+          c_fp <= hz_coarse(fp_seg(t_cmd.op, t_fp));
+`ifndef SYNTHESIS
+          c_fpx <= fp_seg(t_cmd.op, t_fp);
+`endif
+`ifndef SYNTHESIS
+          c_ref <= fp_hull(t_fp);
+          c_raw <= t_fp;
+`endif
+        end
+      end
       // ---- Q: footprint ranges
       if (!WAITC && q_adv) begin
-        c_v <= q_v;
+        t_v <= q_v;
         if (q_v) begin
-          c_cmd <= q_cmd; c_unit <= q_unit; c_pc <= q_pc;
-          c_fp <= hz_coarse(fp_seg(q_cmd.op, q_fp));
-`ifndef SYNTHESIS
-          c_fpx <= fp_seg(q_cmd.op, q_fp);
-`endif
-`ifndef SYNTHESIS
-          c_ref <= fp_hull(q_fp);
-          c_raw <= q_fp;
-`endif
+          t_cmd <= q_cmd; t_unit <= q_unit; t_pc <= q_pc;
+          t_fp <= q_fp;
         end
       end
       // ---- S: products
