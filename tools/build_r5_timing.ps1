@@ -127,6 +127,11 @@ Write-Output "Output: $OutDir"
 if ($Plan) { $buildEnv.GetEnumerator() | Sort-Object Name | Format-Table -AutoSize; return }
 & git -C $repoRoot diff HEAD --quiet --
 if ($LASTEXITCODE -ne 0) { throw 'Commit tracked source changes before preparing a release project' }
+$untrackedSources = @(& git -C $repoRoot ls-files --others --exclude-standard -- rtl/ boards/ opentpu/ sim/ targets/ tools/)
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect untracked source files' }
+if ($untrackedSources.Count -gt 0) {
+    throw ("Commit or explicitly remove untracked source files before a release project: " + ($untrackedSources -join ', '))
+}
 $synthCommit = $sourceCommit
 if ($Mode -eq 'Impl') {
     if (-not $PSBoundParameters.ContainsKey('OutDir')) { throw 'Impl needs -OutDir (an existing project)' }

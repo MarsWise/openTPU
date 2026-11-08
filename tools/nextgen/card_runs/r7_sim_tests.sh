@@ -4,18 +4,12 @@
 # limit; a summary line per file. Not during a card run (the same lock).
 set -u
 exec 9>/tmp/claude_run.lock
-flock -n 9 || { echo "== another claude run is in progress: not started"; exit 0; }
+flock -n 9 || { echo "== another claude run is in progress: not started"; exit 75; }
 R=$HOME/openTPU_BitNET
 TS=$(date +%Y%m%d-%H%M%S); OUT=$R/runs/r7-sim-$TS; mkdir -p "$OUT"
 cd "$R" || exit 1
-sync_tree() {   # fast-forward to the bundle; untracked files the branch adds are MOVED aside, not deleted
+sync_tree() {   # Git refuses to overwrite tracked or untracked user data.
   git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature || return 1
-  local BK="$R/runs/untracked-moved-$TS" f
-  for f in $(git diff --name-only --diff-filter=A HEAD refs/remotes/claude/feature); do
-    if [ -e "$f" ] && ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-      mkdir -p "$BK/$(dirname "$f")" && mv "$f" "$BK/$f" && echo "   moved untracked $f -> $BK/$f (the branch adds it)"
-    fi
-  done
   git merge -q --ff-only refs/remotes/claude/feature
 }
 sync_tree || { echo "== SYNC FAILED"; exit 1; }
@@ -42,4 +36,5 @@ for f in tests/test_tmm_grq.py tests/test_resize.py tests/test_letterbox.py test
   [ $rc = 0 ] || { FAILS=$((FAILS+1)); grep -E "^FAILED|^ERROR" "$OUT/$n.txt" | head -10; [ $rc = 124 ] && echo "   TIMEOUT"; }
 done
 echo; echo "== $FAILS file(s) with failures; logs in $OUT"
-tar czf /tmp/r7_sim_tests.tgz -C "$R/runs" "r7-sim-$TS"
+tar czf /tmp/r7_sim_tests.tgz -C "$R/runs" "r7-sim-$TS" || exit 1
+[ "$FAILS" -eq 0 ]

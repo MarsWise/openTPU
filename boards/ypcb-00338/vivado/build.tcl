@@ -216,6 +216,12 @@ if {$mf ne ""} {
 # ---- PCIe Gen2: the PCIe block's 500 MHz paths into its own block RAMs (userclk1_reroute.tcl)
 source $here/userclk1_reroute.tcl
 
+# Retain the exact post-ECO, signoff-constraint design used for the bitstream.
+# impl_1's checkpoint predates the reroute and margin removal above.
+write_checkpoint -force $out/reports/signoff.dcp
+report_route_status -file $out/reports/route_status.rpt
+report_bus_skew -file $out/reports/bus_skew.rpt
+check_timing -verbose -file $out/reports/check_timing.rpt
 report_timing_summary -max_paths 50 -report_unconstrained -warn_on_violation \
   -file $out/reports/timing_summary.rpt
 report_timing -max_paths 30 -sort_by group -nworst 1 -file $out/reports/timing_worst.rpt

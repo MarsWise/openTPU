@@ -8,13 +8,15 @@ set H=nvx@192.168.0.157
 set O=-o UserKnownHostsFile="%KH%" -o ConnectTimeout=15
 ssh %O% %H% "pgrep -f '[c]laude_exec.sh' >/dev/null" && (echo A measurement run is in progress on the host: wait for it to finish first. & pause & exit /b 1)
 scp %O% "%~dp0sync.bundle" "%~dp0r7_card_tests.sh" %H%:/tmp/ || goto fail
-ssh %O% %H% "tr -d '\r' < /tmp/r7_card_tests.sh > /tmp/r7_card_tests_exec.sh; bash /tmp/r7_card_tests_exec.sh 2>&1 | tee /tmp/r7_card_tests.log"
-scp %O% %H%:/tmp/r7_card_tests.log "%~dp0r7_card_tests.log"
-scp %O% %H%:/tmp/r7_card_tests.tgz "%~dp0r7_card_tests.tgz"
+ssh %O% %H% "tr -d '\r' < /tmp/r7_card_tests.sh > /tmp/r7_card_tests_exec.sh && bash -o pipefail -c 'bash /tmp/r7_card_tests_exec.sh 2>&1 | tee /tmp/r7_card_tests.log'"
+set RUNRC=%errorlevel%
+scp %O% %H%:/tmp/r7_card_tests.log "%~dp0r7_card_tests.log" || set RUNRC=1
+scp %O% %H%:/tmp/r7_card_tests.tgz "%~dp0r7_card_tests.tgz" || set RUNRC=1
 echo.
 echo Log: %~dp0r7_card_tests.log
 pause
-exit /b 0
+exit /b %RUNRC%
 :fail
 echo FAILED to reach the host (is it on? ping 192.168.0.157)
 pause
+exit /b 1
