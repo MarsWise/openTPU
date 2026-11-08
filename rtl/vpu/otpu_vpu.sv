@@ -399,7 +399,7 @@ module otpu_vpu
   // partner of a chunk is the chunk at ic ^ s (consecutive addresses: the banks' rotation holds);
   // below, the partner is in the chunk itself and the lanes swap A's words (bx = 0)
   logic [15:0] bx;
-  assign bx = (func == V_BFLY) ? (imm[15:0] & ~16'(LANES - 1)) : 16'd0;
+  assign bx = (func == V_BFLY || func == V_CSWP) ? (imm[15:0] & ~16'(LANES - 1)) : 16'd0;
   always_comb begin
     ta_en_c = '0; tb_en_c = '0;
     imask = '0;
@@ -498,7 +498,7 @@ module otpu_vpu
   // compares of m0.func (133.33 MHz, the 100 MHz fused placement: m0.func (fo 119) -> short lane
   // rc / rb, 13.6 / 13.8 levels, -1.2 ns; the tap-0 hit and the composite test fan out to every
   // lane's result and operand muxes)
-  localparam int NVF = 30;                    // includes CMP, SEL, byte extraction, RAND, BFLY
+  localparam int NVF = 32;                    // includes CMP, SEL, byte extraction, RAND, BFLY, CSWP
   // Every unsigned byte is exactly representable in binary32. The input is raw TMEM bits:
   // it must not pass through ftz, since arbitrary packed pixels may resemble fp32 NaNs.
   function automatic f32_t u8_to_f32(input logic [7:0] b);
@@ -700,12 +700,18 @@ module otpu_vpu
   logic [LANES-1:0] bf_hi;
   logic             bf_sm;
   assign bf_sm = (m0.imm[15:0] & 16'(LANES - 1)) != 16'd0;
+  // CSWP (the bitonic compare-exchange): the same partner; the lane keeps max(A, B) where its
+  // column's pair bit (bf_hi) differs from its direction bit (column & imm[31:16])
+  logic [LANES-1:0] cs_mx;
   for (genvar l = 0; l < LANES; l++) begin : g_bf
     always_comb begin
       logic [LW-1:0] k;
+      logic [15:0] cl;
       k = LW'(l) ^ m0.imm[LW-1:0];
       bf_p[l]  = bf_sm ? xa[k] : xb[l];
       bf_hi[l] = bf_sm ? ((LW'(l) & m0.imm[LW-1:0]) != '0) : ((m0.col & m0.imm[15:0]) != 16'd0);
+      cl = m0.col | 16'(l);                  // (m0.col is the chunk's first, LANES aligned)
+      cs_mx[l] = bf_hi[l] != ((cl & m0.imm[31:16]) != 16'd0);
     end
   end
 
@@ -725,6 +731,7 @@ module otpu_vpu
       st[0] = '0;
       unique case (1'b1)
         m0d.fh[V_MAX], m0d.fh[V_MIN]: st[0].v = fp_mm(x, y, m0d.fh[V_MIN]);
+        m0d.fh[V_CSWP]: st[0].v = fp_mm(x, bf_p[l], !cs_mx[l]);
         m0d.fh[V_COPY]:  st[0].v = xz;
         m0d.fh[V_ABS]:   st[0].v = fabs(x);
         m0d.fh[V_FILL]:  st[0].v = ftz(y);
@@ -1028,8 +1035,8 @@ module otpu_vpu
     otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
     otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
     assign lres[l] = (C8 && c_ov) ? c_od[l] : hit[0] ? st[0] : rf ? ru : st[1];
-    assign lmm[l] = !(C8 && c_ov) && hit[0] && (m0d.fh[V_MAX] || m0d.fh[V_MIN]);
-    assign lmv[l] = fp_mm(x, y, m0d.fh[V_MIN]);
+    assign lmm[l] = !(C8 && c_ov) && hit[0] && (m0d.fh[V_MAX] || m0d.fh[V_MIN] || m0d.fh[V_CSWP]);
+    assign lmv[l] = m0d.fh[V_CSWP] ? fp_mm(x, bf_p[l], !cs_mx[l]) : fp_mm(x, y, m0d.fh[V_MIN]);
     assign c_ia[l] = x;
     assign c_ib[l] = y;
     assign c_ig[l] = xc[l];

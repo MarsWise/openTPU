@@ -46,6 +46,7 @@ class Config:
     TD5: bool = False        # TMM T5: dense trits, five a byte (opentpu/trits.py; CAPS2 bit15)
     VBFLY: bool = False      # VOP BFLY, the Hadamard butterfly stage (kernels/hadamard.py; CAPS2 bit16)
     VAFF: bool = False       # VOP AFF, the fused row/column affine (LayerNorm, RMSNorm; CAPS2 bit17)
+    VCSWP: bool = False      # VOP CSWP, the bitonic compare-exchange stage (kernels/sort.py; CAPS2 bit19)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
@@ -111,6 +112,7 @@ def board_config(**kw) -> Config:
                 TATAN=bool(int(env.get("OTPU_TATAN", 0))),
                 QST4=bool(int(env.get("OTPU_QST4", 0))),
                 QST6=bool(int(env.get("OTPU_QST6", 0))),
+                VCSWP=bool(int(env.get("OTPU_VCSWP", 0))),
                 LDX=bool(int(env.get("OTPU_LDX", 0))),
                 TD5=bool(int(env.get("OTPU_TD5", 0))),
                 VBFLY=bool(int(env.get("OTPU_VBFLY", 0))),

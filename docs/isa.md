@@ -490,6 +490,7 @@ Elementwise functions write `T[dst + r*drs + c] = f(A, B)`; reductions write
 | 0x20..0x29 | TFN | the table functions of A: SIGMOID, SILU, TANH, GELU, GELU_TANH, SOFTPLUS, MISH, QUICK_GELU, SIN, COS (see "Table functions"; `Config.TFN`, CAPS2 bit3) |
 | 29 | BFLY | the Hadamard butterfly stage at stride s = imm (u32; a power of two, `cols % 2s == 0`): B is A's tile at column `c ^ s` (b = a, brs = ars), `A + B` where `c & s == 0`, else `B - A`; dst must not overlap A (`Config.VBFLY`, CAPS2 bit16) |
 | 30 | AFF | `(A * P(r)) * G(c) + H(c)`: P per row (bmode ROW), `G(c) = T[imm + c]`, `H(c) = T[imm + cols + c]` (flag bit1 DONE: H = -0); each step a rounded mul then a rounded add (MUL, then MAC); `cols <= 256`, G and H read into the column buffers first (`Config.VAFF`, CAPS2 bit17; the board runs it as a one-pass composite on the stream engine) |
+| 31 | CSWP | the bitonic compare-exchange stage: B is A's tile at column `c ^ s` (as BFLY), `s = imm[15:0]`, `k = imm[31:16]` (0 or a power of two > s): `max(A, B)` where `(c & s != 0) != (c & k != 0)`, else `min(A, B)` (MAX / MIN's rules); dst must not overlap A (`Config.VCSWP`, CAPS2 bit19; `kernels/sort.py`: bitonic sort; its prefix sums are COPY + ADD stages) |
 
 In RSSQ and RDOT each product is rounded, then added into the isum_64 partials.
 
