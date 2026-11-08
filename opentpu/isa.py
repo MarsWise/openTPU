@@ -47,6 +47,8 @@ F_Q4 = 0x4                      # QST, ROW mode, es 1: 4-bit rows (int4, S = ama
 F_Q6 = 0x8                      # QST, ROW mode, es 1: one 2-bit plane j (flags[5:4]) of 6-bit rows
 #                                 (S = amax/31; Config.QST6): the codes ((q + 32) >> 2j) & 3
 Q6_PLANE_SHIFT = 4
+F_Q6T = 0x40                    # QST Q6: transposed, rows 4g..4g+3 in byte dst + g of element c's
+#                                 dst + c*es, bits 2(r%4) (a V^T append; drs 1; rows past the last: q 0)
 F_RAW = 0x1                     # RLD: the word's bits (no fp32 -> int conversion)
 F_MUL = 0x2                     # RLD: times R[rb] + w2 (mod 2^32)
 F_BOUND = 0x4                   # RLD: w3 <= the value <= w4 (the waits pass's; the hardware ignores it)
@@ -80,6 +82,11 @@ V_AFF = 30                # the fused row/column affine (Config.VAFF):
 #                           G(c) = T[imm + c], H(c) = T[imm + cols + c] (-0 with flag DONE);
 #                           cols <= 256 (the column buffers), G and H read first
 VFUNCS[V_AFF] = "aff"
+V_CSWP = 31               # the bitonic compare-exchange stage (Config.VCSWP): B is A's tile at
+#                           column c ^ s (as BFLY), s = imm[15:0], k = imm[31:16] (0: ascending
+#                           everywhere): dst(r, c) = max(A, B) if (c & s != 0) != (c & k != 0),
+#                           else min(A, B) (VOP MAX / MIN's NaN and signed-zero rules)
+VFUNCS[V_CSWP] = "cswp"
 # TFN, the table functions (opentpu/tfn.py; Config.TFN, CAPS2 bit3): elementwise on A
 V_SIGMOID, V_SILU, V_TANH, V_GELU, V_GELU_TANH, V_SOFTPLUS, V_MISH, V_QGELU, V_SIN, V_COS, \
     V_ATAN = range(0x20, 0x2B)          # V_ATAN: atan on [0, 1] (Config.TATAN, CAPS2 bit12)
@@ -88,7 +95,7 @@ VFUNCS.update({V_SIGMOID: "sigmoid", V_SILU: "silu", V_TANH: "tanh", V_GELU: "ge
                V_QGELU: "quick_gelu", V_SIN: "sin", V_COS: "cos", V_ATAN: "atan"})
 TFN_FUNCS = set(range(0x20, 0x2B))
 BINARY = {V_ADD, V_SUB, V_RSUB, V_MUL, V_MAX, V_MIN, V_FILL, V_EXP2SUB, V_MAC,
-          V_CMP_GT, V_CMP_EQ, V_SEL, V_BFLY}
+          V_CMP_GT, V_CMP_EQ, V_SEL, V_BFLY, V_CSWP}
 REDUCE = {V_RSUM, V_RMAX, V_RSSQ, V_RDOT, V_ARGMAX}
 READS_B = BINARY | {V_RDOT}          # functions that read operand B in its bmode (OUTER: B_ROW)
 F_DSCALAR, F_DONE = 0x1, 0x2         # VOP OUTER: decay T[d] for every column / decay 1.0
@@ -586,7 +593,7 @@ def qact(src, rows, ab, kb, srs, row=False, cscale=None, rscale=None, dup=False,
 
 
 def qst(src, dst, sdst, rows, kb, srs, drs, es, row=False, half=False, q4=False, ra=0, rb=0,
-        rc=0, comment="", q6=None):
+        rc=0, comment="", q6=None, q6t=False):
     """QST; q4 (Config.QST4): ROW mode, es 1, every row's elements as int4 nibbles, two a byte
     (element c in byte dst + r*drs + c/2, the low nibble for even c), S = amax * f32(1/7) and
     q = clamp(rne(x * (7 * recip(amax))), -7, 7): an int4 MM operand with RSC (a K cache).
@@ -595,14 +602,17 @@ def qst(src, dst, sdst, rows, kb, srs, drs, es, row=False, half=False, q4=False,
     codes ((q + 32) >> 2j) & 3, four a byte (element c in byte dst + r*drs + c/4, bits
     2*(c%4)), D/4 bytes a D-element block: TMM CQ2's GRQ layout, four rows a D-byte chunk.
     q = sum_j LUT_j[code_j] with LUT_j = 4^j c (j < 2), LUT_2 = 16 c - 32: three TMM CQ2 GRQs
-    accumulate the int6 dot (kernels/kv6.py)."""
+    accumulate the int6 dot (kernels/kv6.py). q6t (with q6): the transposed plane (a V^T
+    cache): rows 4g..4g+3 share the byte dst + g + c*es of element c, row r's code in bits
+    2*(r % 4); a group's rows past the last row hold q = 0's code. drs must be 1, KB*D <= 1024."""
     _check(0 < rows < 65536 and 0 < kb < 65536, f"QST: rows {rows}, kb {kb}")
     _check(row or not half, "QST: HALF needs ROW mode")
     _check(not q4 or (row and es == 1 and not half), "QST Q4: ROW mode, es 1, not HALF")
-    _check(q6 in (None, 0, 1, 2) and (q6 is None or (row and es == 1 and not half and not q4)),
+    _check(q6 in (None, 0, 1, 2) and (q6 is None or (row and (es == 1 or q6t) and not half and not q4)),
            "QST Q6: plane 0..2, ROW mode, es 1, not HALF, not q4")
+    _check(not q6t or (q6 is not None and drs == 1 and es >= 1), "QST Q6T: q6, drs 1")
     return Instr(QST, ra=ra, rb=rb, rc=rc, flags=(F_ROW if row else 0) | (F_HALF if half else 0)
-                 | (F_Q4 if q4 else 0) | (0 if q6 is None else F_Q6 | q6 << Q6_PLANE_SHIFT),
+                 | (F_Q4 if q4 else 0) | (0 if q6 is None else F_Q6 | q6 << Q6_PLANE_SHIFT) | (F_Q6T if q6t else 0),
                  w=_w(src, dst, sdst, rows | (kb << 16), srs, drs, es), comment=comment)
 
 
@@ -612,7 +622,7 @@ def vop(func, dst, a, b, rows, cols, drs, ars, brs, bmode=B_FULL, imm=0.0,
     _check(0 < rows < 65536 and 0 < cols < 65536, f"VOP: rows {rows}, cols {cols}")
     _check(0 <= drs < 65536 and 0 <= ars < 65536 and 0 <= brs < 65536,
            f"VOP: drs {drs}, ars {ars}, brs {brs} (16 bits)")
-    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND, V_BFLY, V_AFF) else f32bits(imm)
+    iw = u32(imm) if func in (V_ARGMAX, V_MAC, V_SEL, V_RAND, V_BFLY, V_AFF, V_CSWP) else f32bits(imm)
     return Instr(VOP, ra=ra, rb=rb, rc=rc, rd=rd,
                  w=_w(dst, a, b, rows | (cols << 16), drs | (ars << 16),
                       brs | (func << 16) | (bmode << 24), iw),
@@ -635,6 +645,18 @@ def bfly(dst, a, rows, cols, drs, ars, s, ra=0, rb=0, comment="bfly"):
            f"BFLY: stride {s}, cols {cols}: a power of two with cols % 2s == 0")
     return vop(V_BFLY, dst, a, a, rows, cols, drs, ars, ars, B_FULL, s,
                ra=ra, rb=rb, rc=rb, comment=comment)
+
+
+def cswp(dst, a, rows, cols, drs, ars, s, k=0, ra=0, rb=0, comment="cswp"):
+    """VOP CSWP (Config.VCSWP): one bitonic compare-exchange stage over each row of A [rows,
+    cols]: the pair (c, c ^ s) holds min, max in ascending order where c & k == 0, descending
+    where it is set (k = 0: ascending everywhere). s a power of two, cols % 2s == 0, k 0 or a
+    power of two > s; dst must not overlap A. kernels/sort.py: bitonic sort, top-k."""
+    _check(s > 0 and not s & (s - 1) and s < 65536 and cols % (2 * s) == 0,
+           f"CSWP: stride {s}, cols {cols}")
+    _check(k == 0 or (not k & (k - 1) and s < k < 65536), f"CSWP: direction bit {k}")
+    return vop(V_CSWP, dst, a, a, rows, cols, drs, ars, ars, B_FULL, s | (k << 16),
+               ra=ra, rb=rb, comment=comment)
 
 
 def aff(dst, a, p, gh, rows, cols, drs, ars, prs=1, bias=True, ra=0, rb=0, rc=0, rd=0,

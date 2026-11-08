@@ -836,6 +836,28 @@ class Slice:
             raise SimError("QST: HALF needs ROW mode")
         q6 = bool(ins.flags & I.F_Q6)
         plane = (ins.flags >> I.Q6_PLANE_SHIFT) & 3
+        if ins.flags & I.F_Q6T:                    # Q6 transposed: four rows a byte
+            if not cfg.QST6 or not q6 or not row_mode or half or ins.flags & I.F_Q4 or plane > 2 \
+                    or drs != 1 or es < 1 or KB * cfg.D > 1024:
+                raise SimError("QST Q6T: needs Config.QST6, Q6, ROW mode, drs 1, KB*D <= 1024")
+            x = self.tget(src + np.arange(rows)[:, None] * srs + np.arange(KB * cfg.D)[None, :])
+            q, s = F.quantize_q4(x, 31)
+            G = -(-rows // 4)
+            qq = np.zeros((4 * G, KB * cfg.D), np.int16)
+            qq[:rows] = q
+            u = ((qq + 32) >> (2 * plane)) & 3                          # [4G, n]
+            byte = (u[0::4] | (u[1::4] << 2) | (u[2::4] << 4) | (u[3::4] << 6)).astype(np.uint8)
+            baddr = dst + np.arange(G)[:, None] + np.arange(KB * cfg.D)[None, :] * es
+            sa = sdst + np.arange(rows)[:, None] * 4 + np.arange(4)[None, :]
+            if np.any(baddr >= cfg.DRAM_BYTES) or sdst % 4 or np.any(sa >= cfg.DRAM_BYTES):
+                raise SimError("QST Q6T: address out of range")
+            if _overlap(baddr, sa.reshape(-1)):
+                raise SimError("QST: the data and scale ranges overlap")
+            if len(np.unique(baddr)) != baddr.size:
+                raise SimError("QST Q6T: es must keep the groups' bytes apart")
+            self.dram[baddr] = byte
+            self.dram[sa] = s[:, None].view(np.uint8)
+            return
         if ins.flags & (I.F_Q4 | I.F_Q6):          # 4-bit rows: two elements a byte (Q6: four)
             if q6 and not cfg.QST6 or not q6 and not cfg.QST4 or not row_mode or half or es != 1 \
                     or dst % 4 or drs % 4 or cfg.LANES < 8 or q6 and (ins.flags & I.F_Q4 or plane > 2) \
@@ -925,6 +947,14 @@ class Slice:
                     or brs != ars):
                 raise SimError(f"VOP BFLY: stride {s} (a power of two, cols % 2s == 0), "
                                "B FULL on A's tile (b = a, brs = ars)")
+        if func == I.V_CSWP:
+            if not getattr(self.cfg, "VCSWP", False):
+                raise SimError("VOP CSWP: needs Config.VCSWP")
+            s, kd = w7 & 0xFFFF, w7 >> 16
+            if (s == 0 or s & (s - 1) or cols % (2 * s) or bmode != I.B_FULL or b != a
+                    or brs != ars or (kd and (kd & (kd - 1) or kd <= s))):
+                raise SimError(f"VOP CSWP: stride {s}, direction {kd} (powers of two, k > s, "
+                               "cols % 2s == 0), B FULL on A's tile")
         if func in (I.V_MAC, I.V_SEL) and (bmode == I.B_SCALAR or cols > I.OUTER_MAX_COLS):
             raise SimError("VOP MAC/SEL: bmode must not be SCALAR, cols <= 256")
         aidx = a + r * ars + c
@@ -933,6 +963,8 @@ class Slice:
         if func in I.READS_B:
             if func == I.V_BFLY:
                 bidx = b + r * brs + (c ^ w7)
+            elif func == I.V_CSWP:
+                bidx = b + r * brs + (c ^ (w7 & 0xFFFF))
             elif bmode == I.B_FULL:
                 bidx = b + r * brs + c
             elif bmode == I.B_ROW:
@@ -983,6 +1015,9 @@ class Slice:
         if func == I.V_BFLY:
             hi = (c & w7) != 0
             ops[func] = lambda: np.where(hi, F.sub(B, A), F.add(A, B))
+        if func == I.V_CSWP:
+            up = ((c & (w7 & 0xFFFF)) != 0) != ((c & (w7 >> 16)) != 0)
+            ops[func] = lambda: np.where(up, F.fmax(A, B), F.fmin(A, B))
         if func == I.V_RAND:
             # the counter is A's raw word, the key imm's bits (opentpu/rand.py)
             ops[func] = lambda: RN.uniform(A.view(np.uint32), np.uint32(w7))

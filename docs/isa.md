@@ -436,6 +436,15 @@ With `drs = D/4` the rows of a D-block are TMM CQ2's GRQ layout (four rows a D-b
 TMM CQ GRQs: the 6-bit K cache of `opentpu/kernels/kv6.py` (6 bits a value; three chunk reads
 per four rows, MM W8 four).
 
+Flag bit6 `Q6T` (with `Q6`, `ROW`, `drs = 1`, `KB*D <= 1024`): the transposed plane (a V^T
+cache). Rows `4g..4g+3` share the byte `dst + g + c*es` of element `c`, row `r`'s code in bits
+`2*(r % 4)`; a group's rows past the instruction's last row hold `q = 0`'s code (plane 2: 2,
+else 0), so a decode append rewrites its group whole from the group's first row. `S` per row as
+in `ROW` mode. It runs on the T4 path (the codes through the transposition buffer, a byte a
+group and element). `kernels/kv6.py`: `store_v` (es `D/4`: each head-dim row of a token block
+is TMM CQ2's GRQ layout) and `pv` (P' = P * S per token, QACT, three TMM CQ2 GRQs a block with a
+plane of 1.0 scales).
+
 Timing only (the result is the same): a QST with `drs = 1`, `es` a multiple of 4, `dst` word
 aligned and rows of at most 1024 elements (the V^T appends of the attention caches) runs the
 quantizer's T4 path: each row's bytes go to a transposition buffer at LANES a cycle, and every

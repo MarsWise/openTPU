@@ -134,3 +134,75 @@ def test_qst6_append_rtl(have_verilator):
     drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=20, seed=3)
     np.testing.assert_array_equal(drams[0], ref.dram)
     np.testing.assert_array_equal(tmems[0], ref.tmem)
+
+
+# ---- the 6-bit V^T cache (QST Q6T): groups of four tokens a byte, S per token folded into P
+V_T, P_T, S_T, PO = 0, 0x4400, 0x5000, 0x5200          # TMEM words
+VPL, VSC, ONES = 0x50000, 0x7E000, 0x7D000             # DRAM bytes
+
+
+def vcase(n=6, H=128, m=2, appends=(), seed=0, waitc=False):
+    """Tokens 0..n-1 by one QST batch, then each `appends` token t rewriting its group."""
+    cfg = cfg_(SEQ_WC=waitc)
+    rng = np.random.default_rng(300 + n + 7 * m + seed)
+    nt = n + len(appends)
+    V = rng.normal(size=(nt, H)).astype(np.float32)
+    V[1] *= 20.0
+    nb = -(-nt // D)
+    P = np.zeros((m, nb * D), np.float32)
+    P[:, :nt] = rng.uniform(0, 1, (m, nt)).astype(np.float32)
+    image = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    image[0x8000:0x8000 + V.nbytes] = V.view(np.uint8).reshape(-1)
+    image[0x20000:0x20000 + P.nbytes] = P.view(np.uint8).reshape(-1)
+    image[ONES:ONES + 4 * H] = np.ones(H, np.float32).view(np.uint8)
+    prog = [I.ld(0x8000, V_T, V.size), I.ld(0x20000, P_T, P.size)]
+    prog += kv6.store_v(V_T, H, 0, n, H, VPL, VSC)
+    for t in appends:
+        g = t - t % 4
+        prog += kv6.store_v(V_T + g * H, H, g, t - g + 1, H, VPL, VSC)
+    prog += [I.ld(VSC, S_T, nt),
+             I.vop(I.V_MUL, P_T, P_T, S_T, m, nt, nb * D, nb * D, 0, I.B_COL),
+             I.qact(P_T, m, 0, nb, nb * D)]
+    prog += kv6.pv(nt, H, VPL, ONES, PO, H, m)
+    prog.append(I.halt())
+    return cfg, image, prog, (V, P, nt)
+
+
+@pytest.mark.parametrize("n,m,appends", [(6, 2, ()), (5, 1, (5, 6, 7, 8)), (130, 3, (130,))])
+def test_qst6_v_cache_isa(n, m, appends):
+    cfg, image, prog, (V, P, nt) = vcase(n, m=m, appends=appends)
+    s = Machine(cfg, [prog], [image]).run().slices[0]
+    Vd = kv6.dequant_v(s.dram, nt, 128, VPL, VSC)
+    qq, S = F.quantize_q4(V, 31)
+    np.testing.assert_array_equal(Vd, qq.astype(np.float32) * S[:, None])
+    got = s.tmem[PO:PO + m * 128].view(np.float32).reshape(m, 128)
+    want = P[:, :nt] @ Vd
+    # (P' = P * S takes token 1's 20x S: its int8 QACT, not the planes, sets the error)
+    assert np.linalg.norm(got - want) / np.linalg.norm(want) < .02
+    want_f = P[:, :nt] @ V
+    assert np.linalg.norm(got - want_f) / np.linalg.norm(want_f) < .05
+
+
+def test_qst6_v_partial_group_bytes():
+    """A group of two tokens: the missing tokens' bits are q = 0's code (u 32: plane 2 code 2)."""
+    cfg, image, prog, (V, P, nt) = vcase(2, m=1)
+    s = Machine(cfg, [prog], [image]).run().slices[0]
+    qq, _ = F.quantize_q4(V, 31)
+    for j in range(3):
+        b = s.dram[kv6.vplane(VPL, 128, 0, j) + np.arange(128) * 32]
+        for r in range(4):
+            want = ((qq[r].astype(int) + 32) >> (2 * j)) & 3 if r < 2 else (2 if j == 2 else 0)
+            np.testing.assert_array_equal((b >> (2 * r)) & 3, want)
+    with pytest.raises(ValueError):
+        I.qst(0, 0, 0, 2, 1, 128, 2, 32, row=True, q6=0, q6t=True)      # drs 1 only
+
+
+@pytest.mark.parametrize("n,m,appends,waitc", [(6, 2, (), False), (5, 1, (5, 6, 7, 8), True),
+                                               (130, 3, (130,), True)])
+def test_qst6_v_cache_rtl(have_verilator, n, m, appends, waitc):
+    from opentpu import rtlsim
+    cfg, image, prog, _ = vcase(n, m=m, appends=appends, waitc=waitc)
+    ref = Machine(cfg, [prog], [image.copy()]).run().slices[0]
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=30, seed=n + m)
+    np.testing.assert_array_equal(drams[0], ref.dram)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)

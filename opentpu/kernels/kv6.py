@@ -65,3 +65,65 @@ def dequant(dram, n, kb, N, pl, sc, D=128):
             q += c << (2 * j)
         K[:, k * D:(k + 1) * D] = q.astype(np.float32) * s[:, None]
     return K
+
+
+# ---- the 6-bit V cache: V^T (head dim rows, token columns) as the same three planes, written a
+# group of four tokens a byte (QST Q6T) with S per token, which P absorbs (P'[t] = P[t] * S[t])
+#   vpl + (3b + j) * H*D/4 + c*D/4 + (t % D)/4   token t's codes of dim c, bits 2*(t % 4)
+#   vsc + 4t                                     S of token t
+# (H the head dim rows, H % 4 == 0; b = t // D the token block)
+
+def vplane(vpl, H, b, j, D=128):
+    return vpl + (3 * b + j) * H * D // 4
+
+
+def store_v(src, srs, t0, rows, H, vpl, vsc, D=128, ra=0):
+    """QST Q6Ts of tokens t0..t0+rows-1 (TMEM src + r*srs, H fp32 each; t0 % 4 == 0): every
+    group's byte is written whole (a group's missing tokens as q 0), so a decode append
+    rewrites its group from the group's first token."""
+    assert t0 % 4 == 0 and H % D == 0 and H <= 1024
+    out = []
+    t = t0
+    while t < t0 + rows:
+        n = min(t0 + rows - t, D - t % D)               # within one token block
+        b = t // D
+        for j in range(3):
+            out.append(I.qst(src + (t - t0) * srs, vplane(vpl, H, b, j, D) + (t % D) // 4,
+                             vsc + 4 * t, n, H // D, srs, 1, D // 4, row=True,
+                             q6=j, q6t=True, ra=ra, comment=f"kv6 v b{b} plane {j}"))
+        t += n
+    return out
+
+
+def pv(n, H, vpl, ones, out, ors, m, ab=0, acc=False, D=128):
+    """O[m, H] = P' V^T's codes for tokens 0..n-1: P' (P[t] * S[t], zero past n to the block's
+    end) QACT'ed in ACT rows 0..m-1, blocks ab + b for token block b; `ones` a 16-byte aligned
+    DRAM plane of H fp32 1.0 (GRQ's scale plane). Tokens of a block past the written ones decode
+    to q = -32: P' must be 0 there."""
+    prog, first = [], not acc
+    nb = -(-n // D)
+    for j in range(3):
+        prog += tmm_lut_plane(j)
+        for b in range(nb):
+            prog.append(I.tmm_cq(vplane(vpl, H, b, j, D), ones, out, H, 1, H * D // 4, ors, m,
+                                 ab + b, 4 * H, 2, acc=not first, grq=True,
+                                 comment=f"kv6 pv b{b} plane {j}"))
+            first = False
+    return prog
+
+
+def tmm_lut_plane(j):
+    return I.tmm_lut(LUTS[j], f"lutset kv6 plane {j}")
+
+
+def dequant_v(dram, n, H, vpl, vsc, D=128):
+    """The fp32 [n, H] V the planes stand for (q * S)."""
+    V = np.zeros((n, H), np.float32)
+    s = dram[vsc:vsc + 4 * n].copy().view(np.float32)
+    for t in range(n):
+        q = np.full(H, -32, np.int32)
+        for j in range(3):
+            a = vplane(vpl, H, t // D, j, D) + (t % D) // 4 + np.arange(H) * (D // 4)
+            q += ((dram[a] >> (2 * (t % 4))) & 3).astype(np.int32) << (2 * j)
+        V[t] = q * s[t]
+    return V

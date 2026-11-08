@@ -250,6 +250,7 @@ module otpu_quant
   logic        q4;                           // QST Q4: eight elements a word (two a byte)
   logic        q6;                           // QST Q6: eight elements two bytes (four a byte)
   logic [1:0]  q6p;                          // ... the plane j: the codes ((q + 32) >> 2j) & 3
+  logic        q6t;                          // QST Q6T: T4's groups, four rows' codes a byte
   logic        rd_wait;                      // waiting for the row's scale (and scale row)
   logic        rd_done;
   logic        sw_ph;                        // QST: the scale row's writes
@@ -722,6 +723,13 @@ module otpu_quant
     end
   end
   logic [LANES-1:0][31:0] tb_rd;
+  // Q6T: lane l's code of plane q6p, ((q + 32) >> 2 q6p) & 3 (q + 32 = {~q[5], q[4:0]})
+  logic [LANES-1:0][1:0] q6c;
+  always_comb for (int l = 0; l < LANES; l++) begin
+    logic [5:0] u;
+    u = {~qb[l][5], qb[l][4:0]};
+    q6c[l] = u[2 * q6p +: 2];
+  end
   if (TB > 0) begin : g_tb
     for (genvar l = 0; l < LANES; l++) begin : g_lane
       // One simple-dual-port RAM per lane, with four byte write enables. Static banks and a
@@ -731,7 +739,7 @@ module otpu_quant
         if (en && t4w && wqd.mask[l])
           for (int b = 0; b < 4; b++)
             if (wqd.row[1:0] == 2'(b))
-              mem[{wqd.row[2], (TAW-1)'(wqd.e / LANES)}][8*b +: 8] <= qb[l];
+              mem[{wqd.row[2], (TAW-1)'(wqd.e / LANES)}][8*b +: 8] <= q6t ? {6'd0, q6c[l]} : qb[l];
         if (en && dv_next)
           tb_rd[l] <= mem[{dh_next, (TAW-1)'(de_next / LANES)}];
       end
@@ -741,6 +749,10 @@ module otpu_quant
   end
   logic [31:0] dword_t4;
   assign dword_t4 = tb_rd[de[$clog2(LANES)-1:0]];
+  // Q6T: the group's byte, a row past the instruction's last (dbe clear) q = 0's code
+  logic [7:0] dbyte_q6;
+  always_comb for (int b = 0; b < 4; b++)
+    dbyte_q6[2 * b +: 2] = dbe[b] ? dword_t4[8 * b +: 2] : ((q6p == 2'd2) ? 2'b10 : 2'b00);
   // a DRAM write is waiting (independent of the grant, which the slice derives from it)
   assign a_want = (busy && !ackw && wqd.v && wqd.st && !t4) || sw_ph || (t4 && dv);
 
@@ -797,8 +809,8 @@ module otpu_quant
       a_req = 1'b1;
       a_we = 1'b1;
       a_addr = da >> 2;
-      a_wdata = dword_t4;
-      a_be = dbe;
+      a_wdata = q6t ? {4{dbyte_q6}} : dword_t4;
+      a_be = q6t ? 4'b0001 << da[1:0] : dbe;
     end
     if (sw_ph) begin
       a_req = 1'b1;
@@ -869,6 +881,7 @@ module otpu_quant
       q4    <= qst && cmd.flags[2];
       q6    <= qst && cmd.flags[3];
       q6p   <= cmd.flags[5:4];
+      q6t   <= qst && cmd.flags[3] && cmd.flags[6];
       rowm  <= cmd.flags[0];
       csf   <= !qst && cmd.flags[1];
       csb   <= cmd.w4;
@@ -901,8 +914,10 @@ module otpu_quant
       m0a <= '0;
       st_frz <= '0;
       bm <= XD > 0 && !qst && 32'(kb) * D <= 32'(XD) * LANES;
-      t4 <= TB > 0 && qst && !cmd.flags[2] && !cmd.flags[3] && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
-            cmd.w2[1:0] == 2'd0 && 32'(kb) * D <= 32'(TB);
+      t4 <= TB > 0 && qst && 32'(kb) * D <= 32'(TB) &&
+            ((!cmd.flags[2] && !cmd.flags[3] && cmd.w6 == 32'd1 && cmd.w7 != 0 && cmd.w7[1:0] == 2'd0 &&
+              cmd.w2[1:0] == 2'd0) ||
+             (cmd.flags[3] && cmd.flags[6]));           // Q6T: always T4 (a byte a group)
       t4_busy <= '0; t4_fin <= 1'b0; dv <= 1'b0; tq[0] <= '0; tq[1] <= '0;
       de <= '0; dh <= 1'b0;
       gbase <= cmd.w2;
@@ -1030,7 +1045,7 @@ module otpu_quant
           n.v = 1'b1; n.h = wqd.row[2]; n.a = gbase;
           n.be = wqd.fin ? 4'((5'd2 << wqd.row[1:0]) - 5'd1) : 4'hF;
           if (!q0.v) q0 = n; else q1 = n;
-          gbase <= gbase + 32'd4;
+          gbase <= gbase + (q6t ? 32'd1 : 32'd4);
           t4_busy[wqd.row[2]] <= 1'b1;
           if (wqd.fin) t4_fin <= 1'b1;
         end
