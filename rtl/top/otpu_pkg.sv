@@ -107,8 +107,9 @@ package otpu_pkg;
     endcase
   endfunction
 
-  // A range that reaches 2^32 ends at the last byte, 0xFFFFFFFF, instead of wrapping to 0 (which
-  // overlapped nothing: a 4 GiB DRAM's top words, a STREAM's 256 KiB near the top). The lost byte
+  // If a range reaches or crosses 2^32, conservatively cover the whole address space;
+  // the exact-end case also widens to keep the carry off a long reduction path.
+  // The lost byte
   // never decides an overlap: every DRAM range starts at a word (DMA, MXU, WAITW) or covers its
   // beats' words (QST, beats()), so a range holding the last byte also holds the word 0xFFFFFFFC.
   // TMEM ranges that reach 2^32 do not fit the scoreboard's TAW bits anyway (otpu_seq: all).
@@ -118,9 +119,20 @@ package otpu_pkg;
     hi = {1'b0, lo} + {1'b0, len};
     r.v = (len != 0);
     r.sp = sp;
-    r.lo = lo;
+    r.lo = hi[32] ? '0 : lo;
     r.hi = hi[32] ? '1 : hi[31:0];
     return r;
+  endfunction
+
+  // Cover a product plus a tail; if either overflowed, no single narrower
+  // interval can safely represent the possible wrapped addresses.
+  function automatic rng_t mk_product_span(input logic [1:0] sp, input logic [31:0] lo,
+                                            input logic [31:0] product, input logic [31:0] tail,
+                                            input logic product_overflow);
+    logic [32:0] size;
+    size = {1'b0, product} + {1'b0, tail};
+    if (product_overflow || size[32]) return mk(sp, 32'd0, 32'hffff_ffff);
+    return mk(sp, lo, size[31:0]);
   endfunction
 
   // A QST's DRAM range widened to every word of the 64-byte beats it touches: [lo & ~63,
@@ -200,11 +212,12 @@ package otpu_pkg;
   // Everything an instruction may read or write (docs/isa.md), conservatively as intervals.
   // Two steps so that hardware can register in between: fp_prod (the multiplications) and
   // fp_ranges (the intervals); footprint() is their composition.
-  typedef struct packed { logic [31:0] p0, p1, p2, p3; } fpm_t;
+  typedef struct packed { logic [3:0] ov; logic [31:0] p0, p1, p2, p3; } fpm_t;
   // the multiplications as (a, w) pairs; a < 2^24 whenever the product is used
   typedef struct packed { logic [3:0][23:0] a; logic [3:0][31:0] w; } fpo_t;
-  // partial products: low 32 bits of a * w[15:0], low 16 bits of a * w[31:16] (one DSP each)
-  typedef struct packed { logic [3:0][31:0] pl; logic [3:0][15:0] ph; } fpp_t;
+  // Partial products and whether either has bits beyond the low 32-bit result.
+  // Each a[23:0] * w[15:0] fits the 40-bit result of one DSP.
+  typedef struct packed { logic [3:0] ov; logic [3:0][31:0] pl; logic [3:0][15:0] ph; } fpp_t;
 
   function automatic fpo_t fp_ops(input cmd_t c, input int D, input int S);
     fpo_t o;
@@ -259,18 +272,26 @@ package otpu_pkg;
   function automatic fpp_t fp_part(input fpo_t o);
     fpp_t p;
     for (int i = 0; i < 4; i++) begin
-      p.pl[i] = 32'({8'd0, o.a[i]} * {16'd0, o.w[i][15:0]});
-      p.ph[i] = 16'({8'd0, o.a[i]} * {16'd0, o.w[i][31:16]});
+      logic [39:0] low, high;
+      low = 40'(o.a[i]) * 40'(o.w[i][15:0]);
+      high = 40'(o.a[i]) * 40'(o.w[i][31:16]);
+      p.pl[i] = low[31:0];
+      p.ph[i] = high[15:0];
+      p.ov[i] = (|low[39:32]) || (|high[39:16]);
     end
     return p;
   endfunction
 
   function automatic fpm_t fp_sum(input fpp_t p);
     fpm_t m;
-    m.p0 = p.pl[0] + {p.ph[0], 16'd0};
-    m.p1 = p.pl[1] + {p.ph[1], 16'd0};
-    m.p2 = p.pl[2] + {p.ph[2], 16'd0};
-    m.p3 = p.pl[3] + {p.ph[3], 16'd0};
+    logic [3:0][31:0] values;
+    logic [32:0] sum;
+    for (int i = 0; i < 4; i++) begin
+      sum = {1'b0, p.pl[i]} + {1'b0, p.ph[i], 16'd0};
+      values[i] = sum[31:0];
+      m.ov[i] = p.ov[i] || sum[32];
+    end
+    m.p0 = values[0]; m.p1 = values[1]; m.p2 = values[2]; m.p3 = values[3];
     return m;
   endfunction
 
@@ -281,23 +302,27 @@ package otpu_pkg;
   function automatic fp_t fp_ranges(input cmd_t c, input fpm_t p, input int D, input int S);
     fp_t f;
     logic [31:0] rows, cols, n, kb, m;
+    logic [33:0] qst_span, qst_src_span, qst_scale_span, gather_span;
+    logic [34:0] dstep_span;
     f = '0;
     case (c.op)
       OP_LD: begin
-        f.rd[0] = mk(SP_DRAM, c.w1, c.w3 << 2);
+        f.rd[0] = (|c.w3[31:30]) ? mk(SP_DRAM, 32'd0, 32'hffff_ffff) :
+                  mk(SP_DRAM, c.w1, c.w3 << 2);
         f.wr[0] = mk(SP_TMEM, c.w2, c.w3);
       end
       OP_ST: begin
         f.rd[0] = mk(SP_TMEM, c.w2, c.w3);
-        f.wr[0] = mk(SP_DRAM, c.w1, c.w3 << 2);
+        f.wr[0] = (|c.w3[31:30]) ? mk(SP_DRAM, 32'd0, 32'hffff_ffff) :
+                  mk(SP_DRAM, c.w1, c.w3 << 2);
       end
       OP_LDX: begin
         // any row of the table (rows 0..E-1, srs apart) is read; the indices; the rows written
         rows = 32'(c.w4[15:0]); cols = 32'(c.w4[31:16]);
         if (rows != 0 && cols != 0 && c.w7 != 0) begin
-          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 + (cols << 2));
+          f.rd[0] = mk_product_span(SP_DRAM, c.w1, p.p0, cols << 2, p.ov[0]);
           f.rd[1] = mk(SP_TMEM, c.w3, rows);
-          f.wr[0] = mk(SP_TMEM, c.w2, p.p1 + cols);
+          f.wr[0] = mk_product_span(SP_TMEM, c.w2, p.p1, cols, p.ov[1]);
         end
       end
       OP_STREAM: begin
@@ -319,17 +344,20 @@ package otpu_pkg;
         // are read, o written
         rows = 32'(c.w4[15:0]); cols = 32'(c.w4[31:16]);
         if (rows != 0 && cols != 0) begin
-          f.wr[0] = mk(SP_DRAM, c.w1, (p.p0 + cols) << 2);
+          dstep_span = ({3'b0, p.p0} + {3'b0, cols}) << 2;
+          f.wr[0] = (p.ov[0] || dstep_span[34:32] != 0) ? mk(SP_DRAM, 32'd0, 32'hffff_ffff) :
+                    mk(SP_DRAM, c.w1, dstep_span[31:0]);
           f.wr[1] = mk(SP_TMEM, c.w6, rows);
           f.rd[0] = mk(SP_TMEM, c.w2, cols << 1);
           f.rd[1] = mk(SP_TMEM, c.w3, rows);
-          f.rd[2] = mk(SP_TMEM, c.w5, c.w7 + 1);
+          f.rd[2] = (c.w7 == 32'hffff_ffff) ? mk(SP_TMEM, 32'd0, 32'hffff_ffff) :
+                    mk(SP_TMEM, c.w5, c.w7 + 1);
         end
       end
       OP_MM, OP_TMM: begin
         n = 32'(c.w4[15:0]); kb = 32'(c.w4[23:16]); m = 32'(c.w6[23:16]);
         if (n != 0 && kb != 0 && m != 0) begin
-          f.rd[0] = mk(SP_DRAM, c.w1, p.p0 +
+          f.rd[0] = mk_product_span(SP_DRAM, c.w1, p.p0,
                        ((c.op == OP_TMM) ? (c.w4[28] ? ((n >> 2) * D) :     // GRQ: a plane
                                             // T5 (BIN + CQ4, CQ clear): five blocks a chunk,
                                             // ceil(KB / 5) = (KB + 4) * 205 >> 10 (KB < 256)
@@ -338,19 +366,19 @@ package otpu_pkg;
                                             c.w4[26] ? (((kb + 32'd7) >> 3) * D) :
                                             // CQ4 (CQ, 4-bit codes): two blocks a chunk
                                             (c.w4[27] && c.w4[29]) ? (((kb + 32'd1) >> 1) * D) :
-                                                        (((kb + 32'd3) >> 2) * D)) : kb * D));
+                                                        (((kb + 32'd3) >> 2) * D)) : kb * D), p.ov[0]);
           // a scale row's bytes up to block k0 + KB's (docs/isa.md "Weight formats"; PAIR's odd
           // KB: one block more): RSC Sw; int8x Sw and a byte a block; int4x / fp4x6 Sw, a
           // reserved word and a word a block; NVFP4 Sw, three reserved words and 8 bytes a block
           if (c.op == OP_TMM) begin
             if (c.flags[7] || c.flags[5])
-              f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.w4[28] ? (n << 2) :      // GRQ: N words
-                                                   c.flags[5] ? (kb << 2) : 32'd4));
+              f.rd[1] = mk_product_span(SP_DRAM, c.w2, p.p1, (c.w4[28] ? (n << 2) : // GRQ: N words
+                                                   c.flags[5] ? (kb << 2) : 32'd4), p.ov[1]);
           end else if (!c.flags[0])
-            f.rd[1] = mk(SP_DRAM, c.w2, p.p1 + (c.flags[7] ? 32'd4 :
+            f.rd[1] = mk_product_span(SP_DRAM, c.w2, p.p1, (c.flags[7] ? 32'd4 :
                          (c.flags[5:4] == 2'd0) ? 32'd4 + 32'(c.w4[31:24]) + kb :
                          (c.flags[5:4] == 2'd3) ? 32'd24 + ((32'(c.w4[31:24]) + kb) << 3) :
-                                                  32'd12 + ((32'(c.w4[31:24]) + kb) << 2)));
+                                                  32'd12 + ((32'(c.w4[31:24]) + kb) << 2)), p.ov[1]);
           if (c.flags[3])  f.rd[3] = mk(SP_TMEM, c.w2, m);                         // ASCALE
           f.rd[2] = mk(SP_ACT, 32'(c.w6[31:24]), kb);
           f.wr[0] = mk(SP_TMEM, c.w3, p.p2 + n);
@@ -360,7 +388,7 @@ package otpu_pkg;
       OP_QACT: begin
         rows = 32'(c.w2[7:0]); kb = 32'(c.w2[31:16]);
         if (rows != 0 && kb != 0) begin
-          f.rd[0] = mk(SP_TMEM, c.w1, p.p0 + kb * D);
+          f.rd[0] = mk_product_span(SP_TMEM, c.w1, p.p0, kb * D, p.ov[0]);
           if (c.flags[1]) f.rd[1] = mk(SP_TMEM, c.w4, kb * D);                     // CSCALE
           if (c.flags[2]) f.rd[2] = mk(SP_TMEM, c.w5, rows);                       // RSCALE
           f.wr[0] = mk(SP_ACT, 32'(c.w2[15:8]), kb);
@@ -369,9 +397,19 @@ package otpu_pkg;
       OP_QST: begin
         rows = 32'(c.w4[15:0]); kb = 32'(c.w4[31:16]);
         if (rows != 0 && kb != 0) begin
-          f.rd[0] = mk(SP_TMEM, c.w1, p.p0 + kb * D);
-          f.wr[0] = beats(mk(SP_DRAM, c.w2, p.p1 + p.p2 + 1));
-          f.wr[1] = beats(mk(SP_DRAM, c.w3, 4 * (c.flags[0] ? rows : p.p3)));
+          qst_src_span = {2'b0, p.p0} + 34'(kb * D);
+          f.rd[0] = (p.ov[0] || qst_src_span[33:32] != 0) ? mk(SP_TMEM, 32'd0, 32'hffff_ffff) :
+                    mk(SP_TMEM, c.w1, qst_src_span[31:0]);
+          // The summed span can exceed 32 bits before mk sees it. One range
+          // cannot represent the wrapped footprint: score all of DRAM.
+          qst_span = {2'b0, p.p1} + {2'b0, p.p2} + 34'd1;
+          f.wr[0] = (p.ov[1] || p.ov[2] || qst_span[33:32] != 0) ?
+                    mk(SP_DRAM, 32'd0, 32'hffff_ffff) :
+                    beats(mk(SP_DRAM, c.w2, qst_span[31:0]));
+          qst_scale_span = {2'b0, (c.flags[0] ? rows : p.p3)} << 2;
+          f.wr[1] = ((!c.flags[0] && p.ov[3]) || qst_scale_span[33:32] != 0) ?
+                    mk(SP_DRAM, 32'd0, 32'hffff_ffff) :
+                    beats(mk(SP_DRAM, c.w3, qst_scale_span[31:0]));
         end
       end
       OP_VOP: begin
@@ -407,8 +445,10 @@ package otpu_pkg;
       OP_GATHER: begin
         rows = 32'(c.w3[15:0]); cols = 32'(c.w3[31:16]);
         if (rows != 0 && cols != 0) begin
-          f.rd[0] = mk(SP_TMEM, c.w1, p.p0 + cols);
-          f.wr[0] = mk(SP_TMEM, c.w2, p.p1 + p.p2 + cols);
+          f.rd[0] = mk_product_span(SP_TMEM, c.w1, p.p0, cols, p.ov[0]);
+          gather_span = {2'b0, p.p1} + {2'b0, p.p2} + {2'b0, cols};
+          f.wr[0] = (p.ov[1] || p.ov[2] || gather_span[33:32] != 0) ?
+                    mk(SP_TMEM, 32'd0, 32'hffff_ffff) : mk(SP_TMEM, c.w2, gather_span[31:0]);
         end
       end
       OP_BAR: f.all = 1'b1;

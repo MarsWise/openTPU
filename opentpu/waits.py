@@ -111,15 +111,21 @@ class Fp:
 
 
 def _mk(sp, base, ln):
-    """otpu_pkg mk() over every value of the base: [lo, hi) clamped to the last byte; a list of
-    ranges (two when the base's values wrap)."""
+    """Union of RTL mk() for all base values, using a whole space on access wrap.
+
+    RTL uses one conservative full-space interval when a nonempty access reaches
+    or crosses 2^32. Base values are inclusive and may themselves wrap across zero.
+    """
     ln &= M32
     if ln == 0:
         return []
     lo, hi = base
     if hi <= M32:
+        if hi + ln >= 1 << 32:
+            return [(sp, 0, M32)]
         return [(sp, lo, min(hi + ln, M32))]
-    return [(sp, lo, M32), (sp, 0, min(hi - (1 << 32) + ln, M32))]
+    # This interval includes 0xffffffff, whose nonempty access reaches 2^32.
+    return [(sp, 0, M32)]
 
 
 def _beats(rs):
@@ -129,6 +135,17 @@ def _beats(rs):
 def _p(a, w):
     """otpu_pkg fp_prod: the 24-bit a times the 32-bit w, low 32 bits."""
     return ((a & 0xFFFFFF) * (w & M32)) & M32
+
+
+def _p_overflow(a, w):
+    """Whether the 24-by-32-bit product has bits beyond its RTL low word."""
+    return (a & 0xFFFFFF) * (w & M32) > M32
+
+
+def _mk_product_span(sp, base, a, w, tail):
+    """Conservative RTL product plus tail; do not truncate before the check."""
+    size = _p(a, w) + tail
+    return [(sp, 0, M32)] if _p_overflow(a, w) or size > M32 else _mk(sp, base, size)
 
 
 def resolve(ins: I.Instr, R) -> list:
@@ -167,15 +184,17 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
     c = [x[0] for x in w]          # immediates (the fields the RTL does not resolve)
     rd, wr = [], []
     if op == I.LD:
-        rd.append(_mk(SP_DRAM, w[0], c[2] << 2)); wr.append(_mk(SP_TMEM, w[1], c[2]))
+        rd.append([(SP_DRAM, 0, M32)] if c[2] >> 30 else _mk(SP_DRAM, w[0], c[2] << 2))
+        wr.append(_mk(SP_TMEM, w[1], c[2]))
     elif op == I.LDX:
         rows, cols = c[3] & 0xFFFF, c[3] >> 16
         if rows and cols and c[6]:
-            rd.append(_mk(SP_DRAM, w[0], _p(c[6] - 1, c[4]) + (cols << 2)))
+            rd.append(_mk_product_span(SP_DRAM, w[0], c[6] - 1, c[4], cols << 2))
             rd.append(_mk(SP_TMEM, w[2], rows))
-            wr.append(_mk(SP_TMEM, w[1], _p(rows - 1, c[5]) + cols))
+            wr.append(_mk_product_span(SP_TMEM, w[1], rows - 1, c[5], cols))
     elif op == I.ST:
-        rd.append(_mk(SP_TMEM, w[1], c[2])); wr.append(_mk(SP_DRAM, w[0], c[2] << 2))
+        rd.append(_mk(SP_TMEM, w[1], c[2]))
+        wr.append([(SP_DRAM, 0, M32)] if c[2] >> 30 else _mk(SP_DRAM, w[0], c[2] << 2))
     elif op == I.STREAM:
         wr.append(_mk(SP_DRAM, w[1], 4 * 256 * 256)); wr.append(_mk(SP_DRAM, w[2], 4 * 256 * 256))
         wr.append(_mk(SP_TMEM, w[6], 256))
@@ -186,9 +205,12 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
         rows, cols = c[3] & 0xFFFF, c[3] >> 16
         if rows and cols:
             p0 = _p(rows - 1, cols)
-            wr.append(_mk(SP_DRAM, w[0], (p0 + cols) << 2)); wr.append(_mk(SP_TMEM, w[5], rows))
+            state_span = (p0 + cols) << 2
+            wr.append([(SP_DRAM, 0, M32)] if _p_overflow(rows - 1, cols) or state_span > M32
+                      else _mk(SP_DRAM, w[0], state_span))
+            wr.append(_mk(SP_TMEM, w[5], rows))
             rd.append(_mk(SP_TMEM, w[1], cols << 1)); rd.append(_mk(SP_TMEM, w[2], rows))
-            rd.append(_mk(SP_TMEM, w[4], c[6] + 1))
+            rd.append([(SP_TMEM, 0, M32)] if c[6] == M32 else _mk(SP_TMEM, w[4], c[6] + 1))
     elif op in (I.MM, I.TMM):
         n, kb, k0, m = c[3] & 0xFFFF, (c[3] >> 16) & 0xFF, c[3] >> 24, (c[5] >> 16) & 0xFF
         if n and kb and m:
@@ -204,11 +226,11 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
                          c[3] & I.TMM_CQ4 else
                          ((kb + (7 if binary else 3)) // (8 if binary else 4)) * D
                          if op == I.TMM else kb * D)
-            rd.append(_mk(SP_DRAM, w[0], p0 + row_bytes))
+            rd.append(_mk_product_span(SP_DRAM, w[0], (kb if grq else n) - 1, c[4], row_bytes))
             if op == I.TMM:
                 if fl & (I.F_RSC | I.F_GSC):
-                    rd.append(_mk(SP_DRAM, w[1], p1 + (4 * n if grq else
-                                                       4 * kb if fl & I.F_GSC else 4)))
+                    tail = 4 * n if grq else 4 * kb if fl & I.F_GSC else 4
+                    rd.append(_mk_product_span(SP_DRAM, w[1], (kb if grq else n) - 1, c[6], tail))
             elif not fl & I.F_UNIT:
                 # a scale row's bytes up to block k0 + KB's (MX, docs/isa.md "Weight formats"):
                 # RSC Sw; int8x Sw and a byte a block; NVFP4 Sw, three reserved words and 8
@@ -216,7 +238,7 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
                 wf = (fl >> I.WF_SHIFT) & 3
                 sb = (4 if fl & I.F_RSC else 4 + k0 + kb if wf == I.W8 else
                       24 + ((k0 + kb) << 3) if wf == I.WNV else 12 + ((k0 + kb) << 2))
-                rd.append(_mk(SP_DRAM, w[1], p1 + sb))
+                rd.append(_mk_product_span(SP_DRAM, w[1], (kb if grq else n) - 1, c[6], sb))
             if fl & I.F_ASCALE:
                 rd.append(_mk(SP_TMEM, w[1], m))
             ab = (c[5] >> 24) & 0xFF
@@ -227,7 +249,7 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
     elif op == I.QACT:
         rows, kb = c[1] & 0xFF, c[1] >> 16
         if rows and kb:
-            rd.append(_mk(SP_TMEM, w[0], _p(rows - 1, c[2]) + kb * D))
+            rd.append(_mk_product_span(SP_TMEM, w[0], rows - 1, c[2], kb * D))
             if fl & I.F_CSCALE:
                 rd.append(_mk(SP_TMEM, w[3], kb * D))
             if fl & I.F_RSCALE:
@@ -240,9 +262,16 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
             p0, p1 = _p(rows - 1, c[4]), _p(rows - 1, c[5])
             # a scale row's words (not ROW): Sw and ceil(KB / 4) words of offsets
             p2, p3 = _p(kb * D - 1, c[6]), _p(rows, 1 + ((kb + 3) >> 2))
-            rd.append(_mk(SP_TMEM, w[0], p0 + kb * D))
-            wr.append(_beats(_mk(SP_DRAM, w[1], p1 + p2 + 1)))
-            wr.append(_beats(_mk(SP_DRAM, w[2], 4 * (rows if fl & I.F_ROW else p3))))
+            src_span = p0 + kb * D
+            rd.append([(SP_TMEM, 0, M32)] if _p_overflow(rows - 1, c[4]) or src_span > M32
+                      else _mk(SP_TMEM, w[0], src_span))
+            span = p1 + p2 + 1
+            over = _p_overflow(rows - 1, c[5]) or _p_overflow(kb * D - 1, c[6])
+            wr.append([(SP_DRAM, 0, M32)] if over or span > M32 else _beats(_mk(SP_DRAM, w[1], span)))
+            scale_span = 4 * (rows if fl & I.F_ROW else p3)
+            over_scale = not (fl & I.F_ROW) and _p_overflow(rows, 1 + ((kb + 3) >> 2))
+            wr.append([(SP_DRAM, 0, M32)] if over_scale or scale_span > M32
+                      else _beats(_mk(SP_DRAM, w[2], scale_span)))
     elif op == I.VOP:
         rows, cols = c[3] & 0xFFFF, c[3] >> 16
         f, bm = (c[5] >> 16) & 0xFF, (c[5] >> 24) & 3
@@ -273,8 +302,10 @@ def footprint(ins: I.Instr, R, D: int = 128, S: int = 1) -> Fp:
     elif op == I.GATHER:
         rows, cols = c[2] & 0xFFFF, c[2] >> 16
         if rows and cols:
-            rd.append(_mk(SP_TMEM, w[0], _p(rows - 1, c[3]) + cols))
-            wr.append(_mk(SP_TMEM, w[1], _p(S - 1, c[5]) + _p(rows - 1, c[4]) + cols))
+            rd.append(_mk_product_span(SP_TMEM, w[0], rows - 1, c[3], cols))
+            span = _p(S - 1, c[5]) + _p(rows - 1, c[4]) + cols
+            over = _p_overflow(S - 1, c[5]) or _p_overflow(rows - 1, c[4])
+            wr.append([(SP_TMEM, 0, M32)] if over or span > M32 else _mk(SP_TMEM, w[1], span))
     elif op == I.RLD:
         rd.append(_mk(SP_TMEM, w[0], 1))
     elif op == I.WAITW:
