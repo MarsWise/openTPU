@@ -286,9 +286,20 @@ module otpu_mem_ch #(
   assign n_cready = !a_crst && aq_wr;
   assign aq_wv    = n_cvalid && n_cready;
   assign aq_wd    = {n_cwe, n_caddr};
-  assign n_wready = !a_crst && ad_wr;
-  assign ad_wv    = n_wvalid && n_wready;
-  assign ad_wd    = {~&n_wmask, n_wmask, n_wdata};
+  // the write data reaches u_ad's LUT RAM through a register (r8 a4138552: the native
+  // adapter's gathered beat, six LUT levels from its slot registers, to u_ad's RAM inputs across
+  // the die, -1.20 ns at 133.33 MHz): a beat a cycle later, never lost (the register takes the
+  // next only as it writes the last), u_ad's reader waits for the beat as before (a_ok)
+  logic          w_v;
+  logic [DW-1:0] w_d;
+  assign n_wready = !a_crst && (!w_v || ad_wr);
+  always_ff @(posedge clk) begin
+    if (a_crst) w_v <= 1'b0;
+    else if (n_wready) w_v <= n_wvalid;
+    if (n_wready && n_wvalid) w_d <= {~&n_wmask, n_wmask, n_wdata};
+  end
+  assign ad_wv    = w_v && ad_wr && !a_crst;
+  assign ad_wd    = w_d;
   assign ar_rr    = 1'b1;
   always_ff @(posedge clk) begin
     n_rvalid <= ar_rv && !a_crst;

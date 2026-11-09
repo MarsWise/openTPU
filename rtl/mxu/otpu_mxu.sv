@@ -891,6 +891,20 @@ module otpu_mxu
       default: return 8'(c);
     endcase
   endfunction
+  // TMM T5's trits as a table (an 8-input function per bit: LUT6s and the slice muxes, not
+  // the constant multiplies' carry chains -- r8 a4138552's worst path, BRAM to wd -1.23 ns):
+  // trit n of byte q = ((q 3^n mod 256) 3) >> 8 (opentpu/trits.py), 0 / 1 / 2 for -1 / 0 / +1
+  function automatic logic [4:0][255:0][1:0] t5rom();
+    logic [4:0][255:0][1:0] r;
+    int p;
+    for (int n = 0; n < 5; n++) begin
+      p = 1;
+      for (int k = 0; k < n; k++) p = p * 3;
+      for (int q = 0; q < 256; q++) r[n][q] = 2'((((q * p) % 256) * 3) >> 8);
+    end
+    return r;
+  endfunction
+  localparam logic [4:0][255:0][1:0] T5ROM = t5rom();
   // the weight of position i for a column that takes the high block (PAIR) or the high half
   function automatic logic [7:0] wsel(input logic [D*8-1:0] w, input int i, input logic hb,
                                       input logic [1:0] wf, input logic ternary, input logic binary,
@@ -901,15 +915,7 @@ module otpu_mxu
     logic [3:0] c4v;
     logic [15:0] tm;
     if (ternary && t5) begin                       // TMM T5: trit ts of byte i (trits.py)
-      case (ts)
-        3'd0: tm = 16'(w[8 * i +: 8]);
-        3'd1: tm = 16'(w[8 * i +: 8]) * 16'd3;
-        3'd2: tm = 16'(w[8 * i +: 8]) * 16'd9;
-        3'd3: tm = 16'(w[8 * i +: 8]) * 16'd27;
-        default: tm = 16'(w[8 * i +: 8]) * 16'd81;
-      endcase
-      tm = 16'(tm[7:0]) * 16'd3;                   // t = ((q 3^n mod 256) 3) >> 8
-      case (tm[9:8])
+      case (T5ROM[(ts > 3'd4) ? 3'd4 : ts][w[8 * i +: 8]])
         2'd0: return -8'sd1;
         2'd1: return 8'd0;
         default: return 8'd1;
@@ -1141,8 +1147,9 @@ module otpu_mxu
                         w0[2 * (D + i) +: 2], w0[2 * i +: 2]} :
                // (the high byte only feeds PAIR's high-block columns: never a CQ command, which
                // has no PAIR / QUAD; its CQ lookup would only double the D LUT muxes)
+               // (nor a T5 one, unpaired: its trit decode here would be the D tables again)
                {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts,
-                     1'b0, 1'b0, cq_lut, wq_t5),
+                     1'b0, 1'b0, cq_lut, 1'b0),
                 wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut, wq_t5)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
