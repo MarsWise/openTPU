@@ -53,7 +53,10 @@ class Image:
     the RoPE and identity tables, the embedding (fp32) and the tied head (int8), the I/O."""
 
     def __init__(self, cfg, W: dict, enc_cap: int = 128, dec_cap: int = 128,
-                 wformat: str = "int8"):
+                 wformat: str = "int8", cq: dict | None = None):
+        """cq (needle.cq_matrices: the CACT CQ4 export): the attention matrices as TMM CQ
+        codes (the int8 LUT of the shared codebook, fp32 group scales) with their activations
+        in the CQ basis (the VPU's Hadamard); wformat then the head's (the embedding)."""
         if cfg.S != 1:
             raise ValueError("Needle: one slice")
         D = cfg.D
@@ -63,6 +66,20 @@ class Image:
         self.dk = dk = -(-d // D) * D
         nq, nk = N.NH * d, N.NK * d
         rb, sb = (lambda k: Q.row_bytes(k, wformat, D)), (lambda k: Q.scale_bytes(k, wformat, D))
+        self.cq, self.lut = None, None
+        if cq:
+            from ..cactus.transcode import cq_to_tmm_cq
+            self.cq = {n: cq_to_tmm_cq(m) for n, m in cq.items()}
+            f0, p0, _, self.lut = next(iter(self.cq.values()))
+            if any(not np.array_equal(t[3], self.lut) or
+                   not np.array_equal(t[0].left_signs, f0.left_signs) or
+                   not np.array_equal(t[0].right_signs, f0.right_signs) or
+                   not np.array_equal(t[0].input_scale_recip, f0.input_scale_recip)
+                   for t in self.cq.values()):
+                raise ValueError("Needle CQ: one LUT and one activation basis expected")
+            self.cq_bits = f0.bits
+            rb = lambda k: -(-(k // D) // (4 if f0.bits == 2 else 2)) * D       # noqa: E731
+            sb = lambda k: 4 * (k // D)                                       # noqa: E731
 
         def attn_layout(lb, cap):
             L = {"g_in": lb.alloc(4 * H), "qn": lb.alloc(4 * d), "kn": lb.alloc(4 * d)}
@@ -93,6 +110,14 @@ class Image:
                           (base + L["kn"], f32(one(W[p + "k_norm.weight"])))]
             for name, src in (("wq", "q_proj"), ("wk", "k_proj"), ("wv", "v_proj"),
                               ("wo", "out_proj")):
+                if self.cq is not None:            # the codes; the gate in W_o's scales
+                    _, q, sc, _ = self.cq[p + src + ".weight"]
+                    if name == "wo":
+                        sc = (sig(W[gate]) * sc).astype(np.float32)
+                    if q.shape != (L[name][2], rb(L[name][3])):
+                        raise ValueError(f"{p + src}: packed codes of an unexpected size")
+                    self.puts += [(base + L[name][0], q), (base + L[name][1], sc)]
+                    continue
                 w = np.asarray(W[p + src + ".weight"], np.float64)
                 if name == "wo":
                     w = sig(W[gate]) * w
@@ -122,6 +147,12 @@ class Image:
             self.puts.append((addr, a))
             return Tensor(Affine(addr), a.shape, (a.shape[1], 1))
 
+        if self.cq is not None:                    # the shared activation basis
+            f0 = next(iter(self.cq.values()))[0]
+            self.cq_t = SimpleNamespace(
+                recip=vec(np.tile(f0.input_scale_recip, 1)),
+                left=vec(np.tile(f0.left_signs, H // 128)),
+                right=vec(np.tile(f0.right_signs, H // 128)))
         self.enc_norm = vec(one(W["model.encoder.final_norm.weight"]))
         self.dec_norm = vec(one(W["model.decoder.norm.weight"]))
         E = np.asarray(W["model.embed_tokens.weight"], np.float32)
@@ -147,7 +178,12 @@ class Image:
                              kn=t(L["kn"], N.HD), rg=None, qscale=None)
         for name in ("wq", "wk", "wv", "wo"):
             a0, a1, n, k = L[name]
-            setattr(lw, name, QTensor.weight(off + a0, off + a1, n, k, self.fmt, self.D))
+            if self.cq is not None:
+                setattr(lw, name, QTensor.cq_weight(off + a0, off + a1, n, k, self.D,
+                                                    self.cq_bits, self.lut))
+            else:
+                setattr(lw, name, QTensor.weight(off + a0, off + a1, n, k, self.fmt, self.D))
+        lw.cq = self.cq_t if self.cq is not None else None
         lw.kv = KVDesc({j: {k: off + v for k, v in r.items()} for j, r in enumerate(L["kv"])},
                        cap, self.dk, self.D, 1, 0, dv=N.HD)
         lw.kvs = [lw.kv]
@@ -210,8 +246,9 @@ class Engine:
     """Needle on the ISA simulator (or a backend with run / read): encode(ids) once, then
     step(tok) per decoder token -> logits [V]."""
 
-    def __init__(self, W: dict, cfg, enc_cap: int = 128, dec_cap: int = 128, backend=None):
-        self.img = Image(cfg, W, enc_cap, dec_cap)
+    def __init__(self, W: dict, cfg, enc_cap: int = 128, dec_cap: int = 128, backend=None,
+                 cq: dict | None = None):
+        self.img = Image(cfg, W, enc_cap, dec_cap, cq=cq)
         self.cfg = cfg
         self.backend = backend or Q3.IsaBackend(cfg, [self.img.build()], adopt=True)
         self.T, self.pos = 0, 0

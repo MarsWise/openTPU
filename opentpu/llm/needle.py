@@ -122,3 +122,34 @@ def generate(W, enc_ids, n: int = 64) -> list:
         if t == EOS:
             break
     return d[2:]
+
+
+def cq_matrices(folder) -> dict:
+    """The CACT CQ4 export's attention matrices (needle-cq4.zip) by the HF names: {name:
+    opentpu.cactus.cq.CQMatrix}. Norms, gates and the embedding (CQ4 with an orthogonal
+    rotation: not read) stay the bf16 checkpoint's."""
+    from ..cactus.cq import read_cact
+    f = Path(folder)
+    out = {}
+    names = {"q": "q_proj", "k": "k_proj", "v": "v_proj", "output": "out_proj"}
+    for i in range(ENC_LAYERS):
+        for a, b in names.items():
+            out[f"model.encoder.layers.{i}.self_attn.{b}.weight"] = \
+                read_cact(f / f"encoder_layer_{i}_attn_{a}.weights")
+    for i in range(DEC_LAYERS):
+        for a, b in names.items():
+            out[f"model.decoder.layers.{i}.self_attn.{b}.weight"] = \
+                read_cact(f / f"layer_{i}_attn_{a}.weights")
+            out[f"model.decoder.layers.{i}.encoder_attn.{b}.weight"] = \
+                read_cact(f / f"layer_{i}_encoder_attn_{a}.weights")
+    return out
+
+
+def cq_effective(W: dict, cq: dict) -> dict:
+    """W with every CQ matrix replaced by its effective weight (the CQ math as a dense
+    matrix: x @ W_eff.T == CQMatrix.matmul_reference(x))."""
+    out = dict(W)
+    for name, m in cq.items():
+        k = m.indices.shape[1]
+        out[name] = m.matmul_reference(np.eye(k, dtype=np.float32)).T.astype(np.float64)
+    return out

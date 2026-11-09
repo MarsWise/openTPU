@@ -1368,6 +1368,17 @@ def _load_opt(desc):
     return None if desc is None else ol.load(desc)
 
 
+def _cq_in(a, lw):
+    """A projection's input: a itself, or with lw.cq (Cactus CQ weights, TMM CQ) the CQ code
+    basis of a (kernels/cactus_cq.cq_activation: scale, signs, normalized Hadamard per 128)."""
+    cq = getattr(lw, "cq", None)
+    if cq is None:
+        return a
+    from ..kernels.cactus_cq import cq_activation
+    return cq_activation(a, ol.load(cq.recip), ol.load(cq.left), ol.load(cq.right),
+                         tuple(range(128)))
+
+
 V6_STRIDE = 3 * 128 * 128 // 4     # a 6-bit V^T's D-block of three planes, head dim 128
 
 
@@ -1478,7 +1489,7 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     kv = lw.kv
     kpos = pos.pos if isinstance(pos, RunPos) else pos
-    xs = ol.quantize(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps))
+    xs = ol.quantize(_cq_in(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps), lw))
     qsc = _load_opt(getattr(lw, "qscale", None))
     k = None if cross else ol.dot(xs, lw.wk)    # [1, nkv_loc*d]
     v = None if cross else ol.dot(xs, lw.wv)
@@ -1538,7 +1549,7 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     o_all = ol.all_gather(o_row)                # [1, n_q*d], slice-major head order
     if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o
         o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)
-    y = ol.all_gather(ol.dot(o_all, lw.wo))     # [1, H]
+    y = ol.all_gather(ol.dot(_cq_in(o_all, lw), lw.wo))     # [1, H]
     if post is not None:
         y = rmsnorm(y, ol.load(post), eps)
     return x + y
@@ -1959,7 +1970,7 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
     appended first); lw.g_in None: x projected as it is."""
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     R = rows.R if isinstance(rows, RunRows) else len(rows)
-    xs = ol.quantize(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps))
+    xs = ol.quantize(_cq_in(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps), lw))
     k = ol.dot(xs, lw.wk)                       # [R, nkv_loc*d]
     v = ol.dot(xs, lw.wv)
     q = None if kv_only else ol.dot(xs, lw.wq)  # [R, nq_loc*d]
@@ -2023,7 +2034,7 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
     o_all = ol.all_gather(o)                    # [R, n_q*d]
     if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o (as
         o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)     # _attention's, a row at a time)
-    y = ol.all_gather(ol.dot(o_all, lw.wo))     # [R, H]
+    y = ol.all_gather(ol.dot(_cq_in(o_all, lw), lw.wo))     # [R, H]
     return x + y
 
 
