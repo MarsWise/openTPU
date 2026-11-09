@@ -67,3 +67,26 @@ def test_dory_small_against_reference(monkeypatch, resident):
     one = DY.reference_logits(dataclasses.replace(SPEC, loops=1), R, tokens)
     c1 = (dev * one).sum(1) / np.linalg.norm(dev, axis=1) / np.linalg.norm(one, axis=1)
     assert c1.max() < 0.98
+
+
+SUB = os.environ.get("OTPU_DORY_GGUF", "/home/claude/models/dory_sub24.gguf")
+
+
+def test_dory_real_weights_subset_int8():
+    """The real Q5_K_M checkpoint's blocks 0-7 / 16-23 / 56-63 (tools/dory_subset_gguf.py: 4
+    input, 4 recurrent x 4 loops, 4 output layers; vocabulary cut to 32768), int8 on the ISA
+    against dory.cpp's graph in fp32: measured cos 0.99796 .. 0.99891, top-2 equal."""
+    if not os.path.exists(SUB):
+        pytest.skip(f"no {SUB}")
+    from opentpu.isasim import board_config
+    R = DY.Raw(SUB)
+    spec = DY.spec_from_gguf(R.g)
+    assert (spec.n_input, spec.n_rec, spec.n_out, spec.loops) == (4, 4, 4, 4)
+    ids = [1784, 8961, 1307, 5498, 1395]                     # "The capital of France is"
+    ref = DY.reference_logits(spec, R, ids)
+    eng = Engine(spec, DY.Weights(spec, R), cap=256, cfg=board_config(DRAM_BYTES=1 << 31),
+                 resident=True, pipeline=False, rows=1)
+    dev = np.stack([np.asarray(eng.step(t)).reshape(-1) for t in ids])
+    cos = (dev * ref).sum(1) / np.linalg.norm(dev, axis=1) / np.linalg.norm(ref, axis=1)
+    assert cos.min() > 0.997, cos
+    assert list(np.argsort(-dev[-1])[:2]) == list(np.argsort(-ref[-1])[:2])

@@ -319,10 +319,8 @@ class Image(Q3.Image):
         offs = [v for heads in self.lofs["kvs"] for r in heads for v in r.values()]
         self.kv_lo = min(offs)
         self.kv_span = (self.LS - self.kv_lo + 4095) // 4096 * 4096
-        self.kv_areas = [None]
-        for _ in range(1, spec.loops):
-            self.kv_areas.append(b)
-            b += spec.n_rec * self.kv_span
+        self.kv_area = b                # every loop's recurrent KV (a loop: n_rec spans)
+        b += spec.loops * spec.n_rec * self.kv_span
         self.nbytes = (b + 4095) // 4096 * 4096
         if self.nbytes > cfg.DRAM_BYTES:
             raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB, DRAM_BYTES is "
@@ -361,8 +359,9 @@ class Image(Q3.Image):
         nq = spec.n_q * d
         base_layer = m.layer
 
-        def layer(P, loop: int = 0):
-            """Layer P (an int, or an Affine of loop variables) at loop `loop` (its KV)."""
+        def layer(P, loop=None):
+            """Layer P (an int, or an Affine of loop variables); a recurrent one at `loop` (an
+            int or a loop variable: its KV in the loops' area), else its block's KV."""
             idx = Affine.of(P)
             lw = base_layer(0, idx)
             lw.g_in = None
@@ -374,8 +373,9 @@ class Image(Q3.Image):
             lw.qscale = Tensor(t + 16 * H, (nq,), (1,))
             go = Affine(self.gates) + idx * self.gstride
             lw.wgate = QTensor.weight(go, go + self.g_rb, nq, H, self.gfmt, D)
-            if loop:
-                off = Affine(self.kv_areas[loop] - self.kv_lo) + \
+            if loop is not None:
+                off = Affine(self.kv_area - self.kv_lo) + \
+                    Affine.of(loop) * (spec.n_rec * self.kv_span) + \
                     (idx - spec.n_input) * self.kv_span
                 lw.kvs = [KVDesc({sid + j * cfg.S: {k: off + v for k, v in r.items()}
                                   for j, r in enumerate(heads)}, self.cap, self.dk, D, cfg.S,
@@ -431,7 +431,7 @@ def dory_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
         pr = pos
     tabs = {k: (ol.load(c[pr, :]), ol.load(s[pr, :])) for k, (c, s) in m.ropes.items()}
 
-    def run(first, n, loop=0):
+    def run(first, n, loop=None):
         for it in ol.range(n // GROUP):
             for e in range(GROUP):
                 lw = m.layer(Affine.of(it) * GROUP + (first + e), loop)
@@ -446,7 +446,7 @@ def dory_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
 
     run(0, spec.n_input)
     h = x * 1.0
-    for k in range(spec.loops):
+    for k in ol.range(spec.loops):
         x.set(_l2(x + h, eps))
         run(spec.n_input, spec.n_rec, k)
     run(spec.n_input + spec.n_rec, spec.n_out)
