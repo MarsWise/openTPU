@@ -142,7 +142,8 @@ module otpu_ram_1r1w #(
   parameter int    W     = 32,
   parameter int    N     = 1024,
   parameter string STYLE = "block",
-  parameter bit    ZERO  = 1'b1
+  parameter bit    ZERO  = 1'b1,
+  parameter bit    OREG  = 1'b0                 // a second read register (rtl/tech/generic)
 ) (
   input  logic                 clk,
   input  logic                 we,
@@ -152,8 +153,14 @@ module otpu_ram_1r1w #(
   input  logic [$clog2(N)-1:0] ra,
   output logic [W-1:0]         rd
 );
+  logic [W-1:0] rq;
   otpu_ram_tiled #(.W(W), .N(N), .KIND(0)) u_t (
-    .clk, .we, .wm('1), .wa, .wd, .re, .ra, .rd);
+    .clk, .we, .wm('1), .wa, .wd, .re, .ra, .rd(rq));
+  if (OREG) begin : g_oreg
+    always_ff @(posedge clk) if (re) rd <= rq;
+  end else begin : g_noreg
+    assign rd = rq;
+  end
 endmodule
 
 // Read ahead (rtl/tech/generic has the contract): small and asynchronous-read, so flip-flops and

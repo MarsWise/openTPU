@@ -26,7 +26,8 @@ if {!$fast && [file exists $here/impl_directives.tcl]} { source $here/impl_direc
 
 # OTPU_MAX_THREADS (unset: Vivado's default, 2 on Windows): general.maxThreads in the synthesis and
 # implementation runs (their processes, through a TCL.PRE hook on their first step) and here.
-# r5's m8 db36f818 routed on 2 threads. Vivado caps it (8 on Windows).
+# r5's m8 db36f818 routed on 2 threads; r8 runs 16 (build_r8_133.ps1). The run logs the value
+# Vivado took (otpu_threads: ...).
 if {[info exists ::env(OTPU_MAX_THREADS)] && [string trim $::env(OTPU_MAX_THREADS)] ne ""} {
   set nt [string trim $::env(OTPU_MAX_THREADS)]
   if {![string is integer -strict $nt] || $nt < 1 || $nt > 32} { error "OTPU_MAX_THREADS '$nt': 1 to 32" }
