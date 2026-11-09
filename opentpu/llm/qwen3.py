@@ -1452,7 +1452,7 @@ class RunRows(RunPos):
 
 
 def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = False,
-               seq=None, post=None):
+               seq=None, post=None, cross: bool = False):
     """x + W_o . attention(x) for one token, this slice's heads; returns the new residual
     (replicated on every slice).
 
@@ -1472,14 +1472,16 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     length, or attention.Blocks); `post` (LFM3's sandwich norm): a gain tensor, the output is
     RMSNorm(W_o . attention, post) before the residual add. Dory (nGPT, opentpu/llm/dory.py):
     lw.g_in None, x projected as it is (no input norm); lw.qscale ([n_q_loc d]) multiplies
-    each query after its norm and RoPE."""
+    each query after its norm and RoPE. `cross` (Needle's decoder, opentpu/llm/needle_dev.py):
+    a cross attention -- no K / V of x (lw.kv holds the encoder's, written before), the query
+    attends `seq` cache tokens."""
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     kv = lw.kv
     kpos = pos.pos if isinstance(pos, RunPos) else pos
     xs = ol.quantize(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps))
     qsc = _load_opt(getattr(lw, "qscale", None))
-    k = ol.dot(xs, lw.wk)                       # [1, nkv_loc*d]
-    v = ol.dot(xs, lw.wv)
+    k = None if cross else ol.dot(xs, lw.wk)    # [1, nkv_loc*d]
+    v = None if cross else ol.dot(xs, lw.wv)
     sg = sigmoid(ol.dot(xs, lw.wgate)) if gated else None       # [1, nq_loc*d]
     qn, kn = _load_opt(lw.qn), _load_opt(lw.kn)
     c, s_ = _rope_gate(lw, c, s_)
@@ -1487,17 +1489,19 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     heads = list(kv.owned_heads(spec.n_kv))
     nh = len(heads)
     qps = [ol.dot(xs, lw.wq[j * G * d:(j + 1) * G * d, :]) for j in range(nh)]  # [1, G*d]
-    kh = _rope_padded(_norm_heads(k.reshape(nh, d), kn, eps), c, s_)  # [nkv_loc, d or D]
-    vh = _padded(v.reshape(nh, d))
-    for j, hh in enumerate(heads):
-        ol.kv_append(kv, hh, kpos, kh[j:j + 1, :], None)
+    if not cross:
+        kh = _rope_padded(_norm_heads(k.reshape(nh, d), kn, eps), c, s_)  # [nkv_loc, d or D]
+        vh = _padded(v.reshape(nh, d))
+        for j, hh in enumerate(heads):
+            ol.kv_append(kv, hh, kpos, kh[j:j + 1, :], None)
 
     def queries(j):
         def emit():
             # the head's V^T append (byte-strided, the quantizer's slowest store) just ahead of
             # its queries: head j's scores start after K and V_0..V_j, not after all V appends
-            ol.kv_append(kv, heads[j], kpos, None, vh[j:j + 1, :],
-                         v6pos=pos.v6pos if isinstance(pos, RunPos) else None)
+            if not cross:
+                ol.kv_append(kv, heads[j], kpos, None, vh[j:j + 1, :],
+                             v6pos=pos.v6pos if isinstance(pos, RunPos) else None)
             r = _rope_padded(_norm_heads(qps[j].reshape(G, d), qn, eps), c, s_)
             if qsc is not None:
                 r = r * qsc.reshape(nh * G, d)[j * G:(j + 1) * G, :]
@@ -1936,7 +1940,7 @@ def _rope_rows_padded(x, c, s_, out=None):
 
 
 def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
-                    kv_only: bool = False):
+                    kv_only: bool = False, seq_all=None):
     """x + W_o . attention(x) for R token rows; row r is token position rows[r][1] of sequence
     rows[r][0] (its own KV cache), or rows is a RunRows (sequence 0, run-time positions; the
     V^T appends a row at a time, each row's mask its own). Every row's K/V is appended first,
@@ -1950,10 +1954,12 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
     and a query group wider than the MXU attends in parts of MCOLS heads. A row's position may
     be a run-time one (RunPos.offset: a layer-major prefill run), its K / V appended row by row.
     kv_only: the rows' K / V appended, nothing else (no queries, no output: None; the MTP
-    layer's prompt rows in a layer-major prefill, qwen35.qwen35_mtp_kv_run)."""
+    layer's prompt rows in a layer-major prefill, qwen35.qwen35_mtp_kv_run). seq_all: every row
+    attends that many cache tokens (an encoder's bidirectional attention: the rows' K / V all
+    appended first); lw.g_in None: x projected as it is."""
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     R = rows.R if isinstance(rows, RunRows) else len(rows)
-    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_in), eps))
+    xs = ol.quantize(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps))
     k = ol.dot(xs, lw.wk)                       # [R, nkv_loc*d]
     v = ol.dot(xs, lw.wv)
     q = None if kv_only else ol.dot(xs, lw.wq)  # [R, nq_loc*d]
@@ -1998,6 +2004,8 @@ def _attention_rows(x, lw, c, s_, rows, spec, block: int, gated: bool = False,
         o[r, (j * G + g0) * d:(j * G + g1) * d].reshape(g1 - g0, d).set(acc / l[:, None])
 
     def seq(r):                                 # row r's extent: its bucket, or pos + 1
+        if seq_all is not None:
+            return seq_all
         if run:
             return rows.bucket_row(r)
         p = rows[r][1]
