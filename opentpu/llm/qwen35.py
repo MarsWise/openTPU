@@ -77,6 +77,9 @@ from .lfm2 import _place, plan, run_layers, subs
 from . import formats as FM
 
 
+TERN = (Q.TERNARY_GSC, Q.TERNARY_T5)   # exact ternary formats (group scales, Hadamard signs)
+
+
 def gsc_grq(spec, cfg, fmt: str, n: int, k: int) -> bool:
     """A native Bonsai TERNARY_GSC matrix in TMM GRQ's block-major layout (Config.TGRQ, every
     packed chunk streamed once; quant.pack_ternary_gsc_grq, the same bytes in the same places).
@@ -718,11 +721,18 @@ class Image(EmbedHost):
         if spec.native_bonsai:
             if not lookup:
                 raise ValueError("native Bonsai 2 requires resident=True (on-card embedding table)")
-            if wformat not in ("int8", "auto", Q.TERNARY_GSC) or head_format not in (None, Q.TERNARY_GSC):
-                raise ValueError("native Bonsai 2 requires ternary_gsc projections and head")
+            if wformat not in ("int8", "auto", Q.TERNARY_GSC, Q.TERNARY_T5) or \
+                    head_format not in (None, Q.TERNARY_GSC):
+                raise ValueError("native Bonsai 2 requires ternary_gsc (or ternary_t5) projections "
+                                 "and a ternary_gsc head")
+            if wformat == Q.TERNARY_T5 and not getattr(cfg, "TD5", False):
+                raise ValueError("ternary_t5 projections require Config.TD5 (TMM T5 firmware)")
             if formats or embed_host:
                 raise ValueError("native Bonsai 2 uses its fixed formats and on-card embedding")
-            wformat, head_format = Q.TERNARY_GSC, Q.TERNARY_GSC
+            # (the projections TMM GSC's 2-bit rows or TMM T5's dense trits; the tied head, which
+            # the on-card embedding lookup reads too, stays GSC)
+            wformat = Q.TERNARY_T5 if wformat == Q.TERNARY_T5 else Q.TERNARY_GSC
+            head_format = Q.TERNARY_GSC
         if batch != 1:
             raise ValueError("Qwen3.5 runs one sequence: batch=1")
         if cap % cfg.D:
@@ -903,12 +913,14 @@ class Image(EmbedHost):
         if spec.native_bonsai:
             mf["wab"] = "int8"  # these auxiliary gates are plain F32 in the source pack
         def scalloc(bump, n, k, fmt):
-            return bump.alloc(n * sb(k, fmt) + (4 * k if fmt == Q.TERNARY_GSC else 0))
+            return bump.alloc(n * sb(k, fmt) + (4 * k if fmt in TERN else 0))
         lb = _Bump()                                    # offsets inside one layer block
         common = {"g_in": lb.alloc(4 * H), "g_post": lb.alloc(4 * H)}
         for name, (n, k) in mlp.items():
             common[name] = (lb.alloc(n * rb(k, mf[name])), scalloc(lb, n, k, mf[name]))
-        dchunk = _chunk(self.f_loc, D, 4 * D if fd == Q.TERNARY_GSC else D if fd == "int8" else 2 * D)
+        # (ternary: whole Hadamard blocks of 512 columns a part; T5's rows pad a part's four
+        # blocks to a five-block chunk)
+        dchunk = _chunk(self.f_loc, D, 4 * D if fd in TERN else D if fd == "int8" else 2 * D)
         common["wd"] = [(lb.alloc(self.h_loc * rb(dchunk, fd)),
                          scalloc(lb, self.h_loc, dchunk, fd))
                         for _ in range(F_ // dchunk)]
@@ -985,9 +997,9 @@ class Image(EmbedHost):
         qb = QC.Batch()                 # the matrices, quantized in worker processes
 
         def put_q1(s, addr_pair, a, fmt, signs=None):
-            if fmt == Q.TERNARY_GSC:
+            if fmt in TERN:
                 q, sc = (Q.pack_ternary_gsc_grq if gsc_grq(spec, cfg, fmt, *a.shape)
-                         else Q.pack_ternary_gsc)(a, D)
+                         else Q.pack_ternary_t5 if fmt == Q.TERNARY_T5 else Q.pack_ternary_gsc)(a, D)
                 put(s, addr_pair[0], q)
                 put(s, addr_pair[1], sc)
                 put(s, addr_pair[1] + sc.nbytes, W.signs_for(a.shape[1]) if signs is None else signs)
@@ -1002,7 +1014,7 @@ class Image(EmbedHost):
         def put_parts(addrs, parts, fmt, C):
             """Each slice's rows quantized whole and stored in column parts of C (qwen3's)."""
             for s, p in enumerate(parts):
-                if fmt == Q.TERNARY_GSC:
+                if fmt in TERN:
                     signs = W.signs_for(p.shape[1])
                     for k, addr_pair in enumerate(addrs):
                         put_q1(s, addr_pair, p[:, k*C:(k+1)*C], fmt, signs[k*C:(k+1)*C])
@@ -1062,8 +1074,9 @@ class Image(EmbedHost):
                 # out_proj's rows quantized whole (as the emulation's), its head groups'
                 # column blocks their column parts (quant.column_parts)
                 fo = mf["wout"]
-                if fo == Q.TERNARY_GSC:
+                if fo in TERN:
                     gouts = [(Q.pack_ternary_gsc_grq if gsc_grq(spec, cfg, fo, wout.shape[0], og*dv)
+                              else Q.pack_ternary_t5 if fo == Q.TERNARY_T5
                               else Q.pack_ternary_gsc)(wout[:, g:g + og*dv], D)
                              for g in range(0, wout.shape[1], og*dv)]
                 else:
@@ -1081,7 +1094,7 @@ class Image(EmbedHost):
                             o = Lo["groups"] + g * lay.GS
                             put(s, o + lay.gofs["wout"][0], gq)
                             put(s, o + lay.gofs["wout"][1], gs)
-                            if fo == Q.TERNARY_GSC:
+                            if fo in TERN:
                                 signs = W.signs_for(wout.shape[1])
                                 put(s, o + lay.gofs["wout"][1] + gs.nbytes,
                                     signs[g*og*dv:(g+1)*og*dv])

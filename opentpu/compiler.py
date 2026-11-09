@@ -337,6 +337,9 @@ class QTensor:
         if fmt == Q.TERNARY_GSC:
             w = QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
             return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
+        if fmt == Q.TERNARY_T5:                 # quant.pack_ternary_t5's rows, GSC's scales
+            w = QTensor.dense_weight(data, scale, n, k, D, srs=4*k//D, **kw)
+            return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
         if fmt == Q.TERNARY:                    # TMM's packed rows with RSC row scales
             return QTensor.ternary_weight(data, scale, n, k, D, **kw)
         return QTensor(Affine.of(data), Affine.of(scale), (n, k), Q.row_bytes(k, fmt, D),

@@ -269,6 +269,8 @@ NVG = 8                        # nvfp4: E4M3 groups per K-block
 MXU_FORMATS = ("int8", "int4", "fp4", "nvfp4")
 TERNARY = "ternary"          # TMM's packed rows (2 bits a weight) with one fp32 scale a row (RSC)
 TERNARY_GSC = "ternary_gsc"  # exact ternary values, fp32 scales per group of D=128
+TERNARY_T5 = "ternary_t5"    # TERNARY_GSC in TMM T5 rows (Config.TD5): five trits a byte, the
+                             # same group scales (Bonsai 2 PTQ1_0's own coding, opentpu/trits.py)
 FOUR = ("int4", "fp4", "nvfp4")
 MMAX = 63                      # int4 / fp4: the largest 6-bit multiplier
 DW_MAX = 255                   # an offset byte
@@ -437,6 +439,8 @@ def row_bytes(K: int, fmt: str, D: int = 128) -> int:
     ternary: four K-blocks a D-byte chunk, TMM's)."""
     if fmt in (TERNARY, TERNARY_GSC):
         return -(-K // (4 * D)) * D
+    if fmt == TERNARY_T5:
+        return -(-K // (5 * D)) * D
     return K if fmt == "int8" else -(-K // (2 * D)) * D
 
 
@@ -448,7 +452,7 @@ def scale_bytes(K: int, fmt: str, D: int = 128, rsc: bool = False) -> int:
     if K % D:
         raise ValueError(f"inner dimension {K} is not a multiple of D={D}")
     KB = K // D
-    if fmt == TERNARY_GSC:
+    if fmt in (TERNARY_GSC, TERNARY_T5):
         return 4 * KB
     if rsc or fmt == TERNARY:
         return 4
@@ -670,6 +674,8 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
         return quantize_ternary(W, D)
     if fmt == TERNARY_GSC:
         return pack_ternary_gsc(W, D)
+    if fmt == TERNARY_T5:
+        return pack_ternary_t5(W, D)
     N = W.shape[0]
     if N <= QUANT_ROWS:
         return quantize_mx(W, fmt, D)
@@ -693,6 +699,15 @@ def pack_ternary_gsc(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarra
         raise ValueError("TMM GSC repacking refuses non-ternary groups")
     return (pack_ternary_mxu(np.sign(W).astype(np.int8), D),
             np.ascontiguousarray(scale, dtype='<f4').view(np.uint8).reshape(W.shape[0], -1))
+
+
+def pack_ternary_t5(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    """pack_ternary_gsc's values as TMM T5 rows (trits.pack: five D-blocks a D-byte chunk, a
+    row ceil(KB / 5) chunks) and the same fp32 group scales. Lossless; refuses what GSC does."""
+    from . import trits as T
+    W = np.asarray(W, np.float32)
+    _, sc = pack_ternary_gsc(W, D)                     # (validates the groups)
+    return T.pack(np.sign(W).astype(np.int8), D), sc
 
 
 def pack_ternary_gsc_grq(W: np.ndarray, D: int = 128) -> tuple[np.ndarray, np.ndarray]:

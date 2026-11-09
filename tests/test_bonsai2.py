@@ -85,7 +85,8 @@ def test_vpu_hadamard_kernel(inverse):
 @pytest.mark.parametrize("grq", [False, True])
 @pytest.mark.parametrize("dstep", [False, True])
 def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq,
-                                                                 grouped_source=False, rtl=False):
+                                                                 grouped_source=False, rtl=False,
+                                                                 wformat='ternary_gsc'):
     """Both layer kinds and the tied head; the reference unfolds weights, the device rotates x."""
     from dataclasses import replace
     from opentpu.isasim import Config
@@ -167,9 +168,9 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
         spec = w.spec
     cfg = Config(D=128, MCOLS=4, ACT_ROWS=8, TGSC=True, DRAM_BYTES=32 << 20,
                  DSTEP=dstep, STREAM=dstep, TFN=dstep, PAIR=True, TQUAD=True, TPAIR=True,
-                 TGRQ=grq)
+                 TGRQ=grq, TD5=wformat == 'ternary_t5')
     eng = Engine(spec, w, cap=128, cfg=cfg, resident=True, pipeline=False,
-                 rows=1, wformat='ternary_gsc')
+                 rows=1, wformat=wformat)
     tokens = [4, 9, 12, 7, 31]
     ref = reference_logits(replace(spec, native_bonsai=False), effective, tokens)
     if rtl:     # the last token on the Verilator RTL from the ISA's DRAM state: bit for bit
@@ -194,10 +195,25 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
     from opentpu import isa as I
     tmms = [i for p in eng.image.compile_step(0, tok=4) for i in p if i.op == I.TMM]
     assert any(i.w[3] & I.TMM_GRQ for i in tmms) == grq
+    if wformat == 'ternary_t5':  # every projection T5 (the head GSC), bit for bit the GSC image's
+        assert any(i.w[3] & I.TMM_T5 == I.TMM_T5 and not i.w[3] & I.TMM_CQ for i in tmms) and eng.image.nbytes <= Engine(
+            spec, w, cap=128, cfg=cfg, resident=True, pipeline=False, rows=1,
+            wformat='ternary_gsc').image.nbytes  # (K <= 1024 here: equal)
+        gsc = Engine(spec, w, cap=128, cfg=cfg, resident=True, pipeline=False, rows=1,
+                     wformat='ternary_gsc')
+        np.testing.assert_array_equal(actual, np.stack([gsc.step(t) for t in tokens]))
     if grq:     # the block-major layout is the serial GSC path's math, bit for bit
         row = Engine(spec, w, cap=128, cfg=replace(cfg, TGRQ=False), resident=True,
                      pipeline=False, rows=1, wformat='ternary_gsc')
         np.testing.assert_array_equal(actual, np.stack([row.step(t) for t in tokens]))
+
+
+@pytest.mark.parametrize('dstep', [False, True])
+def test_native_hybrid_decoder_t5(monkeypatch, dstep):
+    """Bonsai 2 with its projections in TMM T5 (Config.TD5: five trits a byte, PTQ1_0's coding),
+    the tied head GSC: the reference's cosine, and the GSC image's logits bit for bit."""
+    test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=dstep, grq=False,
+                                                               wformat='ternary_t5')
 
 
 @pytest.mark.parametrize('dstep', [False, True])
