@@ -6,7 +6,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Prepare', 'Synth', 'Build')][string]$Mode = 'Build',
+    [ValidateSet('Prepare', 'Synth', 'Build', 'Impl')][string]$Mode = 'Build',
     [int]$Jobs = 4,
     [int]$Threads = 4,
     [string]$Vivado = 'C:\Xilinx\Vivado\2024.2\bin\vivado.bat',

@@ -3,6 +3,7 @@ rem Claude: build r8 (m8, 133.33 MHz; r7 + VRAND, TCQ, TATAN, QST4, LDX, TD5, VB
 rem the checkout containing this script: tools\build_r8_133.ps1.
 rem   r8_build.cmd            full build (several hours); otpu.bit only if setup/hold pass
 rem   r8_build.cmd Synth      synthesis + structural checks only (about an hour): try this first
+rem   r8_build.cmd Impl       implementation only, reusing this checkout's finished synthesis (after a crash in place/route)
 rem   r8_build.cmd Prepare    the Vivado project only
 rem   r8_build.cmd Plan       inspect settings without creating a project
 rem NEVER programs the FPGA: loading the bitstream is a separate step you do (volatile JTAG).
