@@ -534,6 +534,14 @@ module otpu_mxu
   // ~9 k (2026-10-25, 9e36232f's PE fold). max_fanout splits each further.
   (* max_fanout = 64 *) logic [MCOLS-1:0][1:0] pe_qs;
   (* max_fanout = 64 *) logic [MCOLS-1:0]      pe_qd;
+  // ... a cycle later at the PEs (pe_qs1 / pe_qd1): the chunk reaches them a cycle after Sp
+  // (S0, the FIFO's output register), so their select registers keep S0's qs0 / qd0
+  (* max_fanout = 64 *) logic [MCOLS-1:0][1:0] pe_qs1;
+  (* max_fanout = 64 *) logic [MCOLS-1:0]      pe_qd1;
+  always_ff @(posedge clk) begin
+    pe_qs1 <= pe_qs;
+    pe_qd1 <= pe_qd;
+  end
 
   wire [31:0] c_out = h.out;
   wire        c_tz = h.tz;
@@ -1232,7 +1240,7 @@ module otpu_mxu
       localparam int JW = (j == 0) ? 0 : j - 1;
       otpu_pe #(.FIRST(i % CLS == 0), .LAST(i % CLS == CLS - 1), .WREG(j != 0)) u_pe (
         .clk, .en(1'b1), .act(as_k[j][i]), .wlo(wc[JW][i][7:0]), .whi(wc[JW][i][15:8]),
-        .sel(pe_qs[j][0]), .sel2(pe_qs[j][1]), .quad(pe_qd[j]),
+        .sel(pe_qs1[j][0]), .sel2(pe_qs1[j][1]), .quad(pe_qd1[j]),
         .pcin((i % CLS == 0) ? 48'd0 : pc[j][(i % CLS == 0) ? i : i - 1]), .pcout(pc[j][i]),
         .p(preg[j][i]));
 `ifndef SYNTHESIS
