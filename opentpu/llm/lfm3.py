@@ -185,8 +185,9 @@ from .. import fp32 as F  # noqa: E402
 from ..compiler import Affine, Tensor, trace_fit  # noqa: E402
 from ..kernels.attention import Blocks  # noqa: E402
 from . import lfm2 as L2  # noqa: E402
-from .qwen3 import (ATTN_BLOCK, _attention, _inputs, _lm_head, _mlp, _tok_arg,  # noqa: E402
-                    fill_logits, step_descriptors)
+from .qwen3 import (ATTN_BLOCK, RunPos, _attention, _inputs, _lm_head, _mlp,  # noqa: E402
+                    _tok_arg, fill_logits, step_descriptors)
+from . import generate as G  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,10 @@ class Image(L2.Image):
             b += 8 * cap * (d // 2)
         self.z2 = b
         b += 4 * (2 * blk - 1)
+        self.zs = b                     # the window's start in its two-block form (block times
+        b += 4 * 2 * blk                # -inf, then block times +inf; _slide_seq) and its end
+        self.ze = b                     # (block times +inf, then block times -inf)
+        b += 4 * 2 * blk
         self.nbytes = (b + 4095) // 4096 * 4096
         if self.nbytes > cfg.DRAM_BYTES:
             raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB, DRAM_BYTES is "
@@ -339,6 +344,10 @@ class Image(L2.Image):
         blk = ATTN_BLOCK
         put(self.z2, np.concatenate([np.full(blk - 1, -np.inf), np.full(blk, np.inf)])
             .astype(np.float32))
+        put(self.zs, np.concatenate([np.full(blk, -np.inf), np.full(blk, np.inf)])
+            .astype(np.float32))
+        put(self.ze, np.concatenate([np.full(blk, np.inf), np.full(blk, -np.inf)])
+            .astype(np.float32))
         return imgs
 
     def descriptors(self, sid: int) -> SimpleNamespace:
@@ -360,7 +369,9 @@ class Image(L2.Image):
         m.ropes = {k: (Tensor(Affine(c), (cap, d // 2), (d // 2, 1)),
                        Tensor(Affine(s), (cap, d // 2), (d // 2, 1)))
                    for k, (c, s) in self.ropes.items()}
-        m.z2 = self.z2
+        m.z2, m.zs, m.ze = self.z2, self.zs, self.ze
+        m.zmask = self.lookup.get("zmask") if self.lookup else None
+        m.cap = cap
         m.window = spec.window
         return m
 
@@ -373,18 +384,52 @@ class Image(L2.Image):
     def compile_rows(self, *a, **k):
         raise NotImplementedError("LFM3: one token a run (compile_step)")
 
-    def compile_decode(self, *a, **k):
-        raise NotImplementedError("LFM3: no resident decode yet (compile-time positions)")
+    def compile_decode(self, blocks: int, lo: int, block: int = ATTN_BLOCK):
+        """(programs, run_args): lfm3_step at a run-time position (qwen3.compile_decode); the
+        convolutions need lo >= conv_k - 1, a sliding window of one attention block."""
+        from .qwen3 import compile_decode
+        _runtime_ok(self.spec, block)
+        return compile_decode(self, lfm3_step, blocks, lo, block)
 
-    compile_generate = compile_prompt_run = compile_decode
+    def compile_generate(self, blocks: int, lo: int, block: int = ATTN_BLOCK,
+                         chain: bool = True, samp=None, debug: bool = False,
+                         part: int | None = None) -> list:
+        """The decode loop on the device for bucket `blocks` (lfm3_step in it, generate.py):
+        the token picked on the card and fed back."""
+        _runtime_ok(self.spec, block)
+        return G.compile_generate(self, lfm3_step, blocks, lo, block, chain, samp, debug, part)
+
+    def compile_prompt_run(self, *a, **k):
+        raise NotImplementedError("LFM3: no prompt runs (one token a run)")
 
 
-def _slide_seq(m, p: int, block: int):
+def _runtime_ok(spec, block: int) -> None:
+    if spec.window != block and SLIDE in spec.akinds:
+        raise NotImplementedError(f"LFM3 at run-time positions: the sliding window "
+                                  f"({spec.window}) must be one attention block ({block})")
+
+
+def _slide_seq(m, p, block: int):
     """The cache tokens a sliding layer's query at position p attends to: the last m.window
     (p - window + 1 .. p) -- a length while that reaches position 0, else attention.Blocks over
     the window's blocks, the first masked before the window's start (a row of m.z2), the last
     ending at p."""
     W = m.window
+    if W == block and (isinstance(p, RunPos) or p >= W):
+        # past the first block: the position's block masked after it (ze), then the block
+        # before masked before the window's start (zs) -- one form at compile-time and
+        # run-time positions (bit for bit the same programs' results)
+        if isinstance(p, RunPos):
+            if p.blocks == 1:
+                return p.bucket
+            t0, t = p.t0, p.tpos
+        else:
+            t0, t = p // block * block, p % block
+        end = Tensor(Affine(m.ze + 4 * (block - 1)) + Affine.of(t) * -4, (block,), (1,))
+        start = Tensor(Affine(m.zs + 4 * (block - 1)) + Affine.of(t) * -4, (block,), (1,))
+        return Blocks([(t0, block, end), (t0 - block, block, start)])
+    if isinstance(p, RunPos):
+        raise NotImplementedError("LFM3 at run-time positions: a window of one block")
     if p < W:
         return p + 1
     s = p - W + 1
@@ -395,7 +440,7 @@ def _slide_seq(m, p: int, block: int):
         n = block if b0 != eb else t + 1
         mask = Tensor(Affine(m.z2 + 4 * (block - 1 - k)), (n,), (1,)) if b0 == s0 and k else None
         items.append((b0, n, mask))
-    return Blocks(items)
+    return Blocks(items[::-1])          # the position's block first (as at run-time positions)
 
 
 @ol.jit
@@ -403,12 +448,11 @@ def lfm3_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
     """One decode token at compile-time position `pos`: its embedding (the host's x, or the
     image's table at `tok`) -> logits. lfm2_step with LFM3's sandwich norms, head gates, RoPE
     tables per layer kind and sliding windows."""
-    if not isinstance(pos, int):
-        raise NotImplementedError("LFM3: compile-time positions only")
     fill_logits(m)
     spec = m.spec
     x, _, _ = _inputs(m, pos, tok)
-    tabs = {k: (ol.load(c[pos, :]), ol.load(s[pos, :])) for k, (c, s) in m.ropes.items()}
+    pr = pos.pos if isinstance(pos, RunPos) else pos
+    tabs = {k: (ol.load(c[pr, :]), ol.load(s[pr, :])) for k, (c, s) in m.ropes.items()}
 
     def layer(li, it):
         lw = m.layer(li, it)
@@ -423,3 +467,43 @@ def lfm3_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
 
     L2.run_layers(m.plan, layer)
     _lm_head(x, m, spec)
+
+
+class PartWeights:
+    """The text decoder's tensors extracted from a checkpoint into one bf16 file per row range
+    (index.json: name -> {shape, parts: [[file, r0, r1]]}; C:\\myOpenTPU\\_claude\\lfm3_text):
+    a lazy mapping of fp32 arrays under the checkpoint's names."""
+
+    def __init__(self, folder, prefix: str = "model.language_model."):
+        self.dir = Path(folder)
+        self.idx = json.loads((self.dir / "index.json").read_text())
+        self.prefix = prefix
+        self._cache = {}
+
+    def keys(self):
+        return self.idx.keys()
+
+    def __contains__(self, k):
+        return k in self.idx
+
+    def __getitem__(self, k):
+        if k in self._cache:
+            return self._cache[k]
+        e = self.idx[k]
+        rows = [np.fromfile(self.dir / f, np.uint16) for f, _, _ in e["parts"]]
+        a = (np.concatenate(rows).astype(np.uint32) << 16).view(np.float32).reshape(e["shape"])
+        if "embed_tokens" in k:             # (read a row at a time by the host's inputs)
+            self._cache[k] = a
+        return a
+
+    def get(self, k, default=None):
+        return self[k] if k in self else default
+
+    def layers(self) -> int:
+        return 1 + max(int(k.split(".")[3]) for k in self.idx if ".layers." in k)
+
+
+def truncated(spec: Spec, n: int) -> Spec:
+    """The first n layers of the model (a real-weight check of the parts on a few layers)."""
+    from dataclasses import replace
+    return replace(spec, kinds=spec.kinds[:n])

@@ -222,3 +222,46 @@ def test_tiny_lfm3_on_board_model(have_verilator):
     for tok in (11, 22, 33, 44, 55, 66, 77, 88, 99):
         a, b = isa.step(tok), brd.step(tok)
         assert np.array_equal(np.asarray(a).view(np.uint32), np.asarray(b).view(np.uint32))
+
+
+def test_resident_decode_and_generate_on_the_card():
+    """Run-time positions (resident decode: the token id and position as run arguments, the
+    embedding gathered on the device) bit for bit the per-position programs, through the
+    sliding window's two-block form (window = one block, positions past 256); then the decode
+    loop on the device (generate_card: the token picked on the card and fed back) the host's
+    greedy loop's tokens."""
+    # (head_dim 128 as LFM3's: heads narrower than D, padded, differ in the last bits between
+    # the two forms past the first block -- qwen3's attention, not this file's)
+    spec = _tiny_spec(window=256, kinds=(L3.CONV, L3.SLIDE, L3.CONV, L3.FULL), head_dim=128)
+    W = _tiny_weights(spec, 3)
+    toks = [int(t) for t in np.random.default_rng(2).integers(0, 300, 270)]
+    a = _engine(spec, W, cap=512)
+    b = _engine(spec, W, cap=512, resident=True)
+    assert b.resident
+    for t in toks:
+        x, y = a.step(t), b.step(t)
+        assert np.array_equal(np.asarray(x).view(np.uint32), np.asarray(y).view(np.uint32))
+    want, cur = [], toks[-1]
+    for _ in range(4):
+        cur = int(np.argmax(a.step(cur)))
+        want.append(cur)
+    assert b.generate_card(toks[-1], 4, stop_ids=[]) == want
+
+
+def test_real_weights_follow_the_reference():
+    """LFM3-Omni's text decoder (24 layers, real bf16 weights extracted by row range:
+    OTPU_LFM3_DIR, PartWeights) on the device graph: "The capital of France is" -> every
+    token's logits cos >= 0.9995 against the fp32 reference, the same next token (" Paris")."""
+    import os
+    d = os.environ.get("OTPU_LFM3_DIR", "/home/claude/lfm3w")
+    if not os.path.exists(os.path.join(d, "index.json")):
+        pytest.skip("no extracted LFM3 weights (OTPU_LFM3_DIR)")
+    tk = pytest.importorskip("tokenizers")
+    W = L3.PartWeights(d)
+    spec = L3.truncated(L3.Spec.from_hf(d), W.layers())
+    ids = [spec.bos] + tk.Tokenizer.from_file(os.path.join(d, "tokenizer.json")).encode(
+        "The capital of France is", add_special_tokens=False).ids
+    ref = L3.reference_logits(spec, W, ids)
+    dev = _decode(_engine(spec, W, cap=256, cfg=board_config(DRAM_BYTES=1 << 31)), ids)
+    assert _cos_rows(dev, ref).min() > 0.9995
+    assert int(np.argmax(dev[-1])) == int(np.argmax(ref[-1]))
