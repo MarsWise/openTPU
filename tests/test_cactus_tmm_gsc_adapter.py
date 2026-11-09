@@ -48,10 +48,11 @@ endpackage
 {adapter}
 module tb;
  import otpu_pkg::*;
- reg clk=0,rst=1,start=0,go=0,m_rdy=1,m_done=0; cmd_t cmd; wire rdy,done,m_start,m_go; cmd_t m_cmd; wire [127:0] lut;
+ reg clk=0,rst=1,start=0,go=0,m_rdy=1,m_done=0; cmd_t cmd; wire rdy,done,m_start,m_go; cmd_t m_cmd; wire lw_we; wire [3:0] lw_a; wire [7:0] lw_d; reg [127:0] lut='0;
+ always @(posedge clk) if (lw_we) lut[8*lw_a +: 8] <= lw_d;  // the MXU's copies
  integer block;
  always #5 clk=~clk;
- otpu_tmm_gsc #(.D(128)) dut(clk,rst,start,go,cmd,rdy,done,m_start,m_go,m_cmd,m_rdy,m_done,lut);
+ otpu_tmm_gsc #(.D(128)) dut(clk,rst,start,go,cmd,rdy,done,m_start,m_go,m_cmd,m_rdy,m_done,lw_we,lw_a,lw_d);
  task automatic send(input [7:0] flags, input [31:0] w1,w2,w3,w4,w5,w6,w7);
   begin
    wait(rdy); @(negedge clk);

@@ -510,15 +510,15 @@ module otpu_slice
 
   logic mx_start, mx_go, mx_rdy, mx_done;
   cmd_t mx_cmd;
-  logic [127:0] cq_lut;                    // TMM CQ's LUT (the adapter's, LUTSET)
+  logic cq_we; logic [3:0] cq_a; logic [7:0] cq_d;  // TMM CQ's LUT writes (the adapter's, LUTSET)
   otpu_tmm_gsc #(.D(D)) u_tmm_gsc (
     .clk, .rst(rst_mxu), .start(ustart[U_MXU]), .go(urel), .cmd(ucmd[U_MXU]),
     .rdy(r_mxu), .done(d_mxu), .m_start(mx_start), .m_go(mx_go), .m_cmd(mx_cmd),
-    .m_rdy(mx_rdy), .m_done(mx_done), .lut(cq_lut));
+    .m_rdy(mx_rdy), .m_done(mx_done), .lw_we(cq_we), .lw_a(cq_a), .lw_d(cq_d));
   otpu_mxu #(.D(D), .MCOLS(MCOLS), .ROWS(ACT_ROWS), .DEPTH(FIFO_DEPTH), .LANES(ULANES), .IMPL(MXU_IMPL),
              .CL(MXU_CL), .E(MXU_E), .TQ(MXU_TQ), .SID(SID), .TLANES(LANES)) u_mxu (
     .clk, .rst(rst_mxu), .start(mx_start), .go(mx_go), .cmd(mx_cmd), .rdy(mx_rdy), .done(mx_done),
-    .cq_lut,
+    .lw_we(cq_we), .lw_a(cq_a), .lw_d(cq_d),
     .computing(mxu_pop), .pf_level(mxu_level), .pf_starve(mxu_starve), .pf_block(mxu_block),
     .pf_u(mxu_u), .pf_uv(mxu_uv),
     .act_blk(act_rblk), .act_blk2(act_rblk2), .act_blk3(act_rblk3), .act_blk4(act_rblk4), .act_qs(act_rqs), .act_grp(act_rgrp), .act_ren, .act_data(act_rdata), .act_scale(act_rscale),

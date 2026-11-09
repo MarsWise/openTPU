@@ -15,6 +15,13 @@ from test_cactus_cq import fixture
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _t5rom(src):
+    """wsel's T5 table (the function and its localparam)."""
+    a = src.index("  function automatic logic [2559:0] t5rom();")
+    b = src.index("T5ROM = t5rom();", a) + len("T5ROM = t5rom();")
+    return src[a:b]
+
+
 def _function(src, marker):
     start = src.index(marker)
     end = src.index("\n  endfunction", start) + len("\n  endfunction")
@@ -42,20 +49,26 @@ def test_actual_mxu_wsel_matches_cact_codebook(tmp_path, bits, inter):
     source = (ROOT / "rtl/mxu/otpu_mxu.sv").read_text(encoding="utf-8")
     dec4 = _function(source, "  function automatic logic [7:0] dec4(")
     wsel = _function(source, "  function automatic logic [7:0] wsel(")
+    cqa = _function(source, "  function automatic logic [3:0] cqa(")
+    t5 = _t5rom(source)
     tb = tmp_path / "tb.sv"
     tb.write_text(f'''`timescale 1ns/1ps
 module tb;
  localparam int D=128;
  localparam logic [1:0] WF_W8=2'd0;
+ {t5}
  {dec4}
  {wsel}
+ {cqa}
  reg [2183:0] vec[0:{len(vectors)-1}]; integer v,i; reg [7:0] got;
  initial begin
   $readmemh("{vec.as_posix()}",vec);
   for(v=0;v<{len(vectors)};v=v+1) begin
    for(i=0;i<D;i=i+1) begin
     got=wsel(vec[v][2047:1024],i,1'b0,2'd0,1'b1,1'b0,vec[v][2178:2176],
-             1'b1,1'b{1 if bits == 4 else 0},vec[v][2175:2048],1'b0);
+             1'b1,1'b{1 if bits == 4 else 0},
+             vec[v][2048 + 8*cqa(vec[v][2047:1024],i,1'b0,1'b{1 if bits == 4 else 0},
+                                 vec[v][2178:2176]) +: 8],1'b0);
     if(got!==vec[v][8*i +: 8]) $fatal(1,"case %0d lane %0d",v,i);
    end
   end

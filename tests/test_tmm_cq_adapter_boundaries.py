@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 import pytest
 from opentpu import cq as CQ, isa as I
-from test_cactus_native_mxu_decode import _function
+from test_cactus_native_mxu_decode import _function, _t5rom
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +39,7 @@ def test_actual_adapter_and_decode_chunk_boundaries(tmp_path, bits, kb):
     adapter = src[a:b]
     dec4 = _function(src, "  function automatic logic [7:0] dec4(")
     wsel = _function(src, "  function automatic logic [7:0] wsel(")
+    cqa = _function(src, "  function automatic logic [3:0] cqa(")
     pkg = (ROOT / "rtl/top/otpu_pkg.sv").read_text(encoding="utf-8")
     a = pkg.index("  typedef struct packed {\n    logic [7:0]  op;")
     b = pkg.index("  } cmd_t;", a) + len("  } cmd_t;")
@@ -51,13 +52,16 @@ endpackage
 {adapter}
 module tb;
  import otpu_pkg::*; localparam int D=128; localparam logic [1:0] WF_W8=2'd0;
+ {_t5rom(src)}
  {dec4}
  {wsel}
+ {cqa}
  reg clk=0,rst=1,start=0,go=0,m_rdy=1,m_done=0; cmd_t cmd,m_cmd;
- wire rdy,done,m_start,m_go; wire [127:0] lut;
+ wire rdy,done,m_start,m_go; wire lw_we; wire [3:0] lw_a; wire [7:0] lw_d; reg [127:0] lut='0;
+ always @(posedge clk) if (lw_we) lut[8*lw_a +: 8] <= lw_d;  // the MXU's copies
  reg [1023:0] data[0:{kb-1}], expected[0:{kb-1}]; integer block,i; reg [7:0] got;
  always #5 clk=~clk;
- otpu_tmm_gsc #(.D(128)) dut(clk,rst,start,go,cmd,rdy,done,m_start,m_go,m_cmd,m_rdy,m_done,lut);
+ otpu_tmm_gsc #(.D(128)) dut(clk,rst,start,go,cmd,rdy,done,m_start,m_go,m_cmd,m_rdy,m_done,lw_we,lw_a,lw_d);
  task automatic send(input [7:0] flags, input [31:0] w1,w2,w3,w4,w5,w6,w7, input integer lutset);
   begin
    wait(rdy); @(negedge clk); cmd='0; cmd.op=OP_TMM; cmd.flags=flags; cmd.w1=w1; cmd.w2=w2;
@@ -85,7 +89,8 @@ module tb;
      $fatal(1,"bad subcommand block=%0d w4=%h flags=%h",block,m_cmd.w4,m_cmd.flags);
    for(i=0;i<128;i=i+1) begin
     got=wsel(data[block],i,1'b0,2'd0,1'b1,1'b0,m_cmd.w4[26:24],
-             1'b1,1'b{1 if bits==4 else 0},lut,1'b0);
+             1'b1,1'b{1 if bits==4 else 0},
+             lut[8*cqa(data[block],i,1'b0,1'b{1 if bits==4 else 0},m_cmd.w4[26:24]) +: 8],1'b0);
     if(got!==expected[block][8*i +: 8]) $fatal(1,"bad decode block=%0d lane=%0d",block,i);
    end
    @(posedge clk); #1; wait(m_go); @(posedge clk); #1;

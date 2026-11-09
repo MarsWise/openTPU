@@ -66,17 +66,30 @@ module otpu_tmm_gsc
   output logic m_start, m_go,
   output cmd_t m_cmd,
   input logic m_rdy, m_done,
-  output logic [127:0] lut                  // TMM CQ's codebook LUT: 16 int8 (LUTSET)
+  // TMM CQ's codebook LUT: 16 int8 (LUTSET), written into the MXU's copies (one per position,
+  // LUT RAMs) an entry a cycle
+  output logic lw_we,
+  output logic [3:0] lw_a,
+  output logic [7:0] lw_d
 );
   // TMM CQ (word 4 bit 27, GSC only; bit 29 CQ4: 4-bit codes, two blocks a chunk; with BIN
   // 1-bit codes): each subcommand's codes are the LUT's int8 entries (the MXU's wsel), its
   // subcommands marked by word 4 bit 31 (and 29 for CQ4). LUTSET (word 4 bit 30, a GSC TMM of
   // N = KB = M = 1): eight LUT entries, rs and srs's bytes into half ors[0]. It is taken like a
-  // GSC command (after the legacy commands drain, released in order) and completes at once: no
-  // CQ command is in flight while the LUT changes (a GSC command holds the adapter until its
-  // last group), so the LUT is constant under every CQ subcommand.
+  // GSC command (after the legacy commands drain, released in order) and completes once its
+  // eight entries are written (lj 0..7, registered writes, done at lj 8): no CQ command is in
+  // flight while the LUT changes (a GSC command holds the adapter until its last group), so the
+  // LUT is constant under every CQ subcommand. The MXU's LUT RAMs are not reset (the RTL used
+  // to clear the LUT on reset): a program sets the entries it uses before its CQ commands.
   typedef enum logic [2:0] {IDLE, ARM, ISSUE, RELEASE, RUN, LUT} state_t;
   state_t state;
+  logic [3:0] lj;                            // LUTSET: the entry written
+  wire [63:0] lset = {held.w7, held.w5};
+  always_ff @(posedge clk) begin
+    lw_we <= !rst && state == LUT && !lj[3];
+    lw_a <= {held.w6[0], lj[2:0]};
+    lw_d <= lset[8 * lj[2:0] +: 8];
+  end
   cmd_t held;
   logic [7:0] k;
   logic [1:0] pending, unreleased;
@@ -95,7 +108,7 @@ module otpu_tmm_gsc
     // Unit ready cannot depend on cmd: the sequencer registers cmd after observing ready.
     // Accept GSC into held while a legacy command drains; forward its release/completion.
     rdy = state == IDLE && m_rdy;
-    done = pending != 0 ? m_done : (state == RUN && m_done && last_k) || state == LUT;
+    done = pending != 0 ? m_done : (state == RUN && m_done && last_k) || (state == LUT && lj[3]);
     m_start = state == IDLE ? start && !gsc : state == ISSUE && m_rdy;
     m_go = state == RELEASE || (go && unreleased != 0) ||
            (state == IDLE && go && !(start && gsc));
@@ -134,7 +147,7 @@ module otpu_tmm_gsc
       kq <= '0;
       wb <= '0;
       sb <= '0;
-      lut <= '0;
+      lj <= '0;
     end else begin
       if (state == IDLE || state == ARM) begin
         case ({state == IDLE && start && !gsc, m_done && pending != 0})
@@ -166,9 +179,8 @@ module otpu_tmm_gsc
             state <= held.w4[30] ? LUT : ISSUE;
         end
         LUT: begin                                   // LUTSET: its half, then done (above)
-          if (held.w6[0]) lut[127:64] <= {held.w7, held.w5};
-          else            lut[63:0]   <= {held.w7, held.w5};
-          state <= IDLE;
+          lj <= lj[3] ? 4'd0 : lj + 4'd1;
+          if (lj[3]) state <= IDLE;
         end
         ISSUE: if (m_rdy) state <= RELEASE;
         RELEASE: state <= RUN;
@@ -233,7 +245,9 @@ module otpu_mxu
   input  logic                  go,          // release: the consumer may use it (in order)
   input  cmd_t                  cmd,
   output logic                  rdy,
-  input  logic [127:0]          cq_lut,      // TMM CQ's codebook LUT (otpu_tmm_gsc's LUTSETs)
+  input  logic                  lw_we,       // TMM CQ's codebook LUT (otpu_tmm_gsc's LUTSETs):
+  input  logic [3:0]            lw_a,        //   entry lw_a of every position's copy
+  input  logic [7:0]            lw_d,
   output logic                  done,
   output logic                  computing,   // a chunk is consumed this cycle (profiling)
   // profiling: this cycle's stream state (the FIFO level; work but no chunk / chunks but no
@@ -894,43 +908,39 @@ module otpu_mxu
   // TMM T5's trits as a table (an 8-input function per bit: LUT6s and the slice muxes, not
   // the constant multiplies' carry chains -- r8 a4138552's worst path, BRAM to wd -1.23 ns):
   // trit n of byte q = ((q 3^n mod 256) 3) >> 8 (opentpu/trits.py), 0 / 1 / 2 for -1 / 0 / +1
-  function automatic logic [4:0][255:0][1:0] t5rom();
-    logic [4:0][255:0][1:0] r;
+  function automatic logic [2559:0] t5rom();     // entry (n, q) at bits 2 (256 n + q)
+    logic [2559:0] r;
     int p;
+    r = '0;
     for (int n = 0; n < 5; n++) begin
       p = 1;
       for (int k = 0; k < n; k++) p = p * 3;
-      for (int q = 0; q < 256; q++) r[n][q] = 2'((((q * p) % 256) * 3) >> 8);
+      for (int q = 0; q < 256; q++) r[2 * (256 * n + q) +: 2] = 2'((((q * p) % 256) * 3) >> 8);
     end
     return r;
   endfunction
-  localparam logic [4:0][255:0][1:0] T5ROM = t5rom();
+  localparam logic [2559:0] T5ROM = t5rom();
   // the weight of position i for a column that takes the high block (PAIR) or the high half
   function automatic logic [7:0] wsel(input logic [D*8-1:0] w, input int i, input logic hb,
                                       input logic [1:0] wf, input logic ternary, input logic binary,
                                       input logic [2:0] ts, input logic cq, input logic c4,
-                                      input logic [127:0] lut, input logic t5);
+                                      input logic [7:0] lv, input logic t5);
     int symbol;
     logic [1:0] code;
-    logic [3:0] c4v;
     logic [15:0] tm;
     if (ternary && t5) begin                       // TMM T5: trit ts of byte i (trits.py)
-      case (T5ROM[(ts > 3'd4) ? 3'd4 : ts][w[8 * i +: 8]])
+      case (T5ROM[2 * (256 * int'((ts > 3'd4) ? 3'd4 : ts) + int'(w[8 * i +: 8])) +: 2])
         2'd0: return -8'sd1;
         2'd1: return 8'd0;
         default: return 8'd1;
       endcase
     end
-    if (binary) return cq ? lut[8 * int'(w[int'(ts) * D + i]) +: 8] :
-                       w[int'(ts) * D + i] ? 8'd1 : -8'sd1;
-    if (ternary && c4) begin                       // TMM CQ4: nibble i of half ts
-      c4v = w[4 * (int'(ts[0]) * D + i) +: 4];
-      return lut[8 * int'(c4v) +: 8];
-    end
+    if (binary) return cq ? lv : w[int'(ts) * D + i] ? 8'd1 : -8'sd1;
+    if (ternary && c4) return lv;                  // TMM CQ4: nibble i of half ts (cqa)
     if (ternary) begin
       symbol = int'(ts) * D + i;
       code = w[2 * symbol +: 2];
-      if (cq) return lut[8 * int'(code) +: 8];
+      if (cq) return lv;
       case (code)
         2'b00: return 8'd0;
         2'b01: return 8'd1;
@@ -1140,6 +1150,21 @@ module otpu_mxu
                 {m0.qd, m0.ternary, m0.binary, m0.h, m0.ts, wf0, pr0, m0.cq, m0.c4, m0.t5})
       $fatal(1, "otpu_mxu: the weight decode's control copies are not m0's");
 `endif
+  // TMM CQ: position i's code (BIN 1 bit, CQ4 / CQ3 a nibble, CQ2 2 bits) reads its copy of the
+  // LUT (16 x 8 LUT RAM, written by LUTSET): one LUT RAM read, not a 16-way mux over a 128-bit
+  // LUT broadcast to every position (r8 a4138552: the decode 18k LUTs, the MXU congested)
+  function automatic logic [3:0] cqa(input logic [D*8-1:0] w, input int i, input logic binary,
+                                     input logic c4, input logic [2:0] ts);
+    if (binary) return {3'b000, w[int'(ts) * D + i]};
+    if (c4) return w[4 * (int'(ts[0]) * D + i) +: 4];
+    return {2'b00, w[2 * (int'(ts) * D + i) +: 2]};
+  endfunction
+  logic [D-1:0][7:0] cq_v;
+  for (genvar i = 0; i < D; i++) begin : g_cq
+    (* ram_style = "distributed" *) logic [7:0] m [16];
+    always_ff @(posedge clk) if (lw_we) m[lw_a] <= lw_d;
+    assign cq_v[i] = m[cqa(w0, i, wq_bn, wq_c4, wq_ts)];
+  end
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
   always_ff @(posedge clk)
     for (int i = 0; i < D; i++)
@@ -1149,8 +1174,8 @@ module otpu_mxu
                // has no PAIR / QUAD; its CQ lookup would only double the D LUT muxes)
                // (nor a T5 one, unpaired: its trit decode here would be the D tables again)
                {wsel(w0, i, 1'b1, wq_wf, wq_tn, wq_bn, wq_pr ? {1'b0, wq_ts[1], 1'b1} : wq_ts,
-                     1'b0, 1'b0, cq_lut, 1'b0),
-                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_lut, wq_t5)};
+                     1'b0, 1'b0, 8'd0, 1'b0),
+                wsel(w0, i, wq_h, wq_wf, wq_tn, wq_bn, wq_ts, wq_cq, wq_c4, cq_v[i], wq_t5)};
   logic [D-1:0][15:0] wc [MCOLS];                    // the streams at column j
   for (genvar i = 0; i < D; i++) begin : g_wsk
     otpu_skew #(.W(16), .N(i % CLS)) u_w (.clk, .en(1'b1), .d(wd[i]), .q(wc[0][i]));
