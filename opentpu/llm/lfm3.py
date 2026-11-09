@@ -161,3 +161,265 @@ def reference_logits(spec: Spec, W, tokens) -> np.ndarray:
     x = _norm(x, f32(W[P + "embedding_norm.weight"]), spec.eps)
     head = W[P + "embed_tokens.weight"] if spec.tied else W["lm_head.weight"]
     return x @ f32(head).T
+
+
+# =============================================================================== device graph
+# LFM3 on openTPU builds on lfm2 (its Image, conv layers, decode step and Engine path):
+#   * conv layers: lfm2._conv (conv_k = 7 taps, the mirrored state ring), and the sandwich
+#     norm (post_operator_norm) on its output
+#   * attention: qwen3._attention (q / k norms, GQA, int8 KV) with the head gate -- gate_proj's
+#     row of each head repeated over the head's d dimensions, qwen3's `gated` (sigmoid of the
+#     projection times the head's output) -- and the sandwich norm; RoPE from a table of the
+#     layer's kind (full layers: theta 1e6, the zero-tail half rotation; sliding: theta 1e4,
+#     whole), in DRAM per position; sliding layers attend over the last `window` tokens of the
+#     cache (attention.Blocks, the first block masked at the window's start)
+#   * MLP: qwen3._mlp with post_ffn_norm; the final norm is embedding_norm, the head tied
+# The KV cache of a sliding layer keeps every position (cap slots), not a window ring.
+# One slice (S = 1); decode steps at compile-time positions (compile_step), one token a run.
+from types import SimpleNamespace  # noqa: E402
+
+from .. import language as ol  # noqa: E402
+from .. import quant as Q  # noqa: E402
+from .. import qcache as QC  # noqa: E402
+from .. import fp32 as F  # noqa: E402
+from ..compiler import Affine, Tensor, trace_fit  # noqa: E402
+from ..kernels.attention import Blocks  # noqa: E402
+from . import lfm2 as L2  # noqa: E402
+from .qwen3 import (ATTN_BLOCK, _attention, _inputs, _lm_head, _mlp, _tok_arg,  # noqa: E402
+                    fill_logits, step_descriptors)
+
+
+@dataclass(frozen=True)
+class DevSpec(L2.Spec):
+    """lfm2.Spec with LFM3's layer kinds (akinds: CONV, SLIDE or FULL), window, RoPE per kind
+    (rope3: ((kind, theta, factor), ...)) and the checkpoint prefix."""
+    akinds: tuple = ()
+    window: int = 256
+    rope3: tuple = ()
+    prefix: str = "model."
+
+    def check(self, cfg) -> None:
+        super().check(cfg)
+        if cfg.S != 1:
+            raise ValueError("LFM3 runs on one slice (S = 1)")
+
+    def image(self, cfg, cap: int, batch: int = 1, rows: int = 1, wformat: str = "int8",
+              head_format=None, lookup=False, experts=None, embed_host=None,
+              formats=None) -> "Image":
+        if rows != 1:
+            raise NotImplementedError("LFM3: one token a run (Engine(rows=1))")
+        return Image(self, cfg, cap, batch, rows, wformat, head_format, lookup, experts,
+                     embed_host, formats)
+
+    def lfm3(self) -> Spec:
+        return Spec(hidden=self.hidden, kinds=self.akinds, n_q=self.n_q, n_kv=self.n_kv,
+                    head_dim=self.head_dim, ffn=self.ffn, vocab=self.vocab, conv_k=self.conv_k,
+                    window=self.window, eps=self.eps,
+                    rope={k: (t, f) for k, t, f in self.rope3}, tied=self.tied, bos=self.bos,
+                    eos=self.eos, prefix=self.prefix)
+
+
+def device_spec(spec: Spec) -> DevSpec:
+    """The device's spec of an LFM3 model (lfm2's, with LFM3's kinds)."""
+    if not spec.sandwich:
+        raise ValueError("LFM3 without sandwich norms is not supported")
+    return DevSpec(hidden=spec.hidden,
+                   kinds=tuple(L2.CONV if k == CONV else L2.ATTN for k in spec.kinds),
+                   n_q=spec.n_q, n_kv=spec.n_kv, head_dim=spec.head_dim, ffn=spec.ffn,
+                   vocab=spec.vocab, conv_k=spec.conv_k, eps=spec.eps,
+                   theta=spec.rope.get(FULL, (1e6, 1.0))[0], tied=spec.tied, bos=spec.bos,
+                   eos=spec.eos, akinds=spec.kinds, window=spec.window,
+                   rope3=tuple((k, t, f) for k, (t, f) in spec.rope.items()),
+                   prefix=spec.prefix)
+
+
+class DeviceWeights:
+    """The checkpoint's LFM3 names as lfm2's (model.*, q_layernorm, k_layernorm, out_proj),
+    lazily: the device image reads them through this mapping."""
+
+    REN = (("self_attn.q_norm.", "self_attn.q_layernorm."),
+           ("self_attn.k_norm.", "self_attn.k_layernorm."),
+           ("self_attn.o_proj.", "self_attn.out_proj."))
+
+    def __init__(self, W, prefix: str):
+        self.W, self.prefix = W, prefix
+
+    def _src(self, k: str) -> str:
+        if k.startswith("model."):
+            k = self.prefix + k[len("model."):]
+        for a, b in self.REN:
+            k = k.replace(b, a)
+        return k
+
+    def __getitem__(self, k):
+        return self.W[self._src(k)]
+
+    def __contains__(self, k):
+        return self._src(k) in self.W
+
+    def get(self, k, default=None):
+        return self[k] if k in self else default
+
+
+class Image(L2.Image):
+    """lfm2.Image plus LFM3's parts: each layer's post_operator_norm and post_ffn_norm (after
+    the lfm2 block's norms), the attention layers' gate rows (wgate [n_q d, H], gate_proj's
+    head row repeated d times), the RoPE tables of both kinds [cap, d/2] and the sliding
+    window's start mask (z2: block - 1 times -inf, then block times +inf). A layer's formats
+    group carries its kind (CONV / SLIDE / FULL): hardware loops run layers of one kind."""
+
+    def _groups(self, lf):
+        return tuple(g + (k,) for g, k in zip(lf, self._akinds))
+
+    def _layout(self, g, mlp, rb):
+        if "wgate" not in self.mats[L2.ATTN]:
+            self.mats[L2.ATTN]["wgate"] = (self.nq_loc * self.spec.head_dim, self.spec.hidden)
+        ns = super()._layout(g[:4], mlp, rb)
+        H = self.spec.hidden
+        for kind in (L2.CONV, L2.ATTN):           # the sandwich norms at the block's end
+            end = ns.size[kind]
+            ns.lofs[kind]["g_pop"], ns.lofs[kind]["g_pffn"] = end, end + 4 * H
+            ns.size[kind] = (end + 8 * H + 4095) // 4096 * 4096
+        return ns
+
+    def __init__(self, spec: DevSpec, cfg, cap, batch=1, rows=1, wformat="int8",
+                 head_format=None, lookup=False, experts=None, embed_host=None, formats=None):
+        # the gate rows are allocated in the attention block (_layout): lfm2's layout of wq's
+        # format, and the plan's keys carry the layer kinds (_groups)
+        self._akinds = spec.akinds
+        super().__init__(spec, cfg, cap, batch, rows, wformat, head_format, lookup, experts,
+                         embed_host, formats)
+        d, blk = spec.head_dim, ATTN_BLOCK
+        b = self.nbytes
+        self.ropes = {}
+        for k in (FULL, SLIDE):
+            self.ropes[k] = (b, b + 4 * cap * (d // 2))
+            b += 8 * cap * (d // 2)
+        self.z2 = b
+        b += 4 * (2 * blk - 1)
+        self.nbytes = (b + 4095) // 4096 * 4096
+        if self.nbytes > cfg.DRAM_BYTES:
+            raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB, DRAM_BYTES is "
+                              f"{cfg.DRAM_BYTES / 2**20:.0f} MiB")
+
+    def build(self, W) -> list:
+        spec, cfg = self.spec, self.cfg
+        D, d, H = cfg.D, spec.head_dim, spec.hidden
+        dw = W if isinstance(W, DeviceWeights) else DeviceWeights(W, spec.prefix)
+        imgs = super().build(dw)
+        img = imgs[0]
+        W, P = dw, "model."
+
+        def put(addr, a):
+            v = np.ascontiguousarray(a).view(np.uint8).reshape(-1)
+            img[addr:addr + v.size] = v
+
+        def f32(a):
+            return F.ftz(np.asarray(a, np.float32))
+
+        qb = QC.Batch()
+        for i, kind in enumerate(spec.akinds):
+            p, base = f"{P}layers.{i}.", self._off(i).const
+            g = self.layouts[self.lf[i]]
+            lo = g.lofs[L2.CONV if kind == CONV else L2.ATTN]
+            put(base + lo["g_pop"], f32(W[p + "post_operator_norm.weight"]))
+            put(base + lo["g_pffn"], f32(W[p + "post_ffn_norm.weight"]))
+            if kind != CONV:
+                gate = np.repeat(np.asarray(W[p + "self_attn.gate_proj.weight"], np.float32),
+                                 d, axis=0)                              # [n_q d, H]
+                a0, a1 = lo["wgate"]
+                qb.submit(gate, g.mf["wgate"], D,
+                          lambda q, sc, a0=base + a0, a1=base + a1: (put(a0, q), put(a1, sc)))
+        qb.wait()
+        s3 = spec.lfm3()
+        for k, (ca, sa) in self.ropes.items():
+            c, s = s3.rope_tables(k, np.arange(self.cap))
+            put(ca, f32(c[:, :d // 2]))
+            put(sa, f32(s[:, :d // 2]))
+        blk = ATTN_BLOCK
+        put(self.z2, np.concatenate([np.full(blk - 1, -np.inf), np.full(blk, np.inf)])
+            .astype(np.float32))
+        return imgs
+
+    def descriptors(self, sid: int) -> SimpleNamespace:
+        m = super().descriptors(sid)
+        spec, d, H, cap = self.spec, self.spec.head_dim, self.spec.hidden, self.cap
+        base_layer = m.layer
+
+        def layer(li, it=None, at=None):
+            lw = base_layer(li, it, at)
+            g = self.layouts[self.lf[li]]
+            off = self._off(li, it)
+            lo = g.lofs[lw.kind]
+            lw.akind = spec.akinds[li]
+            lw.g_pop = Tensor(off + lo["g_pop"], (H,), (1,))
+            lw.g_pffn = Tensor(off + lo["g_pffn"], (H,), (1,))
+            return lw
+
+        m.layer = layer
+        m.ropes = {k: (Tensor(Affine(c), (cap, d // 2), (d // 2, 1)),
+                       Tensor(Affine(s), (cap, d // 2), (d // 2, 1)))
+                   for k, (c, s) in self.ropes.items()}
+        m.z2 = self.z2
+        m.window = spec.window
+        return m
+
+    def compile_step(self, pos: int, block: int = ATTN_BLOCK, tok: int | None = None) -> list:
+        return [trace_fit(lfm3_step, self.cfg, s,
+                          lambda s=s: {"m": step_descriptors(self, s), "pos": pos,
+                                       "block": block, **_tok_arg(self, tok)}).finish()
+                for s in range(self.cfg.S)]
+
+    def compile_rows(self, *a, **k):
+        raise NotImplementedError("LFM3: one token a run (compile_step)")
+
+    def compile_decode(self, *a, **k):
+        raise NotImplementedError("LFM3: no resident decode yet (compile-time positions)")
+
+    compile_generate = compile_prompt_run = compile_decode
+
+
+def _slide_seq(m, p: int, block: int):
+    """The cache tokens a sliding layer's query at position p attends to: the last m.window
+    (p - window + 1 .. p) -- a length while that reaches position 0, else attention.Blocks over
+    the window's blocks, the first masked before the window's start (a row of m.z2), the last
+    ending at p."""
+    W = m.window
+    if p < W:
+        return p + 1
+    s = p - W + 1
+    s0, k = s // block * block, s % block
+    eb, t = p // block * block, p % block
+    items = []
+    for b0 in range(s0, eb + 1, block):
+        n = block if b0 != eb else t + 1
+        mask = Tensor(Affine(m.z2 + 4 * (block - 1 - k)), (n,), (1,)) if b0 == s0 and k else None
+        items.append((b0, n, mask))
+    return Blocks(items)
+
+
+@ol.jit
+def lfm3_step(m, pos: int, block: int = ATTN_BLOCK, tok: int | None = None):
+    """One decode token at compile-time position `pos`: its embedding (the host's x, or the
+    image's table at `tok`) -> logits. lfm2_step with LFM3's sandwich norms, head gates, RoPE
+    tables per layer kind and sliding windows."""
+    if not isinstance(pos, int):
+        raise NotImplementedError("LFM3: compile-time positions only")
+    fill_logits(m)
+    spec = m.spec
+    x, _, _ = _inputs(m, pos, tok)
+    tabs = {k: (ol.load(c[pos, :]), ol.load(s[pos, :])) for k, (c, s) in m.ropes.items()}
+
+    def layer(li, it):
+        lw = m.layer(li, it)
+        if lw.kind == L2.CONV:
+            x.set(L2._conv(x, lw, pos, spec, post=lw.g_pop))
+        else:
+            c, s_ = tabs[lw.akind]
+            seq = _slide_seq(m, pos, block) if lw.akind == SLIDE else None
+            x.set(_attention(x, lw, c, s_, pos, spec, block, gated=True, seq=seq,
+                             post=lw.g_pop))
+        x.set(_mlp(x, lw, spec, post=lw.g_pffn))
+
+    L2.run_layers(m.plan, layer)
+    _lm_head(x, m, spec)

@@ -144,3 +144,81 @@ def test_lfm3_parts_by_definition():
     # no sandwich: different logits (the norms are not the identity)
     b = L3.reference_logits(_tiny_spec(sandwich=False), W, toks)
     assert not np.allclose(a, b)
+
+
+# ----------------------------------------------------------------------------- device graph
+import dataclasses  # noqa: E402
+
+from opentpu.isasim import board_config  # noqa: E402
+from opentpu.llm.qwen3 import Engine  # noqa: E402
+
+
+def _cos_rows(a, b):
+    return (a * b).sum(1) / np.linalg.norm(a, axis=1) / np.linalg.norm(b, axis=1)
+
+
+def _engine(spec, W, cap=256, **kw):
+    return Engine(L3.device_spec(spec), L3.DeviceWeights(W, spec.prefix), cap=cap, rows=1,
+                  cfg=kw.pop("cfg", board_config(DRAM_BYTES=1 << 26)), **kw)
+
+
+def _decode(eng, toks):
+    return np.stack([np.asarray(eng.step(t)).reshape(-1) for t in toks])
+
+
+def test_device_graph_follows_the_reference():
+    """The device graph (ISA, W8A8, int8 KV) against the fp32 reference: conv layers of 7 taps,
+    a full and a sliding layer (window 4: the window inside one block, its start masked), head
+    gates and sandwich norms. The same logits miss a reference without the window or the gates
+    by far (the parts are on the device, not dropped)."""
+    spec = _tiny_spec()
+    W = _tiny_weights(spec)
+    toks = list(range(3, 15))
+    dev = _decode(_engine(spec, W), toks)
+    ref = L3.reference_logits(spec, W, toks)
+    assert _cos_rows(dev, ref).min() > 0.995
+    nowin = L3.reference_logits(dataclasses.replace(spec, window=10 ** 6), W, toks)
+    assert _cos_rows(dev, nowin).min() < 0.95
+    W2 = {k: (np.zeros_like(v) if k.endswith("gate_proj.weight") else v) for k, v in W.items()}
+    assert _cos_rows(dev, L3.reference_logits(spec, W2, toks)).min() < 0.9
+
+
+def test_sliding_window_across_blocks():
+    """window 256 = one attention block: past position 255 the window spans two blocks, the
+    first masked before its start (attention.Blocks); 300 tokens."""
+    spec = _tiny_spec(window=256, kinds=(L3.CONV, L3.SLIDE, L3.CONV, L3.FULL))
+    W = _tiny_weights(spec, 3)
+    toks = [int(t) for t in np.random.default_rng(1).integers(0, 300, 300)]
+    dev = _decode(_engine(spec, W, cap=512), toks)
+    ref = L3.reference_logits(spec, W, toks)
+    nowin = L3.reference_logits(dataclasses.replace(spec, window=10 ** 6), W, toks)
+    assert _cos_rows(dev, ref).min() > 0.99
+    assert _cos_rows(dev[280:], nowin[280:]).mean() < 0.985     # (the window drops tokens)
+    assert _cos_rows(dev[280:], ref[280:]).mean() > 0.995
+
+
+def test_device_graph_refuses_what_it_lacks():
+    spec = _tiny_spec()
+    W = _tiny_weights(spec)
+    with pytest.raises(NotImplementedError):
+        Engine(L3.device_spec(spec), L3.DeviceWeights(W, spec.prefix), cap=256,
+               cfg=board_config(DRAM_BYTES=1 << 26))          # chunked prefill (rows > 1)
+    with pytest.raises(ValueError, match="sandwich"):
+        L3.device_spec(dataclasses.replace(spec, sandwich=False))
+
+
+def test_tiny_lfm3_on_board_model(have_verilator):
+    """The board model (Verilator, r8's WAITC sequencer) through the host driver: logits bit
+    for bit the ISA simulator's, through a full turn of the 7-tap conv ring and the sliding
+    window's masked start."""
+    from opentpu.host.board import BoardBackend, SimTransport
+    spec = _tiny_spec()
+    W = _tiny_weights(spec)
+    cfg = board_config(DRAM_BYTES=1 << 23, SEQ_WC=True)
+    isa = _engine(spec, W, cfg=cfg)
+    tr = SimTransport(ch_bytes=cfg.DRAM_BYTES // 2, stall=20, seed=5,
+                      params={"SEQ_WC": 1, "WIN": 16})
+    brd = _engine(spec, W, cfg=cfg, backend=lambda c, imgs: BoardBackend(c, imgs, transport=tr))
+    for tok in (11, 22, 33, 44, 55, 66, 77, 88, 99):
+        a, b = isa.step(tok), brd.step(tok)
+        assert np.array_equal(np.asarray(a).view(np.uint32), np.asarray(b).view(np.uint32))

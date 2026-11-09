@@ -442,8 +442,8 @@ class Image(EmbedHost):
         fmt = FM.resolver(formats, KINDS, spec.formats, wformat, head_format)
         # each layer's formats group: conv, attention, gate / up, down where it is (the
         # layers of a group share a block size and the common part's offsets, as one group did)
-        self.lf = tuple((fmt(CONV, i), fmt(ATTN, i), fmt("gateup", i), fmt("down", i))
-                        for i in range(spec.layers))
+        self.lf = self._groups(tuple((fmt(CONV, i), fmt(ATTN, i), fmt("gateup", i),
+                                      fmt("down", i)) for i in range(spec.layers)))
         if spec.moe is not None:    # the dense layers' MLP region: one layout
             FM.uniform(fmt, dict.fromkeys(("gateup", "down"), range(spec.moe.first)))
         self.wformat, self.head_format = wformat, fmt("head")
@@ -524,6 +524,11 @@ class Image(EmbedHost):
             raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB per slice, "
                               f"DRAM_BYTES is {cfg.DRAM_BYTES / 2**20:.0f} MiB")
 
+    def _groups(self, lf: tuple) -> tuple:
+        """Each layer's formats group key (lfm3.Image adds its layer kind: a hardware loop runs
+        layers of one key)."""
+        return lf
+
     def _layout(self, g: tuple, mlp: dict, rb) -> SimpleNamespace:
         """The layer block layouts of formats group g (conv, attention, gate / up, down): each
         projection's format (mf), W_down's chunk, the conv and attention blocks' offsets (the
@@ -560,6 +565,7 @@ class Image(EmbedHost):
         attn = dict(common, qn=ab.alloc(4 * d), kn=ab.alloc(4 * d))
         for kind, bump, L in ((CONV, cb, conv), (ATTN, ab, attn)):
             for name, (n, k) in self.mats[kind].items():
+                mf.setdefault(name, fa if kind == ATTN else fc)    # (lfm3's gate rows)
                 if name not in L:
                     L[name] = (bump.alloc(n * rb(k, mf[name])), bump.alloc(n * sb(k, mf[name])))
         dk = self.dk
@@ -839,7 +845,7 @@ def _ring_rows(K: int, p):
             [1 + p % K] + ([1 + p % K + K] if p % K < K - 1 else []))
 
 
-def _conv(x, lw, pos: int, spec: Spec):
+def _conv(x, lw, pos: int, spec: Spec, post=None):
     """x + out_proj(C * conv(B * x)) for one token, this slice's channels; returns the new
     residual (replicated on every slice). B * x is stored to the state ring (_ring_rows); the
     rows of the K - 1 positions before (those >= 0) are read back from it."""
@@ -861,7 +867,10 @@ def _conv(x, lw, pos: int, spec: Spec):
     for s, t in prev:
         y = y + s * t
     y_all = ol.all_gather(y * bcx[:, n:2 * n])  # [1, H]
-    return x + ol.all_gather(ol.dot(y_all, lw.wout))
+    out = ol.all_gather(ol.dot(y_all, lw.wout))
+    if post is not None:                        # LFM3's sandwich norm
+        out = rmsnorm(out, ol.load(post), spec.eps)
+    return x + out
 
 
 @ol.jit

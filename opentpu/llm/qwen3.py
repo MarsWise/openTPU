@@ -1451,7 +1451,8 @@ class RunRows(RunPos):
         return v
 
 
-def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = False):
+def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = False,
+               seq=None, post=None):
     """x + W_o . attention(x) for one token, this slice's heads; returns the new residual
     (replicated on every slice).
 
@@ -1466,7 +1467,10 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
 
     A query group of more heads than the MXU has columns attends in parts of MCOLS heads, each
     streaming the KV head again. `gated` (Qwen3.5): lw.wgate projects a gate per query
-    dimension, and the attention output is multiplied by sigmoid(gate) before W_o."""
+    dimension, and the attention output is multiplied by sigmoid(gate) before W_o.
+    `seq` (LFM3's sliding layers): the attended cache tokens instead of positions 0..pos (a
+    length, or attention.Blocks); `post` (LFM3's sandwich norm): a gain tensor, the output is
+    RMSNorm(W_o . attention, post) before the residual add."""
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     kv = lw.kv
     kpos = pos.pos if isinstance(pos, RunPos) else pos
@@ -1509,7 +1513,8 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
                 return qg[g0:g1, :]
             return emit
         qhs = [part(*p) for p in parts]
-    seq = pos.bucket if isinstance(pos, RunPos) else pos + 1
+    if seq is None:
+        seq = pos.bucket if isinstance(pos, RunPos) else pos + 1
     outs = _attend_heads(qhs, kv, [heads[j] for j, _, _ in parts], seq, block, scale,
                          depth=ATTN_DEPTH, ahead=2)
     o_row = ol.empty([1, G * nh * d])
@@ -1524,6 +1529,8 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     if getattr(spec, "subln", False):           # BitNet: attn_sub_norm before W_o
         o_all = rmsnorm(o_all, ol.load(lw.g_asub), eps)
     y = ol.all_gather(ol.dot(o_all, lw.wo))     # [1, H]
+    if post is not None:
+        y = rmsnorm(y, ol.load(post), eps)
     return x + y
 
 
@@ -1556,7 +1563,9 @@ def _bitnet_mlp(x, lw, spec: Spec):
     return x + y
 
 
-def _mlp(x, lw, spec: Spec):
+def _mlp(x, lw, spec: Spec, post=None):
+    """x + the MLP of x (pre-norm SwiGLU); `post` (LFM3's sandwich norm): a gain tensor, the
+    MLP's output RMSNorm'd with it (over the whole row: gathered first) before the add."""
     if getattr(spec, "subln", False):           # (LFM2's / Qwen3.5's Specs have no subln)
         return _bitnet_mlp(x, lw, spec)
     sid = ol.program_id()
@@ -1569,6 +1578,8 @@ def _mlp(x, lw, spec: Spec):
         wg, wu = (replace(w, hsigns=None, hblock=0) for w in (wg, wu))
     y = swiglu_down(xs, wg, wu, lw.wd, loop=getattr(lw, "mlp_loop", False))
     h_loc = lw.wd.shape[0]
+    if post is not None:
+        return x + rmsnorm(ol.all_gather(y), ol.load(post), spec.eps)
     mine = slice(sid * h_loc, (sid + 1) * h_loc)
     return ol.all_gather(x[:, mine] + y)
 
