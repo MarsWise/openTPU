@@ -1470,11 +1470,14 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     dimension, and the attention output is multiplied by sigmoid(gate) before W_o.
     `seq` (LFM3's sliding layers): the attended cache tokens instead of positions 0..pos (a
     length, or attention.Blocks); `post` (LFM3's sandwich norm): a gain tensor, the output is
-    RMSNorm(W_o . attention, post) before the residual add."""
+    RMSNorm(W_o . attention, post) before the residual add. Dory (nGPT, opentpu/llm/dory.py):
+    lw.g_in None, x projected as it is (no input norm); lw.qscale ([n_q_loc d]) multiplies
+    each query after its norm and RoPE."""
     d, G, eps = spec.head_dim, spec.n_q // spec.n_kv, spec.eps
     kv = lw.kv
     kpos = pos.pos if isinstance(pos, RunPos) else pos
-    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_in), eps))
+    xs = ol.quantize(x if lw.g_in is None else rmsnorm(x, ol.load(lw.g_in), eps))
+    qsc = _load_opt(getattr(lw, "qscale", None))
     k = ol.dot(xs, lw.wk)                       # [1, nkv_loc*d]
     v = ol.dot(xs, lw.wv)
     sg = sigmoid(ol.dot(xs, lw.wgate)) if gated else None       # [1, nq_loc*d]
@@ -1495,7 +1498,10 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
             # its queries: head j's scores start after K and V_0..V_j, not after all V appends
             ol.kv_append(kv, heads[j], kpos, None, vh[j:j + 1, :],
                          v6pos=pos.v6pos if isinstance(pos, RunPos) else None)
-            return _rope_padded(_norm_heads(qps[j].reshape(G, d), qn, eps), c, s_)
+            r = _rope_padded(_norm_heads(qps[j].reshape(G, d), qn, eps), c, s_)
+            if qsc is not None:
+                r = r * qsc.reshape(nh * G, d)[j * G:(j + 1) * G, :]
+            return r
         return emit
 
     mc = min(G, ol.mxu_columns())
