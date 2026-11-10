@@ -206,8 +206,12 @@ class Graph:
         N = w.shape[0]
         y = y or self.tensor(x.L, N)
         b = np.zeros(N, np.float32) if b is None else b
-        self.op(name, dense_k, x=x.rows(), w=self.weight(w), b=self.vec(b), y=y.rows(),
-                M=x.L, K=x.C, act=act)
+        wt, bt = self.weight(w), self.vec(b)
+        ch = [(r, min(x.L, r + LINEAR_ROWS)) for r in range(0, x.L, LINEAR_ROWS)]
+        for i, (r0, r1) in enumerate(ch):       # many rows: a program per row block (IMEM;
+            self.op(name if len(ch) == 1 else f"{name}.{i}", dense_k,   # SmolVLA base's vision
+                    x=x.rows(r0, r1), w=wt, b=bt, y=y.rows(r0, r1),     # fc1 over 1024 rows was
+                    M=r1 - r0, K=x.C, act=act)                          # 8707 instructions)
         return y
 
     def conv1d(self, x: DT, w: np.ndarray, b: np.ndarray | None, stride: int = 1,
@@ -553,6 +557,7 @@ def attention_k(q, k, v, o, kv, H: int, KVH: int, dh: int, groups: tuple, scale:
 # Graph.attention splits an attention whose keys need more than ATTN_KV_RUNS vit_append runs
 # (KV heads x row blocks), or with a group of more than ATTN_SPLIT_ROWS query rows; the query
 # programs take ATTN_QBLOCK_RUNS (head, key block) attends (about 10 instructions each)
+LINEAR_ROWS = 256          # Graph.linear: rows a program takes (the same rows' arithmetic)
 ATTN_KV_RUNS = 96
 ATTN_SPLIT_ROWS = 64
 ATTN_QBLOCK_RUNS = 288
@@ -672,20 +677,27 @@ def _tf_ops():
 
     def scale(self, x: DT, a: float, y: DT | None = None, name="scale") -> DT:
         y = y or x
-        self.op(name, scale_k, x=x.rows(), y=y.rows(), a=float(a))
+        self._rowwise(name, scale_k, x.L, x.C,
+                      lambda r0, r1: dict(x=x.rows(r0, r1), y=y.rows(r0, r1)), a=float(a))
         return y
 
     def axpy(self, x: DT, v: DT, a: float, name="axpy") -> DT:
-        self.op(name, axpy_k, x=x.rows(), v=v.rows(), y=x.rows(), a=float(a))
+        self._rowwise(name, axpy_k, x.L, x.C,
+                      lambda r0, r1: dict(x=x.rows(r0, r1), v=v.rows(r0, r1), y=x.rows(r0, r1)),
+                      a=float(a))
         return x
 
     def mul(self, a: DT, b: DT, y: DT | None = None, name="mul") -> DT:
         y = y or self.tensor(a.L, a.C)
-        self.op(name, binary_k, a=a.rows(), b=b.rows(), y=y.rows(), op="mul")
+        self._rowwise(name, binary_k, a.L, a.C,
+                      lambda r0, r1: dict(a=a.rows(r0, r1), b=b.rows(r0, r1), y=y.rows(r0, r1)),
+                      op="mul")
         return y
 
     def add_row(self, x: DT, row: Tensor, name="add_row") -> DT:
-        self.op(name, binary_k, a=x.rows(), b=row, y=x.rows(), op="add", brow=True)
+        self._rowwise(name, binary_k, x.L, x.C,
+                      lambda r0, r1: dict(a=x.rows(r0, r1), b=row, y=x.rows(r0, r1)),
+                      op="add", brow=True)
         return x
 
     def copy_view(self, src: Tensor, dst: Tensor, name="copy") -> None:

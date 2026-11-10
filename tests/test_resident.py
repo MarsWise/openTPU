@@ -341,3 +341,21 @@ def test_siglip_sized_attention_fits_imem():
     g.attention(qt, kt, vt, 12, 12, 64, [(0, 1024, 1024)])
     progs = g.compile()
     assert len(progs) > 1 and max(len(p) for _, p in progs) <= c.IMEM_WORDS // 8
+
+
+def test_linear_over_many_rows_is_split_and_identical(monkeypatch):
+    """Graph.linear past LINEAR_ROWS: a program per row block (SmolVLA base's vision fc1 over
+    1024 rows was 8707 instructions, IMEM 4096), the output that of one program bit for bit."""
+    rng = np.random.default_rng(11)
+    x = rng.normal(size=(40, 96)).astype(np.float32)
+    w = rng.normal(size=(64, 96)).astype(np.float32)
+    b = rng.normal(size=64).astype(np.float32)
+    out = []
+    for rows in (256, 16):
+        monkeypatch.setattr(RG, "LINEAR_ROWS", rows)
+        g = RG.Graph(cfg())
+        xt = g.tensor(40, 96)
+        y = g.linear(xt, w, b, act="relu")
+        assert len(g.ops) == -(-40 // rows)
+        out.append(run(g, [(xt, x)], [y])[0])
+    assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))

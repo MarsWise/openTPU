@@ -86,12 +86,18 @@ def main():
             lg, ref = e.prefill(p), []
             samp = device_sampling(sps[i]).samp
             rng = np.random.default_rng(1000 + i)
+            # a VOP RAND device (r8) draws the uniforms itself: the worker's key is the request
+            # generator's first draw, the uniform of a pick that of the position it lands at
+            # (generate.uniform_at; test_vrand_generate); else the host's uniforms, in order
+            key = int(rng.integers(0, 1 << 32)) if samp is not None and G.device_rng(e.cfg) \
+                else None
             lp_err, lp_ok = 0.0, True
             for j in range(a.tokens):
                 if samp is None:
                     ref.append(int(np.argmax(lg)))
                 else:
-                    u = np.minimum(np.float32(rng.random()), np.float32(1 - 2.0 ** -24))
+                    u = (np.float32(G.uniform_at(len(p) + len(ref), key)) if key is not None
+                         else np.minimum(np.float32(rng.random()), np.float32(1 - 2.0 ** -24)))
                     ref.append(int(G.reference_pick(np.asarray(lg), samp, p + ref, u)))
                 if a.logprobs is not None and glp[i] is not None and j < len(glp[i]) \
                         and j < len(g) and g[j] == ref[-1]:
