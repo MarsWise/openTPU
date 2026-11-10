@@ -183,7 +183,8 @@ def vit_embed(v, N: int, R: int):
 @ol.jit
 def vit_qkv(v, lw, src, N: int, R: int, eps: float):
     """LayerNorm (ln1) of src's N rows, then per head q -> v.Q[h] (head-major: one store a
-    head), k and v -> the KV scratch. The weights are the checkpoint's [C, C] (a head's dv
+    head), k and v -> the KV scratch (v.rope: (cos, sin) [N, dv / 2] rows, q and k rotated
+    rotate-half over the head's dv: PaddleOCR-VL's 2-D RoPE). The weights are the checkpoint's [C, C] (a head's dv
     rows); each head's q, k, v land in the first dv columns of [R, dp] tiles whose other
     columns stay 0 (two heads' sets, alternating): the MXU streams no padding rows, the cache
     and Q get D-wide rows. Each starts as its bias (a fill) and the MM accumulates into it."""
@@ -198,11 +199,21 @@ def vit_qkv(v, lw, src, N: int, R: int, eps: float):
         x = ol.load(src[r0:r0 + n, :])
         xs = layernorm_q(x, w, eps, inplace=True)
         del x
+        rc = rs = None
+        if getattr(v, "rope", None) is not None:    # [N, dh / 2] cos / sin rows of the crop
+            rc, rs = ol.load(v.rope[0][r0:r0 + n, :]), ol.load(v.rope[1][r0:r0 + n, :])
         for h in range(H):
             q, k, vv = (t[0:n, :] for t in tiles[h % 2])
             for t, wt, b in zip((q, k, vv), ws, bs):
                 t[:, 0:dh].set(b[h * dh:(h + 1) * dh][None, :])
                 ol.dot(xs, wt[h * dh:(h + 1) * dh, :], acc=t[:, 0:dh])
+            if rc is not None:              # 2-D RoPE (PaddleOCR-VL): rotate-half over dh
+                for t in (q, k):
+                    a, b2 = t[:, 0:dh // 2], t[:, dh // 2:dh]
+                    na = a * rc - b2 * rs
+                    b2.set(b2 * rc + a * rs)
+                    a.set(na)
+                    del na
             ol.store(v.Q[h][r0:r0 + n, :], q)
             vit_append(v.kv, h, r0, k, vv)
     row_groups(N, R, body)
