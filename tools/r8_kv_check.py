@@ -114,6 +114,7 @@ def main() -> int:
     for kv in a.kv.split(","):
         os.environ["OTPU_KV"] = kv
         t0 = time.time()
+        dev = None
         try:
             ref = Engine(spec, W, cap=a.cap, cfg=cfg, resident=True)
             dev = Engine(spec, W, cap=a.cap, cfg=cfg, resident=True,
@@ -143,9 +144,14 @@ def main() -> int:
             check(not bad.size, f"{kv}: DRAM image ({n} bytes) card == ISA",
                   f"{bad.size} bytes differ, first at {int(bad[0]):#x}" if bad.size else
                   f"{time.time() - t0:.0f} s")
-            dev.backend.close()
         except Exception as e:                  # noqa: BLE001
             check(False, f"{kv}: run", f"{type(e).__name__}: {e}")
+        finally:                                # a failed run must not keep the device lock
+            if dev is not None:
+                try:
+                    dev.backend.close()
+                except Exception:               # noqa: BLE001
+                    pass
     print(f"== {fails} failed", flush=True)
     return 1 if fails else 0
 
