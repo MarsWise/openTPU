@@ -1536,8 +1536,13 @@ class Builder:
                     return a
             gc.collect()       # dead tiles in reference cycles still hold their regions
         live = sum(e - b for b, e, _ in self.tmem_regions)
+        gap, a = 0, 0                   # the largest free gap: fragmentation, or plain size
+        for b, e, _ in self.tmem_regions + [(W, W, None)]:
+            gap, a = max(gap, b - a), max(a, e)
+        big = sorted((e - b for b, e, _ in self.tmem_regions), reverse=True)[:6]
         raise CompileError(f"TMEM exhausted: a tile of {n} words, {live} of {W} in use "
-                           f"(TMEM_WORDS {self.cfg.TMEM_WORDS})")
+                           f"(TMEM_WORDS {self.cfg.TMEM_WORDS}); largest free gap {gap}, "
+                           f"largest live tiles {big}")
 
     def act_alloc(self, KB: int) -> tuple[int, object]:
         """KB contiguous ACT RAM blocks not held by a live Stationary, searched round-robin

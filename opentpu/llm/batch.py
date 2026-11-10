@@ -447,6 +447,7 @@ class Steps:
                        "programs": 0, "reused": 0, "padded": 0, "write_s": 0.0,
                        "start_s": 0.0, "wait_s": 0.0, "read_s": 0.0}
         self._pad_to: dict = {}           # (slots, kinds) -> the rows its padding waits for
+        self.feed_k: int | None = None    # feed rows cut after a TMEM failure (feed)
         self.lp_n: dict = {}              # slot -> its logprobs (top n) when it has them
         self.lp: dict = {}                # slot -> its last pick's (logprob, rank, [(id, lp)])
 
@@ -711,23 +712,36 @@ class Steps:
         return [(s, b + j) for j, (s, _) in enumerate(grp)]
 
     def feed_rows(self) -> int:
-        """Tokens a feed run takes: the MXU's columns (one pass of every weight)."""
-        return min(self.eng.cfg.MCOLS, self.a["R"])
+        """Tokens a feed run takes: the MXU's columns (one pass of every weight), fewer once a
+        feed program of that many rows did not fit TMEM (feed's fallback)."""
+        k = min(self.eng.cfg.MCOLS, self.a["R"])
+        return k if self.feed_k is None else min(k, self.feed_k)
 
     def feed(self, slot: int, tokens) -> None:
         """Feed a prompt's tokens to `slot` at its position, in runs of up to feed_rows() (from a
         multiple of it on, so that a span program serves an attention block's runs): the KV
         cache only, no LM head."""
-        eng, k = self.eng, self.feed_rows()
+        eng = self.eng
         tokens = [int(t) for t in tokens]
         i = 0
         while i < len(tokens):
+            k = self.feed_rows()
             p = eng.poss[slot]
             n = min(len(tokens) - i, k - p % k)
             if p + n > eng.cap:
                 raise RuntimeError("KV cache full")
             grp = [(slot, p + j) for j in range(n)]
-            self._go(grp, (FEED,) * n, tokens[i:i + n], None, n)
+            try:
+                self._go(grp, (FEED,) * n, tokens[i:i + n], None, n)
+            except CompileError as e:
+                # a feed program of n rows past TMEM (the compile fails before the run: nothing
+                # was written): from here on feed runs of half as many rows (the same tokens,
+                # the same KV; a power of two keeps the runs aligned to the attention blocks)
+                if "TMEM exhausted" not in str(e) or k <= 1:
+                    raise
+                self.feed_k = 1 << ((k // 2).bit_length() - 1)
+                self.timing["feed_rows_cut"] = self.feed_k
+                continue
             i += n
 
     def warm(self) -> None:

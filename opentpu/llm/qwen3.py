@@ -1569,17 +1569,20 @@ def _bitnet_mlp(x, lw, spec: Spec):
     # each [rows, F] tile is dropped (del) as soon as it is dead: the compiler frees a tile's
     # TMEM when its last reference goes, so at most three of them are live at once (a batched
     # step's rows: R x F words each, F = 6,912 for 2B4T)
-    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
     R, F = (x.shape[0] if len(x.shape) == 2 else 1), lw.wg.shape[0]
     D = ol.current().cfg.D
     lim = ol.tmem_words() // 2 if BITNET_CHUNK_WORDS is None else BITNET_CHUNK_WORDS
-    if 2 * R * F > lim and F % D == 0 and F > 4 * D:
+    chunked = 2 * R * F > lim and F % D == 0 and F > 4 * D
+    # the chunked path's whole [R, F] tile first, while TMEM's upper 64K is still one gap (above
+    # 64K words the STREAM descriptors sit at the top of the first 64K and split TMEM in two)
+    a = ol.empty([R, F]) if chunked else None
+    xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
+    if chunked:
         # many rows (a batched feed of 6-8 rows of 2B4T: [R, 6912] tiles of ~55K words, two
         # of them plus the layer's other tiles past r8's 131072-word TMEM): gate and up in
         # column chunks of the F row (each output column is the same dot as unchunked, so the
         # result is bit-identical), only `a` whole for the sub-norm over the row
         cs = D * -(-(F // D) // 6)
-        a = ol.empty([R, F])
         for c0 in range(0, F, cs):
             c1 = min(F, c0 + cs)
             g = ol.dot(xs, lw.wg[c0:c1, :])

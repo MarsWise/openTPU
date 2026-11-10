@@ -486,12 +486,14 @@ _graph_2d_ops()
 # ---------------------------------------------------------------- attention
 @ol.jit
 def attention_k(q, k, v, o, kv, H: int, KVH: int, dh: int, groups: tuple, scale: float,
-                block: int = 128):
+                block: int = 128, kv_heads: tuple | None = None, attend: bool = True):
     """o rows = softmax(q k^T * scale) v per head (GQA), q [Lq, H*dh], k / v [Lk, KVH*dh] in
     PyTorch's [L, heads * d] rows, o [Lq, H*dh] likewise. groups: (r0, r1, n): query rows
     r0 .. r1 - 1 see keys 0 .. n - 1 (a prefix-LM / causal mask as groups of rows). The keys
     and values are quantized once into the kv scratch (sdpa's layout), each group's heads
-    then attend its first n keys (flash attention, attention._attend_heads)."""
+    then attend its first n keys (flash attention, attention._attend_heads). kv_heads: the KV
+    heads this program quantizes into the scratch (None: all; (): none, an earlier program's);
+    attend False: the quantization only (Graph.attention splits a long attention so)."""
     from .compiler import Affine, k_scale_bytes
     from .kernels.attention import _attend_heads
     from .kernels.sdpa import up, LOG2E
@@ -512,15 +514,19 @@ def attention_k(q, k, v, o, kv, H: int, KVH: int, dh: int, groups: tuple, scale:
         a = up(a, 64)
         heads[g] = e
     cache = VitKV(heads, cap, dp, D, 1, 0, dv=dh)
-    kt = ol.zeros([R, dp])
-    vt = ol.zeros([R, dp])
-    for g in range(KVH):
-        for r0 in range(0, Lk, R):
-            n = min(R, Lk - r0)
-            ol.load(k[r0:r0 + n, g * dh:(g + 1) * dh], out=kt[0:n, 0:dh])
-            ol.load(v[r0:r0 + n, g * dh:(g + 1) * dh], out=vt[0:n, 0:dh])
-            vit_append(cache, g, r0, kt[0:n, :], vt[0:n, :])
-    del kt, vt
+    todo = range(KVH) if kv_heads is None else kv_heads
+    if len(todo):
+        kt = ol.zeros([R, dp])
+        vt = ol.zeros([R, dp])
+        for g in todo:
+            for r0 in range(0, Lk, R):
+                n = min(R, Lk - r0)
+                ol.load(k[r0:r0 + n, g * dh:(g + 1) * dh], out=kt[0:n, 0:dh])
+                ol.load(v[r0:r0 + n, g * dh:(g + 1) * dh], out=vt[0:n, 0:dh])
+                vit_append(cache, g, r0, kt[0:n, :], vt[0:n, :])
+        del kt, vt
+    if not attend:
+        return
     G = ol.mxu_columns()
     rep = H // KVH
     sc = scale * LOG2E
@@ -544,6 +550,14 @@ def attention_k(q, k, v, o, kv, H: int, KVH: int, dh: int, groups: tuple, scale:
             del out, qt
 
 
+# Graph.attention splits an attention whose keys need more than ATTN_KV_RUNS vit_append runs
+# (KV heads x row blocks), or with a group of more than ATTN_SPLIT_ROWS query rows; the query
+# programs take ATTN_QBLOCK_RUNS (head, key block) attends (about 10 instructions each)
+ATTN_KV_RUNS = 96
+ATTN_SPLIT_ROWS = 64
+ATTN_QBLOCK_RUNS = 288
+
+
 def _attn_op():
     def attention(self, q: DT, k: DT, v: DT, H: int, KVH: int, dh: int, groups,
                   scale: float | None = None, o: DT | None = None, per_prog: int = 4,
@@ -555,11 +569,32 @@ def _attn_op():
         kv = self.alloc(4 * kv_words(KVH, k.L, dh, self.D))
         kvt = Tensor(kv, (kv_words(KVH, k.L, dh, self.D),), (1,))
         groups = [tuple(int(x) for x in gr) for gr in groups]
-        for i in range(0, len(groups), per_prog):
-            self.op(f"{name}.{i // per_prog}", attention_k, q=q.rows(), k=k.rows(), v=v.rows(),
-                    o=o.rows(), kv=kvt, H=H, KVH=KVH, dh=dh,
-                    groups=tuple(groups[i:i + per_prog]),
-                    scale=dh ** -0.5 if scale is None else scale)
+        sc = dh ** -0.5 if scale is None else scale
+        args = dict(q=q.rows(), k=k.rows(), v=v.rows(), o=o.rows(), kv=kvt, H=H, KVH=KVH,
+                    dh=dh, scale=sc)
+        R, G, D = self.cfg.act_rows, self.cfg.MCOLS, self.D
+        kv_chunks = -(-k.L // R)                # vit_append runs a KV head takes
+        long_rows = max(r1 - r0 for r0, r1, _ in groups) > ATTN_SPLIT_ROWS
+        if KVH * kv_chunks <= ATTN_KV_RUNS and not long_rows:
+            for i in range(0, len(groups), per_prog):   # (short: each program quantizes all)
+                self.op(f"{name}.{i // per_prog}", attention_k, **args,
+                        groups=tuple(groups[i:i + per_prog]))
+            return o
+        # long (SmolVLA base's vision tower: 1024 queries and keys x 12 heads in one group, a
+        # program of 154758 instructions): the keys quantized once by programs of a few KV
+        # heads, then the queries in programs of a few MXU row blocks each, every one reading
+        # that scratch (the same quantization and per-block arithmetic: the same results)
+        hp = max(1, ATTN_KV_RUNS // kv_chunks)
+        for i, g0 in enumerate(range(0, KVH, hp)):
+            self.op(f"{name}.kv{i}", attention_k, **args, groups=(),
+                    kv_heads=tuple(range(g0, min(KVH, g0 + hp))), attend=False)
+        parts = []
+        for r0g, r1g, nk in groups:
+            kb = -(-nk // min(128, -(-nk // D) * D))           # key blocks of a query block
+            qr = G * max(1, ATTN_QBLOCK_RUNS // max(1, H * kb))  # rows a program attends
+            parts += [(r, min(r1g, r + qr), nk) for r in range(r0g, r1g, qr)]
+        for i, pt in enumerate(parts):
+            self.op(f"{name}.{i}", attention_k, **args, groups=(pt,), kv_heads=())
         return o
     Graph.attention = attention
 

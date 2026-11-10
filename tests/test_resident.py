@@ -302,3 +302,42 @@ def test_elementwise_ops_split_rows_past_tmem():
     got, s_got = run(g, [(at, a), (bt, b)], [cp, s])
     assert np.array_equal(s_got, a + b)
     assert rel(got, np.maximum(a + b, 0) * sc + bi) < 1e-6
+
+
+def test_long_attention_split_is_identical(monkeypatch):
+    """A long attention (Graph.attention past ATTN_KV_RUNS / ATTN_SPLIT_ROWS: KV quantization
+    programs, then query programs of a few row blocks) gives the single program's output bit
+    for bit; groups with prefix masks and causal rows."""
+    rng = np.random.default_rng(7)
+    H, KVH, dh, Lq, Lk = 4, 2, 64, 40, 48
+    q = rng.normal(size=(Lq, H * dh)).astype(np.float32)
+    k = rng.normal(size=(Lk, KVH * dh)).astype(np.float32)
+    v = rng.normal(size=(Lk, KVH * dh)).astype(np.float32)
+    groups = [(0, 30, 33), (30, 31, 40)] + [(r, r + 1, r + 9) for r in range(31, Lq)]
+    out, nprog = [], []
+    for split in (False, True):
+        if split:
+            monkeypatch.setattr(RG, "ATTN_KV_RUNS", 4)
+            monkeypatch.setattr(RG, "ATTN_SPLIT_ROWS", 8)
+            monkeypatch.setattr(RG, "ATTN_QBLOCK_RUNS", 1)
+        g = RG.Graph(cfg())
+        qt, kt, vt = g.tensor(Lq, H * dh), g.tensor(Lk, KVH * dh), g.tensor(Lk, KVH * dh)
+        o = g.attention(qt, kt, vt, H, KVH, dh, groups)
+        nprog.append(len(g.ops))
+        got, = run(g, [(qt, q), (kt, k), (vt, v)], [o])
+        out.append(got)
+    assert nprog[1] > nprog[0]
+    assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))
+
+
+def test_siglip_sized_attention_fits_imem():
+    """SmolVLA base's vision attention (1024 patches, 12 heads of 64, one bidirectional group)
+    on r8's configuration: every program of the split attention within IMEM (one program was
+    154758 instructions)."""
+    from opentpu.isasim import board_config
+    c = board_config(MCOLS=8, TMEM_WORDS=131072, DRAM_BYTES=1 << 26)
+    g = RG.Graph(c)
+    qt, kt, vt = g.tensor(1024, 768), g.tensor(1024, 768), g.tensor(1024, 768)
+    g.attention(qt, kt, vt, 12, 12, 64, [(0, 1024, 1024)])
+    progs = g.compile()
+    assert len(progs) > 1 and max(len(p) for _, p in progs) <= c.IMEM_WORDS // 8
