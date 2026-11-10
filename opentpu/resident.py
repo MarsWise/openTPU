@@ -246,22 +246,45 @@ class Graph:
                 G=G, eps=eps, act=act)
         return y
 
+    def _chunks(self, L: int, C: int) -> list[tuple[int, int]]:
+        """Row ranges of an elementwise op whose tiles fit TMEM: the whole tensor when it fits
+        (one program, as before), else blocks of rows of at most TMEM_WORDS / 4 words (two
+        operand tiles and the allocator's spare rows). SmolVLA base's vision residuals
+        ([1024, 768] = 786432 words) exceed r8's 131072-word TMEM in one tile."""
+        cap = max(1, self.cfg.TMEM_WORDS // 4)
+        if L * C <= cap:
+            return [(0, L)]
+        rb = max(1, cap // max(1, C))
+        return [(r, min(L, r + rb)) for r in range(0, L, rb)]
+
+    def _rowwise(self, name: str, kernel, L: int, C: int, views, **kw) -> None:
+        """One op per row block: views(r0, r1) -> the kernel's tensor arguments."""
+        ch = self._chunks(L, C)
+        for i, (r0, r1) in enumerate(ch):
+            self.op(name if len(ch) == 1 else f"{name}.{i}", kernel, **views(r0, r1), **kw)
+
     def unary(self, x: DT, fn: str, y: DT | None = None, name: str = "unary") -> DT:
         y = y or self.tensor(x.L, x.C, x.pad)
-        self.op(name, unary_k, x=x.rows(), y=y.rows(), fn=fn)
+        self._rowwise(name, unary_k, x.L, x.C,
+                      lambda r0, r1: dict(x=x.rows(r0, r1), y=y.rows(r0, r1)), fn=fn)
         return y
 
     def add(self, a: DT, b: DT, y: DT | None = None, name: str = "add") -> DT:
         y = y or self.tensor(a.L, a.C, a.pad)
-        self.op(name, binary_k, a=a.rows(), b=b.rows(), y=y.rows(), op="add")
+        self._rowwise(name, binary_k, a.L, a.C,
+                      lambda r0, r1: dict(a=a.rows(r0, r1), b=b.rows(r0, r1), y=y.rows(r0, r1)),
+                      op="add")
         return y
 
     def film(self, x: DT, scale: Tensor, bias: Tensor, name: str = "film") -> DT:
-        self.op(name, film_k, x=x.rows(), scale=scale, bias=bias, y=x.rows())
+        self._rowwise(name, film_k, x.L, x.C,
+                      lambda r0, r1: dict(x=x.rows(r0, r1), scale=scale, bias=bias,
+                                          y=x.rows(r0, r1)))
         return x
 
     def copy(self, x: DT, y: DT, name: str = "copy") -> DT:
-        self.op(name, copy_k, x=x.rows(), y=y.rows())
+        self._rowwise(name, copy_k, x.L, x.C,
+                      lambda r0, r1: dict(x=x.rows(r0, r1), y=y.rows(r0, r1)))
         return y
 
     # ---- programs

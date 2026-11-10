@@ -259,3 +259,32 @@ def test_four_rows_of_2b4t_fit_the_m8_tmem(tmp_path):
     progs = img.compile_rows([(s, 40 + s) for s in range(4)], list(range(4)),
                              getattr(img, "block", 256), tokens=[5] * 4)
     assert max(map(len, progs)) * 8 <= cfg.IMEM_WORDS
+
+
+@pytest.mark.parametrize("aff", [False, True])
+def test_bitnet_mlp_chunked_over_f_is_bit_identical(tmp_path, monkeypatch, aff):
+    """_bitnet_mlp's chunked path (gate / up over column chunks of F, the sub-norm in place:
+    a batched feed of 8 rows of 2B4T on r8's TMEM) leaves a multi-row prompt's logits those
+    of the whole-row path bit for bit (F = 6 D, so the chunks are real)."""
+    from opentpu.llm import qwen3 as Q
+    g = globals()
+    keep = {k: g[k] for k in ("H", "F", "L")}
+    g.update(H=256, F=768, L=1)
+    try:
+        make_ckpt(tmp_path)
+    finally:
+        g.update(keep)
+    spec, W = load_spec(tmp_path), Weights(tmp_path)
+    cfg = board_config(DRAM_BYTES=1 << 27, VAFF=aff)
+    out = []
+    for lim in (None, 0):
+        monkeypatch.setattr(Q, "BITNET_CHUNK_WORDS", lim)
+        eng = Engine(spec, W, cap=256, cfg=cfg, pipeline=False, resident=True,
+                     prompt_runs=True, **IMAGE)
+        got, runs = None, []
+        for toks, lg in eng.prefill_chunks(TOKS):
+            runs.append(len(toks))
+            got = lg if lg is not None else got
+        assert max(runs) > 1
+        out.append(got)
+    assert np.array_equal(_bits(out[0]), _bits(out[1]))

@@ -1555,6 +1555,11 @@ def _attention(x, lw, c, s_, pos: int, spec: Spec, block: int, gated: bool = Fal
     return x + y
 
 
+# _bitnet_mlp chunks gate / up over F when its two [rows, F] tiles pass this many words (None:
+# half of TMEM); tests set 0 to force the chunked path
+BITNET_CHUNK_WORDS = None
+
+
 def _bitnet_mlp(x, lw, spec: Spec):
     """BitNet's MLP: W_down ffn_sub_norm(relu(W_gate x)^2 * W_up x) after post_attention_layernorm.
     The sub-norm spans the whole F row, so gate and up are projected whole (one slice) and
@@ -1565,20 +1570,53 @@ def _bitnet_mlp(x, lw, spec: Spec):
     # TMEM when its last reference goes, so at most three of them are live at once (a batched
     # step's rows: R x F words each, F = 6,912 for 2B4T)
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
-    g = ol.dot(xs, lw.wg)                       # [rows, F]
-    u = ol.dot(xs, lw.wu)
-    del xs
-    if spec.act == "relu2":
-        r = ol.maximum(g, 0.0)
-        del g
-        t = r * r
-        del r
+    R, F = (x.shape[0] if len(x.shape) == 2 else 1), lw.wg.shape[0]
+    D = ol.current().cfg.D
+    lim = ol.tmem_words() // 2 if BITNET_CHUNK_WORDS is None else BITNET_CHUNK_WORDS
+    if 2 * R * F > lim and F % D == 0 and F > 4 * D:
+        # many rows (a batched feed of 6-8 rows of 2B4T: [R, 6912] tiles of ~55K words, two
+        # of them plus the layer's other tiles past r8's 131072-word TMEM): gate and up in
+        # column chunks of the F row (each output column is the same dot as unchunked, so the
+        # result is bit-identical), only `a` whole for the sub-norm over the row
+        cs = D * -(-(F // D) // 6)
+        a = ol.empty([R, F])
+        for c0 in range(0, F, cs):
+            c1 = min(F, c0 + cs)
+            g = ol.dot(xs, lw.wg[c0:c1, :])
+            u = ol.dot(xs, lw.wu[c0:c1, :])
+            if spec.act == "relu2":             # in place: no third chunk tile
+                g.set(ol.maximum(g, 0.0))
+                g.set(g * g)
+            else:
+                g.set(silu(g))
+            a[:, c0:c1].set(g * u)
+            del g, u
+        del xs
+        # ffn_sub_norm in place (RSSQ, then VOP AFF into a): no second [R, F] tile
+        gam = ol.load(lw.g_fsub)
+        r = ol.rsqrt(ol.sumsq(a) * (1.0 / F) + spec.eps)
+        if ol.has_aff():
+            ol.aff(a, r, gam, out=a)
+        else:                                   # by column chunks: chunk-sized temporaries
+            for c0 in range(0, F, cs):
+                c1 = min(F, c0 + cs)
+                a[:, c0:c1].set((a[:, c0:c1] * r[:, None]) * gam[c0:c1][None, :])
+        del r, gam
     else:
-        t = silu(g)
-        del g
-    a = t * u
-    del t, u
-    a = rmsnorm(a, ol.load(lw.g_fsub), spec.eps)
+        g = ol.dot(xs, lw.wg)                   # [rows, F]
+        u = ol.dot(xs, lw.wu)
+        del xs
+        if spec.act == "relu2":
+            r = ol.maximum(g, 0.0)
+            del g
+            t = r * r
+            del r
+        else:
+            t = silu(g)
+            del g
+        a = t * u
+        del t, u
+        a = rmsnorm(a, ol.load(lw.g_fsub), spec.eps)
     y = ol.dot(a, lw.wd[:, 0:spec.ffn])
     del a
     return x + y

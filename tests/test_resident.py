@@ -280,3 +280,25 @@ def test_resident_transformer_ops_rtl(have_verilator):
         drams, _, _ = rtlsim.run(c, [p], [img.copy()], axi=True, stall=30, seed=i)
         np.testing.assert_array_equal(drams[0], ref, err_msg=name)
         img = ref
+
+
+def test_elementwise_ops_split_rows_past_tmem():
+    """add / unary / copy / film over a tensor larger than TMEM: one program per row block
+    (SmolVLA base's vision residual [1024, 768] on r8's 131072-word TMEM), exact vs numpy."""
+    import dataclasses
+    c = dataclasses.replace(cfg(), TMEM_WORDS=4096)      # cap 1024 words: 300 x 16 = 4800
+    rng = np.random.default_rng(3)
+    L, C = 300, 16
+    a, b = rng.standard_normal((2, L, C)).astype(np.float32)
+    sc, bi = rng.standard_normal((2, C)).astype(np.float32)
+    g = RG.Graph(c)
+    at, bt = g.tensor(L, C, 1), g.tensor(L, C, 1)
+    s = g.add(at, bt, name="res")
+    u = g.unary(s, "relu")
+    cp = g.copy(u, g.tensor(L, C, 1))
+    g.film(cp, g.vec(sc), g.vec(bi))
+    names = [n for n, _, _ in g.ops]
+    assert sum(n.startswith("res.") for n in names) == -(-L // (1024 // C))
+    got, s_got = run(g, [(at, a), (bt, b)], [cp, s])
+    assert np.array_equal(s_got, a + b)
+    assert rel(got, np.maximum(a + b, 0) * sc + bi) < 1e-6
