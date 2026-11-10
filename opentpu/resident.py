@@ -578,18 +578,38 @@ def _attn_op():
         args = dict(q=q.rows(), k=k.rows(), v=v.rows(), o=o.rows(), kv=kvt, H=H, KVH=KVH,
                     dh=dh, scale=sc)
         R, G, D = self.cfg.act_rows, self.cfg.MCOLS, self.D
+        lim = self.cfg.IMEM_WORDS // 8
+        sizes = self.__dict__.setdefault("_attn_sizes", {})
+
+        def fits(**kw) -> bool:                 # the program's length (by shape: cached)
+            key = (q.L, k.L, H, KVH, dh, tuple((r1 - r0, nk) for r0, r1, nk in kw["groups"]),
+                   kw.get("kv_heads") if kw.get("kv_heads") is None else len(kw["kv_heads"]),
+                   kw.get("attend", True))
+            if key not in sizes:
+                from .runtime import compile_kernel
+                try:
+                    comp, _ = compile_kernel(attention_k, self.cfg, **args, **kw)
+                    sizes[key] = len(comp.programs[0])
+                except ol.CompileError:
+                    sizes[key] = lim + 1
+            return sizes[key] <= lim
+
         kv_chunks = -(-k.L // R)                # vit_append runs a KV head takes
         long_rows = max(r1 - r0 for r0, r1, _ in groups) > ATTN_SPLIT_ROWS
-        if KVH * kv_chunks <= ATTN_KV_RUNS and not long_rows:
-            for i in range(0, len(groups), per_prog):   # (short: each program quantizes all)
-                self.op(f"{name}.{i // per_prog}", attention_k, **args,
-                        groups=tuple(groups[i:i + per_prog]))
+        whole = [tuple(groups[i:i + per_prog]) for i in range(0, len(groups), per_prog)]
+        if KVH * kv_chunks <= ATTN_KV_RUNS and not long_rows and all(fits(groups=g) for g in whole):
+            for i, g in enumerate(whole):       # (short: each program quantizes all the keys)
+                self.op(f"{name}.{i}", attention_k, **args, groups=g)
             return o
         # long (SmolVLA base's vision tower: 1024 queries and keys x 12 heads in one group, a
-        # program of 154758 instructions): the keys quantized once by programs of a few KV
-        # heads, then the queries in programs of a few MXU row blocks each, every one reading
-        # that scratch (the same quantization and per-block arithmetic: the same results)
-        hp = max(1, ATTN_KV_RUNS // kv_chunks)
+        # program of 154758 instructions; its text layers: 112 rows x 15 heads, 5617): the keys
+        # quantized once by programs of a few KV heads, then the queries in programs of a few
+        # MXU row blocks each, every one reading that scratch (the same quantization and
+        # per-block arithmetic: the same results). Each program's size is measured: the heads
+        # / rows a program are halved until it fits IMEM.
+        hp = max(1, min(KVH, ATTN_KV_RUNS // kv_chunks))
+        while hp > 1 and not fits(groups=(), kv_heads=tuple(range(hp)), attend=False):
+            hp //= 2
         for i, g0 in enumerate(range(0, KVH, hp)):
             self.op(f"{name}.kv{i}", attention_k, **args, groups=(),
                     kv_heads=tuple(range(g0, min(KVH, g0 + hp))), attend=False)
@@ -597,6 +617,9 @@ def _attn_op():
         for r0g, r1g, nk in groups:
             kb = -(-nk // min(128, -(-nk // D) * D))           # key blocks of a query block
             qr = G * max(1, ATTN_QBLOCK_RUNS // max(1, H * kb))  # rows a program attends
+            qr = min(qr, -(-(r1g - r0g) // G) * G)
+            while qr > G and not fits(groups=((r0g, min(r1g, r0g + qr), nk),), kv_heads=()):
+                qr = max(G, qr // 2 // G * G)
             parts += [(r, min(r1g, r + qr), nk) for r in range(r0g, r1g, qr)]
         for i, pt in enumerate(parts):
             self.op(f"{name}.{i}", attention_k, **args, groups=(pt,), kv_heads=())
