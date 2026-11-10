@@ -7,6 +7,7 @@ allowed:
 - rtl/vpu/otpu_tfn_rom.sv
 - rtl/vpu/otpu_se_comp.sv
 - rtl/vpu/otpu_se_tail.sv
+- rtl/vpu/otpu_rand.sv
 - rtl/vpu/otpu_vpu.sv
 synth:
   parts:
@@ -24,6 +25,7 @@ synth:
     - rtl/vpu/otpu_tfn_rom.sv
     - rtl/vpu/otpu_se_comp.sv
     - rtl/vpu/otpu_se_tail.sv
+    - rtl/vpu/otpu_rand.sv
     - rtl/vpu/otpu_vpu.sv
 target_mhz: 110
 tests:
