@@ -126,8 +126,9 @@ def test_the_ternary_load_runs_tmm_on_the_isa_simulator(rows, pair):
     from opentpu import quant as Q
     assert L.load_kind("") == ("fp4", L.ROWS) and L.load_kind("ternary") == ("ternary", 4)
     assert L.load_kind("ternary:2") == ("ternary", 2)
+    assert L.load_kind("int8") == ("int8", 4) and L.load_kind("int8:8") == ("int8", 8)
     with pytest.raises(ValueError):
-        L.load_kind("int8")
+        L.load_kind("bf16")
     cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072, MCOLS=8, PAIR=pair, TPAIR=pair)
     img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=2, rows=rows, kind="ternary")
     assert sum(ins.op == I.TMM for ins in prog) == 2, "the load's MMs are not TMMs"
@@ -165,3 +166,19 @@ def test_a_host_calibration_after_the_cpu_s_is_the_one_loadcal_starts_from(monke
         slips, offs = L.calibrated_slips(None, None, Path("."))
         assert taps[0] == [14] * 9 and taps[1] == [tap1] * 9
         assert offs[1][0][0] == off1 and offs[1][0][3] == 2
+
+
+def test_the_int8_load_runs_int8_mm_on_the_isa_simulator():
+    """OTPU_LOAD_KIND=int8[:rows]: the load's MMs over int8 weight rows (an int8 LM head's
+    run_rows), results x W^T within int8 quantization."""
+    cfg = Config(S=1, DRAM_BYTES=1 << 25, TMEM_WORDS=131072, MCOLS=8)
+    img, a, prog = L.build(cfg, n_mm=2, n_dma=4, n_iter=2, rows=4, kind="int8")
+    dram = np.concatenate([img, np.zeros(cfg.DRAM_BYTES - len(img), np.uint8)])
+    got = np.asarray(Machine(cfg, [prog], [dram]).run().slices[0].dram)
+    x = img[a["x"]:a["x"] + 4 * 4 * L.H].view(np.float32).reshape(4, L.H)
+    w = np.random.default_rng(0).standard_normal((L.R, L.H)).astype(np.float32)
+    want = x @ w.T
+    out = got[a["out"]:a["out"] + 4 * 2 * 4 * L.R].view(np.float32).reshape(2 * 4, L.R)
+    for i in range(2):
+        y = out[i * 4:(i + 1) * 4]
+        assert float(np.linalg.norm(y - want) / np.linalg.norm(want)) < 0.03

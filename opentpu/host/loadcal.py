@@ -252,11 +252,13 @@ def load_kind(env: str | None = None) -> tuple[str, int]:
     """The load's weights and rows (OTPU_LOAD_KIND): "fp4" (default: prefill's 16 rows against
     fp4 weights) or "ternary[:ROWS]" (TMM over ROWS rows, default 4: batched BitNet decode's
     steps, which on r5-m8 with PAIR fill all 8 columns and read ECC errors on channel 0 at the
-    fp4 load's taps, bitnet_vllm run 2)."""
+    fp4 load's taps, bitnet_vllm run 2) or "int8[:ROWS]" (int8 weights over ROWS rows, default
+    4: an int8 LM head's run_rows, r8_ddr_check 2026-11-10: its ECC errors at every other
+    load's taps)."""
     v = (os.environ.get(ENV_KIND, "") if env is None else env).strip() or "fp4"
     kind, _, n = v.partition(":")
-    if kind not in ("fp4", "ternary"):
-        raise ValueError(f"{ENV_KIND}={v!r}: fp4 or ternary[:ROWS]")
+    if kind not in ("fp4", "ternary", "int8"):
+        raise ValueError(f"{ENV_KIND}={v!r}: fp4, ternary[:ROWS] or int8[:ROWS]")
     return kind, int(n) if n else (ROWS if kind == "fp4" else 4)
 
 
@@ -271,7 +273,8 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
     if kind == "ternary":
         rb, sb = Q.pack_ternary_mxu(np.zeros((1, H), np.int8), D).shape[1], 4
     else:
-        rb, sb = Q.row_bytes(H, "fp4", 128), Q.scale_bytes(H, "fp4", 128)
+        fmt, blk = ("int8", D) if kind == "int8" else ("fp4", 128)
+        rb, sb = Q.row_bytes(H, fmt, blk), Q.scale_bytes(H, fmt, blk)
     a = {"w": 0, "ws": n_mm * R * rb}
     a["x"] = a["ws"] + n_mm * R * sb
     a["src"] = (a["x"] + 4 * rows * H + (1 << 20) - 1) >> 20 << 20
@@ -284,7 +287,7 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
         q = Q.pack_ternary_mxu(rng.choice(np.array([-1, 0, 1], np.int8), (R, H)), D)
         sc = rng.uniform(0.05, 0.2, R).astype(np.float32)
     else:
-        q, sc = Q.quantize_mxu(rng.standard_normal((R, H)).astype(np.float32), "fp4", 128)
+        q, sc = Q.quantize_mxu(rng.standard_normal((R, H)).astype(np.float32), fmt, blk)
     q = np.ascontiguousarray(q).view(np.uint8).ravel()
     sc = np.ascontiguousarray(sc).view(np.uint8).ravel()
     for i in range(n_mm):
@@ -293,7 +296,7 @@ def build(cfg, n_mm: int = 4, n_dma: int = 16, n_iter: int = LOAD_ITERS, seed: i
     img[a["x"]:a["x"] + 4 * rows * H] = rng.standard_normal(rows * H).astype(np.float32).view(np.uint8)
     img[a["src"]:a["src"] + TILE] = rng.integers(0, 1 << 32, NS * NS, np.uint32).view(np.uint8)
     w = (_qdesc(a["w"], a["ws"], n_mm * R, H, D, Q.TERNARY) if kind == "ternary"
-         else _qdesc(a["w"], a["ws"], n_mm * R, H, 128, "fp4"))
+         else _qdesc(a["w"], a["ws"], n_mm * R, H, blk, fmt))
     m = SimpleNamespace(w=w,
                         x=_tdesc(a["x"], (rows, H)), src=_tdesc(a["src"], (NS * NS,)),
                         dma=_tdesc(a["dma"], (n_dma, NS * NS)), out=_tdesc(a["out"], (n_mm * rows, R)),
