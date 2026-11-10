@@ -62,10 +62,10 @@
       }
     },
     {
-      "name": "r8: m8 133.33 MHz, r7 + VRAND / TCQ / TATAN / QST4 / LDX / TD5 / VBFLY / VAFF / QST6 / VCSWP (source a4138552; sha256 after the build)",
-      "build_id": "pending",
+      "name": "r8: m8 133.33 MHz, r7 + VRAND / TCQ / TATAN / QST4 / LDX / TD5 / VBFLY / VAFF / QST6 / VCSWP, MXU OREG + PAIR select fix, TMEM 131072 (2c800a8f: WNS +0.041, WHS +0.013)",
+      "build_id": "0x2c800a8f",
       "cfg_hash": "0x93e29b18",
-      "bitstream_sha256": "pending",
+      "bitstream_sha256": "050A4ACDD8021378A548FE3CAE8E1A2404DFF02E759783B2E9D3AA665946AA19",
       "version": {
         "D": 128,
         "MCOLS": 8,
