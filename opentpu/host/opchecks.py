@@ -59,6 +59,21 @@ def diag_image(cfg=None) -> np.ndarray:
     return img
 
 
+def mm_block_offset_case(cfg):
+    """Four W8 blocks sharing the same weights and distinct scale shifts."""
+    # Source data, weights and the scale row each start on a D-byte boundary.
+    weight_at, scale_at = 4 * cfg.D, 5 * cfg.D
+    img = np.zeros(scale_at + 260, np.uint8)
+    img[:weight_at] = np.ones(cfg.D, dtype="<f4").view(np.uint8)
+    img[weight_at:scale_at] = 1
+    img[scale_at:scale_at + 4] = np.array([1.0], dtype="<f4").view(np.uint8)
+    prog = [I.ld(0, 0, cfg.D), I.qact(0, 1, 0, 1, cfg.D)]
+    for index, offset in enumerate((0, 16, 239, 255)):
+        img[scale_at + 4 + offset] = index
+        prog.append(I.mm(weight_at, scale_at, 4096 + index, 1, 1, cfg.D, 1, 1, 0, 260, k0=offset))
+    return prog + [I.halt()], img
+
+
 def _chained() -> list:
     """The program the HALT CHAIN check chains to: it sees the first one's TMEM."""
     return [I.vop(I.V_ADD, RES, RES, 0, 1, 64, 64, 64, 0, I.B_SCALAR, 1.0),

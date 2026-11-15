@@ -68,16 +68,26 @@ def kv_arrays(image, seq: int = 0) -> list[Array]:
         kv = kvs[seq]
         if kv.cap != image.cap:
             continue
-        if getattr(kv, "kfmt", "int8") != "int8":
-            raise NotImplementedError(f"saving / restoring a {kv.kfmt} KV cache (its K planes) "
-                                      f"is not implemented: run with the int8 KV cache")
+        if getattr(kv, "vfmt", "int8") != "int8":
+            raise NotImplementedError("saving / restoring a 6-bit V cache and its pending "
+                                      "group is not implemented")
         for h in sorted(kv.heads):
             e = kv.heads[h]
-            k = _static(e["k"])
+            kfmt = getattr(kv, "kfmt", "int8")
+            k = _static(e["kp"] if kfmt == "kv6" else e["k"])
             if k in seen:
                 continue
             seen.add(k)
-            if hasattr(kv, "ps"):           # Gemma 4: K rows with their scales after them
+            if kfmt == "kv6":
+                # Three token-major 2-bit planes and one fp32 scale plane per D-block.
+                plane_bytes = kv.cap * kv.D // 4
+                ks = _static(e["ks"])
+                for block in range(kv.d // kv.D):
+                    for plane in range(3):
+                        out.append(Array(k + (3 * block + plane) * plane_bytes, kv.D // 4))
+                    out.append(Array(ks + block * kv.cap * 4, 4))
+                out += [Array(_static(e["vt"]), kv.d, True), Array(_static(e["vs"]), 4)]
+            elif hasattr(kv, "ps"):         # Gemma 4: K rows with their scales after them
                 out += [Array(k, kv.ps), Array(_static(e["vt"]), kv.d, True),
                         Array(_static(e["vs"]), 4)]
             else:

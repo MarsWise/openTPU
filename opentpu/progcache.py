@@ -46,10 +46,13 @@ from . import isa as I
 from .compiler import Program, RunVar
 
 CAP_BYTES = 2 << 30             # the disk cache's size (OTPU_PROG_CACHE_GB overrides)
-FREE_FLOOR = 20 << 30           # free disk a write must leave
+# free disk a write must leave (OTPU_PROG_CACHE_FREE_GB overrides: a warm process of a host
+# with less takes it from the environment)
+FREE_FLOOR = int(float(os.environ.get("OTPU_PROG_CACHE_FREE_GB", 20)) * 2**30)
 # read by the host's tools only: not in the key (otpu-lock sets OTPU_LOCK_HELD and its pid,
 # OTPU_LOCK_PID, for every command it runs: in the key, no session found the one before's)
-RUNTIME_ENV = ("OTPU_PROG_CACHE", "OTPU_PROG_CACHE_GB", "OTPU_IMAGE_CACHE", "OTPU_IMAGE_CACHE_GB",
+RUNTIME_ENV = ("OTPU_PROG_CACHE", "OTPU_PROG_CACHE_GB", "OTPU_PROG_CACHE_FREE_GB",
+                "OTPU_IMAGE_CACHE", "OTPU_IMAGE_CACHE_GB",
                "OTPU_IMG_CACHE", "OTPU_IMG_CACHE_GB", "OTPU_IMG_CACHE_FREE_GB", "OTPU_BUILD_JOBS",
                "OTPU_QUIET", "OTPU_PREBUILD_CFG", "OTPU_PREBUILD_MIN_GB",
                "OTPU_PREBUILD_QUIET_WAIT", "OTPU_LOCK_HELD", "OTPU_LOCK_PID", "OTPU_LOCK_WAIT",
@@ -62,7 +65,7 @@ HOST_KEYED = ("host/offload.py",)
 # reference math, the RTL simulation a run takes): an edit to one keeps every cached program and
 # image (tests/test_progcache.py: no other module imports one, but runtime's RTL run)
 UNKEYED = ("hwtrace.py", "lens.py", "profile.py", "reference.py", "rtlsim.py", "simtmp.py",
-           "llm/rtl_backend.py")
+           "llm/rtl_backend.py", "llm/bonsai_profile.py")
 stats = {"memory": 0, "disk": 0, "compile": 0, "write": 0}
 _mem: dict = {}
 _SRC: str | None = None

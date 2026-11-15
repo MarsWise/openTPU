@@ -121,9 +121,45 @@ def test_kv6_generate_card_equals_host_steps(W, monkeypatch):
     assert len(set(host)) > 1                            # the tokens vary
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_kv6_context_save_restore(W, monkeypatch, staged):
+    """Restore a partial K6 page after another context, including the three K planes."""
+    import dataclasses
+    from opentpu.serve import kvio
+
+    monkeypatch.setenv("OTPU_KV", "kv6")
+    cfg = device_config(SPEC, 256, lookup=True, **R8)
+    if staged:
+        cfg = dataclasses.replace(cfg, DRAM_BYTES=cfg.DRAM_BYTES * 2)
+    def make():
+        return Engine(SPEC, W, cap=256, cfg=cfg, resident=True)
+    a, b, tail = [5, 8, 9, 12, 15], [2, 3, 7, 10, 11, 13], [17, 21]
+    eng = make()
+    area = (-(-eng.image.nbytes // 4096) * 4096, cfg.DRAM_BYTES // 4) if staged else None
+    io = kvio.ContextIO(eng, area=area)
+    eng.prefill(a)
+    pages = io.layout.split(len(a))
+    saved = io.read_pages(pages)
+    eng.reset()
+    eng.prefill(b)
+    io.write_pages([(i, m, data) for (i, m), data in zip(pages, saved)])
+    eng.adopt(len(a))
+    got = eng.prefill(tail)
+    expected = make().prefill(a + tail)
+    assert np.array_equal(np.asarray(got).view(np.uint32), np.asarray(expected).view(np.uint32))
+    if staged:
+        assert io.stats["copies"] >= 2
+
+
+def test_k6v6_context_save_refuses_pending_v_group(W, monkeypatch):
+    from opentpu.serve import kvio
+    eng = _engine(W, "k6v6", monkeypatch=monkeypatch)
+    with pytest.raises(NotImplementedError, match="6-bit V cache"):
+        kvio.Layout(eng.image, eng.cfg.S)
+
+
 def test_kv6_refusals(W, monkeypatch):
-    """kv6 needs r8's QST6 + TCQ + TGRQ; its K is not an int8 K (KVDesc.k refuses); saving a
-    context of it (serve/kvio) is not implemented and says so."""
+    """kv6 needs r8's QST6 + TCQ + TGRQ; its K is not an int8 K (KVDesc.k refuses)."""
     monkeypatch.setenv("OTPU_KV", "kv6")
     with pytest.raises(ValueError, match="QST6"):
         SPEC.image(device_config(SPEC, 256, TCQ=True, TGRQ=True, TGSC=True), 256)
@@ -135,10 +171,6 @@ def test_kv6_refusals(W, monkeypatch):
     assert len(kv.k6(0)) == 3 and all(q.grq and q.cq == 2 for q in kv.k6(0))
     with pytest.raises(CompileError, match="6-bit K cache"):
         KVDesc({}, 254, 128, 128, 1, 0, kfmt="kv6")
-    from opentpu.serve import kvio
-    eng = _engine(W, "kv6", monkeypatch=monkeypatch)
-    with pytest.raises(NotImplementedError, match="kv6"):
-        kvio.Layout(eng.image, eng.cfg.S)
 
 
 def test_kv6_token_on_board_rtl_is_bit_exact(have_verilator, W, monkeypatch):

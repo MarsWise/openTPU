@@ -23,6 +23,10 @@ os.environ["OTPU_IMG_CACHE"] = "0"
 # prefill.r_max's rows back from disk past a patched compile_prompt_run); the cache's own tests
 # set theirs
 os.environ["OTPU_PROG_CACHE"] = "0"
+# and the program cache's free-disk floor (20 GB) is off: the tests that count disk hits write
+# to their own tmp_path, and on a host with less free compiled again instead (test_prefill's
+# prompt programs, test_minicpmv's warm entries, gen_warm's process); the floor's tests set theirs
+os.environ["OTPU_PROG_CACHE_FREE_GB"] = "0"
 
 
 def pytest_addoption(parser):
@@ -332,3 +336,4 @@ class IsaCard(FakeTransport):
             self._look()
         self._apply()
         return super().mem_read(ch, off, n, out)
+

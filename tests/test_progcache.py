@@ -114,7 +114,8 @@ def test_the_key_leaves_out_the_tools_no_build_runs(monkeypatch):
     def edited(name):
         return lambda f: read(f) + (b"\n# changed\n" if f == root / name else b"")
 
-    for name, misses in (("lens.py", False), ("rtlsim.py", False), ("compiler.py", True)):
+    for name, misses in (("lens.py", False), ("rtlsim.py", False),
+                         ("llm/bonsai_profile.py", False), ("compiler.py", True)):
         monkeypatch.setattr(PC, "_SRC", None)
         monkeypatch.setattr(Path, "read_bytes", edited(name))
         assert (PC.key(("spec", 512), ("gen", 1)) != k) == misses, name

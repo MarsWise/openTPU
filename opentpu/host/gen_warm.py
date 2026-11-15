@@ -73,7 +73,8 @@ def start(eng, sampling: dict | None = None):
 def _main(spec, cfg, cap, batch, rows, image_kw: dict, stream_fill: bool, layout, block: int,
           conv_lo: int, chain: bool, debug: bool, split, waitc: bool, samps) -> None:
     from opentpu.llm import generate as G
-    os.nice(19)
+    if hasattr(os, "nice"):
+        os.nice(19)
     image = spec.image(cfg, cap, batch, rows, **image_kw)
     image.stream_fill = stream_fill
     for b in range(1, G.buckets(cap, block) + 1):

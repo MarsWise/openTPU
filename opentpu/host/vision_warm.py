@@ -60,7 +60,8 @@ def start(eng):
 
 
 def _main(spec, cfg, cap, batch, rows, image_kw: dict, layout) -> None:
-    os.nice(19)
+    if hasattr(os, "nice"):
+        os.nice(19)
     image = spec.image(cfg, cap, batch, rows, **image_kw)
     for N in counts(spec.vision, nmax=image.vision.nmax):
         warm(image, layout, N)

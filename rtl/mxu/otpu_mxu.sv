@@ -1969,7 +1969,11 @@ module otpu_mxu
           i_quad <= cmd_quad;
           i_w4   <= (cmd.flags[5:4] != WF_W8) || (cmd.op == OP_TMM);
           i_pair <= cmd_pair;
-          i_k0   <= cmd_binary ? 8'd0 : {cmd.w4[31:29], 1'b0, cmd.w4[27:24]};
+          // MM: the whole scale-block offset (w4[31:24]; since 6df6a665 bit 28, TMM GRQ's flag,
+          // was dropped for MM too: a K part or column slice at block 16..31 mod 32 read the
+          // scales of block k0 - 16). TMM keeps its own bits (28 is a subcommand flag there)
+          i_k0   <= cmd_binary ? 8'd0 :
+                    cmd_ternary ? {cmd.w4[31:29], 1'b0, cmd.w4[27:24]} : cmd.w4[31:24];
           row_addr <= cmd.w1; chunk_addr <= cmd.w1;
           srow_addr <= cmd.w2;
         end

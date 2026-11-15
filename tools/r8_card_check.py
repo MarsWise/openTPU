@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from opentpu import isa as I  # noqa: E402
 from opentpu.host.board import Board, check_hash, device_config  # noqa: E402
 from opentpu.host.checks import PROG_AT, run_demo  # noqa: E402
-from opentpu.host.opchecks import diag_image, op_checks  # noqa: E402
+from opentpu.host.opchecks import diag_image, mm_block_offset_case, op_checks  # noqa: E402
 from opentpu.isasim import Machine  # noqa: E402
 
 R8_HASH = 0x93e29b18
@@ -94,7 +94,8 @@ def r8_cases(card) -> list:
     import test_tmm_t5 as T5
     import test_vrand as VR
     from opentpu.kernels import sort as SO
-    out = []
+    prog, img = mm_block_offset_case(card)
+    out = [("MM k0 scale offsets", prog, img)]
     for bits in (1, 2, 3, 4):
         cfg, img, prog, _ = CQ.case(bits=bits, kb=3, m=min(4, card.MCOLS), n=12)
         out.append((f"TMM CQ{bits} (LUTSET, GSC epilogue)", prog, img))
@@ -180,9 +181,10 @@ def main() -> int:
             except Exception as e:              # noqa: BLE001
                 ok, msg = False, f"{type(e).__name__}: {e}"
             check(ok, f"op {group}: {name}", msg)
-    for name, prog, img in r8_cases(card):
-        if a.only and a.only not in name:
-            continue
+    cases = [case for case in r8_cases(card) if a.only in case[0]]
+    if not cases:
+        check(False, "r8 case selection", f"no case matched {a.only!r}")
+    for name, prog, img in cases:
         try:
             ok, msg = run_case(b, card, prog, img)
         except Exception as e:                  # noqa: BLE001

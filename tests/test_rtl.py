@@ -703,6 +703,16 @@ def test_collective_reads_held_behind_dma_reads(have_verilator, seed, tmp_path, 
     assert sorted(held) == [0, 1] and held[0] > 0, held
 
 
+def test_mm_block_offset_uses_all_eight_bits(have_verilator):
+    from opentpu.host.opchecks import mm_block_offset_case
+    cfg = Config(S=1)
+    prog, img = mm_block_offset_case(cfg)
+    want = Machine(cfg, [prog], [img.copy()]).run().slices[0].tmem
+    assert len(set(want[4096:4100])) == 4
+    _, tmems, _ = rtlsim.run(cfg, [prog], [img], uarch={"SEQ_WC": 1, "WIN": 16})
+    np.testing.assert_array_equal(tmems[0], want)
+
+
 @pytest.mark.parametrize("mcols,rows", [(4, 8), (8, 16)])
 @pytest.mark.parametrize("M,wf,pair", [(1, I.W8, False), (3, I.W8, False), (1, I.W4F, True),
                                        (2, I.WNV, True), (4, I.W4I, False), (6, I.W4F, False),
