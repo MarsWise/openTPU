@@ -167,6 +167,8 @@ class Image:
         self.cos, self.sin = table(np.cos(ang)), table(np.sin(ang))
         self.one_c, self.one_s = table(np.ones_like(ang)), table(np.zeros_like(ang))
         self.logits = Tensor(Affine(b.alloc(4 * V)), (1, V), (V, 1))
+        # the greedy pick of a step (needle_step pick=True): fp32 [max logit, its token id]
+        self.pick = Tensor(Affine(b.alloc(8)), (1, 2), (2, 1))
         self.nbytes = -(-b.next // 4096) * 4096
         if self.nbytes > cfg.DRAM_BYTES:
             raise MemoryError(f"Needle image {self.nbytes} bytes > DRAM_BYTES")
@@ -229,8 +231,9 @@ def needle_encode(m, ids: tuple, block: int = ATTN_BLOCK):
 
 
 @ol.jit
-def needle_step(m, pos: int, tok: int, T: int, block: int = ATTN_BLOCK):
-    """Decoder token `tok` at position `pos` over T encoder tokens -> m.logits."""
+def needle_step(m, pos: int, tok: int, T: int, block: int = ATTN_BLOCK, pick: bool = False):
+    """Decoder token `tok` at position `pos` over T encoder tokens -> m.logits; pick: the
+    greedy token too (ARGMAX over the logits' row: the first maximum, as numpy's) -> m.pick."""
     x = ol.load(m.embed[tok:tok + 1, :])
     c, s_ = ol.load(m.cos[pos, :]), ol.load(m.sin[pos, :])
     ic, is_ = ol.load(m.one_c[0, :]), ol.load(m.one_s[0, :])
@@ -239,7 +242,10 @@ def needle_step(m, pos: int, tok: int, T: int, block: int = ATTN_BLOCK):
         x.set(_attention(x, s, c, s_, pos, SPEC, block))
         x.set(_attention(x, cr, ic, is_, pos, SPEC, block, seq=T, cross=True))
     xs = ol.quantize(rmsnorm(x, ol.load(m.dec_norm), N.EPS))
-    ol.store(m.logits, ol.dot(xs, m.head))
+    lg = ol.dot(xs, m.head)
+    ol.store(m.logits, lg)
+    if pick:
+        ol.store(m.pick, ol.current().argmax(lg))
 
 
 class Engine:
@@ -250,6 +256,8 @@ class Engine:
                  cq: dict | None = None):
         self.img = Image(cfg, W, enc_cap, dec_cap, cq=cq)
         self.cfg = cfg
+        if callable(backend):                   # a factory, as qwen3.Engine's: (cfg, images)
+            backend = backend(cfg, [self.img.build()])
         self.backend = backend or Q3.IsaBackend(cfg, [self.img.build()], adopt=True)
         self.T, self.pos = 0, 0
 
@@ -271,6 +279,27 @@ class Engine:
         a = self.img.logits.base.const
         raw = self.backend.read(0, int(a), 4 * self.img.V)
         return raw.view(np.float32).copy()
+
+    def step_pick(self, tok: int) -> int:
+        """step(tok) with the next token picked on the device: the host reads the id (8
+        bytes), not the logits, and computes nothing."""
+        if self.pos >= self.img.dec_cap:
+            raise RuntimeError("decoder KV full")
+        self._run(needle_step, pos=self.pos, tok=int(tok), T=self.T, pick=True)
+        self.pos += 1
+        raw = self.backend.read(0, int(self.img.pick.base.const), 8).view(np.float32)
+        return int(raw[1])
+
+    def generate_picked(self, ids, n: int = 64) -> list:
+        """generate() with every token picked on the device (step_pick)."""
+        self.encode(ids)
+        self.step_pick(N.EOS)
+        out, t = [], self.step_pick(N.TOOL_CALL)
+        while True:
+            out.append(t)
+            if t == N.EOS or len(out) >= n:
+                return out
+            t = self.step_pick(t)
 
     def generate(self, ids, n: int = 64) -> list:
         self.encode(ids)

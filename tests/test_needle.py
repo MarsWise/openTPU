@@ -49,6 +49,8 @@ def test_needle_device_isa_readme_tool_call():
     assert out[-1] == N.EOS
     assert tok.decode(out[:-1]) == \
         '[{"name":"get_weather","arguments":{"location":"San Francisco"}}]'
+    # and with every token picked on the device (needle_step pick: ARGMAX), the same tokens
+    assert ND.Engine(W, cfg).generate_picked(ids) == out
 
 
 def test_needle_decoder_step_rtl(monkeypatch, have_verilator):
@@ -77,6 +79,12 @@ def test_needle_decoder_step_rtl(monkeypatch, have_verilator):
     e.backend, e.pos = r, e.pos - 1
     got = e.step(N.TOOL_CALL)
     assert np.array_equal(want.view(np.uint32), got.view(np.uint32))
+    assert np.array_equal(isa.machine.slices[0].dram[:n], r.drams[0][:n])
+    # the step with the token picked on the device: the RTL's id is the ISA's and the logits'
+    e.backend = isa
+    t_isa = e.step_pick(int(want.argmax()))
+    e.backend, e.pos = r, e.pos - 1
+    assert e.step_pick(int(want.argmax())) == t_isa
     assert np.array_equal(isa.machine.slices[0].dram[:n], r.drams[0][:n])
 
 

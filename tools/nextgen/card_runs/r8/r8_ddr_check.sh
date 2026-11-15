@@ -56,10 +56,15 @@ cases() {
   ecc
 }
 "$HOME/hfref/bin/uv" pip install -q --python "$V/bin/python" --no-deps -e "$R" 2>&1 | tail -1
+# PASSES=n (default 1): the cases n times under each calibration without recalibrating between
+# them (a soak: the criterion is ECC 0 / 0 in every pass; ~25 minutes a pass)
 for k in ${KINDS:-none ternary:4}; do
   echo; echo "######## $(date +%H:%M:%S) calibration: selfcal + ${k/none/no loadcal}"
   calib "$k"
   ecc
-  cases "$k"
+  for p in $(seq 1 "${PASSES:-1}"); do
+    [ "${PASSES:-1}" = 1 ] || { echo; echo "#### $(date +%H:%M:%S) [$k] pass $p of $PASSES"; }
+    cases "$k"
+  done
 done
 echo "== $(date +%H:%M:%S) DONE"

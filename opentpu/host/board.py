@@ -1070,6 +1070,12 @@ class Board:
             if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tbin", False):
                     raise ConfigMismatch("TMM BIN requires firmware with CAPS2 bit6 (TBIN)")
+            if np.any(((opflags & 0xff) == I.MM) & ((dims >> 28) & 1 != 0)):
+                if (self._info or self.info()).get("build_id") in MM_K0_ERRATA:
+                    raise ConfigMismatch("an MM starting at scale block 16..31 mod 32 (k0 bit 4): "
+                                         "this bitstream's MXU drops the bit and reads block "
+                                         "k0 - 16's scales (board.MM_K0_ERRATA); it needs a "
+                                         "build from c9f51ceb or later")
             if np.any(((opflags & 0xff) == I.VOP) & np.isin(functions,
                       [I.V_CMP_GT, I.V_CMP_EQ, I.V_SEL])):
                 if not (self._info or self.info()).get("caps2", {}).get("vcmp", False):
@@ -1362,6 +1368,13 @@ class Board:
 
 
 # ------------------------------------------------------------------------------ configuration
+# The BUILD_IDs whose MXU drops bit 4 of MM's k0 (otpu_mxu's i_k0 took TMM GRQ's flag out of MM's
+# too, 6df6a665 .. c9f51ceb: every r7 build and r8 2c800a8f): an MM whose k0 has the bit reads the
+# scales of block k0 - 16, so load_program refuses one. A K part of a several-range operand or a
+# column slice past block 15 of an int8 / 4-bit matrix with block scales makes one; RSC, UNIT and
+# TMM do not.
+MM_K0_ERRATA = frozenset({0x2c800a8f})
+
 # (BUILD_ID, CFG_HASH) -> the CAPS2 capabilities the bitstream has but does not report. r4
 # (bb27096f, TMM PAIR + QUAD, CFG_HASH 3fb1359e): otpu_fpga_top_ld had no TPAIR / TQUAD
 # parameters, so Vivado dropped the generics and CAPS2 reads 0; the MXU's PAIR and QUAD

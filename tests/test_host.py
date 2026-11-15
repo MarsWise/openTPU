@@ -2279,3 +2279,21 @@ def test_r4_caps2_erratum():
     other = copy.deepcopy(card)
     other["build_id"] = 0x12345678
     assert not caps2_errata(other)["caps2"]["tpair"]
+
+
+def test_mm_k0_bit4_is_refused_on_the_builds_that_drop_it():
+    """board.MM_K0_ERRATA: r8 2c800a8f's MXU reads block k0 - 16's scales for an MM whose k0 has
+    bit 4, so load_program refuses one there (ConfigMismatch); block 15 and below, and another
+    build, load."""
+    from opentpu.host.board import MM_K0_ERRATA
+    D = 128
+
+    def prog(k0):
+        return [I.mm(0x1000, 0x2000, 4096, 1, 1, D, 1, 1, 0, 260, k0=k0), I.halt()]
+
+    bad = Board(FakeTransport(devname=None, D=D, build_id=min(MM_K0_ERRATA)))
+    bad.load(0x100000, prog(15))
+    for k0 in (16, 31, 48, 255):
+        with pytest.raises(ConfigMismatch, match="k0 bit 4"):
+            bad.load(0x100000, prog(k0))
+    Board(FakeTransport(devname=None, D=D)).load(0x100000, prog(16))
