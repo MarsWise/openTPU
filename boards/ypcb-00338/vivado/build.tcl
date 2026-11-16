@@ -217,6 +217,12 @@ if {$mf ne ""} {
 # ---- PCIe Gen2: the PCIe block's 500 MHz paths into its own block RAMs (userclk1_reroute.tcl)
 source $here/userclk1_reroute.tcl
 
+# ---- the leftover setup failures of the clocks without a margin, at the real constraints
+# (signoff_cleanup.tcl: post-route phys_opt + re-entrant route, kept only if better)
+if {[catch {source $here/signoff_cleanup.tcl} so_err]} {
+  puts "CRITICAL WARNING: \[build.tcl\] signoff_cleanup.tcl: $so_err"
+}
+
 # Retain the exact post-ECO, signoff-constraint design used for the bitstream.
 # impl_1's checkpoint predates the reroute and margin removal above.
 write_checkpoint -force $out/reports/signoff.dcp
