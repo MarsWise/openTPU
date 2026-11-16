@@ -15,8 +15,8 @@ over a long run is open; r8 2c800a8f has the MXU k0 erratum, see PROGRESS.md).
 | YOLOX-Nano | Megvii | PHYS exec r8 (one frame), strict FPGA-only | image decode | COCO mAP on r8 (r5: 0.2825) |
 | Diffusion Policy pusht | lerobot | PHYS exec r8 | 10790 launches / 100 steps | long run; device loop |
 | SmolVLA base | lerobot | PHYS exec r8 | 12948 launches | action chunk buffer; device loop |
-| Cactus Needle 26M (int8, CQ4) | Cactus-Compute | ISA + RTL step; token picked on device | tokenizer, a launch a token | r8_needle.cmd |
-| LFM3 text decoder (24 layers) | lfm3-omni, rows extracted | ISA (real weights) | tokenizer | r8_llm.cmd lfm3; KV ring for long contexts |
+| Cactus Needle 26M (int8, CQ4) | Cactus-Compute | PHYS exec r8 (16.11): card == ISA, token picked on the card, ECC 0 / 0 | tokenizer, a launch a token | device token loop |
+| LFM3 text decoder (24 layers) | lfm3-omni, rows extracted | PHYS exec r8 (16.11): cos 0.9999, 8.26 tok/s picked on the card, ECC 0 / 0 | tokenizer | chat, long context (past 255), soak |
 | MiniCPM5-2B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd minicpm5 |
 | Granite 4.2 3B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd granite |
 | Bonsai 2 2B | PTQ1_0 (T5) | ISA (real weights) | tokenizer | card |
