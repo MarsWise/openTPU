@@ -107,12 +107,12 @@ print("build", hex(i.get("build_id") or 0), "core_khz", i.get("core_khz"), "caps
 h = (i.get("cfg") or {}).get("hash", 0)
 print("cfg hash", hex(h))
 open(sys.argv[1], "w").write(f"VU8={int(bool(c2.get('vu8')))}\nTGRQ={int(bool(c2.get('tgrq')))}\n"
-                             f"R8={int(h == 0x93e29b18)}\n")
+                             f"R8={int(h in (0x93e29b18, 0xa905c3db))}\n")   # r8; r8 with GRQ QUAD (C2)
 PY
 rc=$?; [ "$rc" = 0 ] && [ -f "$OUT/r8caps.env" ] || { fail "card capability read"; exit 1; }
 . "$OUT/r8caps.env"
 echo "   VU8=$VU8 TGRQ=$TGRQ R8=$R8"
-[ "$R8" = 1 ] || { fail "the loaded firmware is not r8 (CFG_HASH 93e29b18): load it first"; exit 1; }
+[ "$R8" = 1 ] || { fail "the loaded firmware is not r8 (CFG_HASH 93e29b18, or a905c3db with GRQ QUAD): load it first"; exit 1; }
 ecc || echo "   (ECC before the scrub: an earlier run's or never-written beats; 0b scrubs)"
 
 log "0b. DRAM after the load: the core's CPU calibrates both channels, scrub (zeros: ECC check bits valid), loadcal under load, selftest"
