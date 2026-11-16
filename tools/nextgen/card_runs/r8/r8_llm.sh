@@ -1,0 +1,30 @@
+#!/bin/bash
+# Claude: a real LLM that ran on the ISA simulator only, on the card: tools/llm_card.py
+# (r8_llm.sh lfm3 | minicpm5 | granite). The prompt's logits against the fp32 reference (host CPU,
+# a check), greedy tokens, tok/s, ECC before / after. Zeros over DRAM first (scrub). The weights
+# come with the .cmd (~/llm_card/<model>). No bitstream load, no rescan, no calibration change.
+set -u
+exec 9>/tmp/claude_run.lock
+flock -n 9 || { echo "== another run is using the card: wait for it"; exit 75; }
+R=$HOME/openTPU_BitNET; m=${1:-lfm3}; W=$HOME/llm_card/$m
+cd "$R" || exit 1
+git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature && git merge -q --ff-only refs/remotes/claude/feature \
+  || { echo "SYNC FAILED (host tree: $(git log --oneline -1))"; exit 1; }
+echo "== $(date +%H:%M:%S) $(git log --oneline -1 | cut -c1-90)"
+P=$HOME/hfref/bin/python; "$P" -c 'import tokenizers, numpy' 2>/dev/null || P=$R/.venv/bin/python
+export PYTHONPATH=$R OTPU_MM_K0_REPORT=1
+"$R/.venv/bin/python" -c "
+from opentpu.host.board import Board, XdmaTransport
+from opentpu.host import memcal
+b = Board(XdmaTransport('/dev/xdma0'), check=False); b.scrub(force=True); i = b.info()
+print('   scrubbed; build', hex(i.get('build_id') or 0), 'ECC', memcal.ecc(b.t), 'temp', i.get('temp_c'))"
+case "$m" in
+  lfm3)     set -- lfm3 "$W" ;;
+  minicpm5) set -- gguf "$W/MiniCPM5-2B-Q4_K_M.gguf" --cos 0.998 ;;
+  granite)  set -- gguf "$W/granite-4.2-3b-Q4_K_M.gguf" --wformat mix --formats gateup=nvfp4,down=fp4 --cos 0.85 ;;
+  *) echo "model: lfm3 | minicpm5 | granite"; exit 2 ;;
+esac
+echo "== $(date +%H:%M:%S) $m: tools/llm_card.py $*"
+timeout 7200 "$P" tools/llm_card.py "$@"; rc=$?
+echo "== $(date +%H:%M:%S) DONE rc $rc"
+exit $rc

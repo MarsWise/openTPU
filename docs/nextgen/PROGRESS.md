@@ -1,5 +1,37 @@
 # Nextgen implementation progress
 
+## r8 update (2026-11-16): on the card, MXU k0 erratum, rebuild in progress
+
+State by evidence class (rows: VERIFIED_RESULTS.csv; narrative: HANDOFF_2026-11-10.md,
+HANDOFF_2026-11-15.md). Nothing is ACCEPTED: acceptance needs ECC 0 / 0 over a long run on a
+bitstream without a known error.
+
+- **Bitstream r8 `2c800a8f`** (m8, 133.33 MHz, CFG_HASH 93e29b18): routed, WNS +0.041 / WHS
+  +0.013 ns, LUT 70.3 %, DSP 75 %. PHYSICAL: loaded 2026-11-10, every r8 instruction card == ISA.
+  **Erratum:** its MXU drops bit 4 of MM's k0 (`board.MM_K0_ERRATA`; RTL fixed in c9f51ceb, RTL
+  SIMULATED). The rebuild (`r8_build_k0fix.cmd`, source 1a77396a) started 2026-11-16; not routed
+  yet. `OTPU_MM_K0_REPORT=1` (set by the card scripts) prints per run how many MMs had the bit:
+  a count above 0 marks a 2c800a8f result as wrong.
+- **PHYSICAL on r8 2c800a8f (execution; to be repeated on the fixed build):** Qwen3 tiny KV
+  int8 / kv6 / k6v6 == ISA; Diffusion Policy pusht 10 / 100 steps (rel L2 0.0044 / 0.0038);
+  SmolVLA base (rel L2 0.0308, 12948 host launches, 402 s); YOLOX-Nano strict FPGA-only (one
+  frame); vLLM BitNet 4 slots sampled / greedy / logprobs; Bonsai 2 4B GRQ off / on logits.
+  Card run of 2026-11-10 20:30: 17 of 17, ECC 0 / 0 in every step after the load calibration.
+- **DDR3 on r8:** SEC (once DED) in earlier runs, 0 / 0 after `loadcal ternary:4`; r5 45b1c1d3
+  on the same card 0 / 0 without it. Not qualified; cause not established (placement near the
+  PHY, the write path's slack +0.229 ns against r5's +1.983 ns, otpu_mem_ch's CDC: open).
+  Soak: `set PASSES=4` + `r8_ddr_check.cmd`.
+- **ISA SIMULATED, card runs prepared (NOT RUN):** Cactus Needle 26M int8 / CQ4 with the token
+  picked on the device (`r8_needle.cmd`; the decoder step also RTL SIMULATED); LFM3 text decoder,
+  MiniCPM5-2B, Granite 4.2 3B (`r8_llm.cmd lfm3 | minicpm5 | granite`, tools/llm_card.py).
+  Speed of the LLMs already on the host: `r8_speed.cmd` (NOT RUN on r8).
+- **ISA SIMULATED only:** Bonsai 2 2B (T5), Ouro 1.4B (8 layers int8), Dory 4B (a subnet),
+  PaddleOCR-VL 1.6, MiniCPM-V.
+- **Open for the ТЗ:** an autonomous graph on the device (the host launches every program), one
+  strict FPGA-only audit, a memory planner for several models, MTP first token / k > 1, MoE
+  without the host, YOLOX COCO mAP on r8, the full test suite on HEAD, sign-off (CDC-1 / CDC-10,
+  I/O delays). Not started: MusicGen, Kokoro, SD 1.5 (as whole models), FFN pruning.
+
 ## r7 update (2026-10-31): Bonsai GRQ and Diffusion device ops
 
 - **TMM GSC GRQ** (CAPS2 bit 9, `Config.TGRQ`): block-major packed ternary layout; the GSC

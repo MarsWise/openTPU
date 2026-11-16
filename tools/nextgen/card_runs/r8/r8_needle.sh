@@ -7,7 +7,7 @@
 set -u
 exec 9>/tmp/claude_run.lock
 flock -n 9 || { echo "== another run is using the card: wait for it"; exit 75; }
-R=$HOME/openTPU_BitNET; N=$HOME/needle
+R=$HOME/openTPU_BitNET; N=$HOME/needle; export OTPU_MM_K0_REPORT=1
 cd "$R" || exit 1
 git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature && git merge -q --ff-only refs/remotes/claude/feature \
   || { echo "SYNC FAILED (host tree: $(git log --oneline -1))"; exit 1; }

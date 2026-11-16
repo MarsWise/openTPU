@@ -1,5 +1,18 @@
 # Hardware connectivity discovery
 
+## r8 (2026-11-10 .. 16)
+
+- PCIe host: `nvx@192.168.0.157` (the ТЗ's .156 is stale), tree `~/openTPU_BitNET`, updated from
+  `_claude\r8\sync.bundle` by every card script. Endpoint 0000:07:00.0, XDMA, Gen2.
+- JTAG: Digilent 210299A88B38, xc7k480t; volatile loads only, by the user (`r8_load.cmd <bit>`,
+  then `r8_restore_pcie.cmd`). r8 2c800a8f loaded 2026-11-10 20:09 (DONE = 1); r5 45b1c1d3 was
+  loaded for the DDR A / B the same evening. **What is loaded now is not known** (last card
+  contact 2026-11-10): `r8_models.cmd` reads the build id and ECC counters (read only).
+- After every load: selfcal, scrub, `loadcal.center` under a load (`OTPU_LOAD_KIND=ternary:4`),
+  selftest (step 0b of `r8_card_tests.cmd`).
+- Card scripts (`C:\myOpenTPU\_claude\r8`, copies in tools/nextgen/card_runs/r8): r8_card_tests,
+  r8_ddr_check (PASSES), r8_chat, r8_models, r8_needle, r8_llm, r8_speed; builds: r8_build_k0fix.
+
 This document records read-only hardware discovery and offline implementation artifacts. No FPGA
 reset, programming, bitstream load, PCIe rescan, BAR write, DMA transfer, driver operation or
 benchmark was performed.

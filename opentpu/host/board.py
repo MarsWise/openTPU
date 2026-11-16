@@ -1070,7 +1070,9 @@ class Board:
             if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tbin", False):
                     raise ConfigMismatch("TMM BIN requires firmware with CAPS2 bit6 (TBIN)")
-            if np.any(((opflags & 0xff) == I.MM) & ((dims >> 28) & 1 != 0)):
+            k0b = ((opflags & 0xff) == I.MM) & ((dims >> 28) & 1 != 0)
+            if np.any(k0b):
+                _mm_k0_seen(int(k0b.sum()))
                 if (self._info or self.info()).get("build_id") in MM_K0_ERRATA:
                     raise ConfigMismatch("an MM starting at scale block 16..31 mod 32 (k0 bit 4): "
                                          "this bitstream's MXU drops the bit and reads block "
@@ -1374,6 +1376,20 @@ class Board:
 # column slice past block 15 of an int8 / 4-bit matrix with block scales makes one; RSC, UNIT and
 # TMM do not.
 MM_K0_ERRATA = frozenset({0x2c800a8f})
+
+# OTPU_MM_K0_REPORT=1: at exit, how many of the MMs this process loaded had the bit (stderr). On
+# a fixed build it says which runs' results on the errata builds were wrong (a count above 0)
+_MM_K0 = [0, 0]
+
+
+def _mm_k0_seen(n: int) -> None:
+    if not _MM_K0[1] and os.environ.get("OTPU_MM_K0_REPORT") == "1":
+        import atexit
+        atexit.register(lambda: print(f"MM k0 bit 4: {_MM_K0[0]} MMs in {_MM_K0[1]} programs "
+                                      f"(their results on r7 builds / r8 2c800a8f were wrong)",
+                                      file=sys.stderr, flush=True))
+    _MM_K0[0] += n
+    _MM_K0[1] += 1
 
 # (BUILD_ID, CFG_HASH) -> the CAPS2 capabilities the bitstream has but does not report. r4
 # (bb27096f, TMM PAIR + QUAD, CFG_HASH 3fb1359e): otpu_fpga_top_ld had no TPAIR / TQUAD

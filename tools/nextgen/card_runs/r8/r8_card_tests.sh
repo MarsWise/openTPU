@@ -122,6 +122,8 @@ python -m opentpu.host.memcal selfcal 2>&1 | tail -8 | tee "$OUT/selfcal.txt"
 # r8 run 15:13 had SEC 61 / 42 and one DED under step B after selfcal alone: centre the read taps
 # under the core's load as on r4 (HANDOFF_2026-10-24: ECC 0 / 0 with it)
 export OTPU_LOAD_CENTER=1
+# a step that prints "MM k0 bit 4: N MMs" used the MMs r8 2c800a8f computed wrong (board.MM_K0_ERRATA)
+export OTPU_MM_K0_REPORT=1
 # r8_ddr_check 2026-11-10: under the TMM load (ternary:4) vLLM 4 slots PASS and the batched
 # steps read clean, where no loadcal or fp4 read ECC_DED
 export OTPU_LOAD_KIND=${OTPU_LOAD_KIND:-ternary:4}

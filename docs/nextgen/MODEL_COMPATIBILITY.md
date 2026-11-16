@@ -1,5 +1,32 @@
 # Model compatibility and end-to-end evidence
 
+## r8 status per model (2026-11-16)
+
+Levels as in the ТЗ (part 21). "PHYS exec" is execution on the card, not acceptance (ECC 0 / 0
+over a long run is open; r8 2c800a8f has the MXU k0 erratum, see PROGRESS.md).
+
+| Model | Checkpoint | Level | Host work left | Next |
+|---|---|---|---|---|
+| Qwen3 tiny, KV int8 / kv6 / k6v6 | synthetic | PHYS exec r8, == ISA | launches | KV6 quality on a real model |
+| BitNet b1.58 2B4T (vLLM, 4 slots) | HF microsoft | PHYS exec r8 | tokenizer, scheduler | long run, ECC 0 / 0 |
+| Bonsai 2 4B (GRQ) | prism-ml 2-bit | PHYS exec r8 (logits) | tokenizer | generation, tok/s |
+| Qwen3-0.6B, Qwen3.5-0.8B / 2B, LFM2.5-230M | HF | PHYS r5; r8 NOT RUN | tokenizer | r8_speed.cmd |
+| Qwen3.5-4B, LFM2-2.6B, LFM2.5-8B-A1B, gemma-4, SmolLM3, Phi-4-mini | HF cache on the host | SOURCE INTEGRATED | - | first card run |
+| YOLOX-Nano | Megvii | PHYS exec r8 (one frame), strict FPGA-only | image decode | COCO mAP on r8 (r5: 0.2825) |
+| Diffusion Policy pusht | lerobot | PHYS exec r8 | 10790 launches / 100 steps | long run; device loop |
+| SmolVLA base | lerobot | PHYS exec r8 | 12948 launches | action chunk buffer; device loop |
+| Cactus Needle 26M (int8, CQ4) | Cactus-Compute | ISA + RTL step; token picked on device | tokenizer, a launch a token | r8_needle.cmd |
+| LFM3 text decoder (24 layers) | lfm3-omni, rows extracted | ISA (real weights) | tokenizer | r8_llm.cmd lfm3; KV ring for long contexts |
+| MiniCPM5-2B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd minicpm5 |
+| Granite 4.2 3B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd granite |
+| Bonsai 2 2B | PTQ1_0 (T5) | ISA (real weights) | tokenizer | card |
+| Ouro 1.4B | HF | ISA (8 layers int8; 24 with int4 MLP) | - | 24 layers int8, early exit |
+| Dory 4B | GGUF Q5_K_M | ISA (subnet 4 + 16 + 4) | - | whole model |
+| PaddleOCR-VL 1.6 | HF | ISA (reads a rendered line) | preprocessing, row feed | on-device preprocessing |
+| MiniCPM-V | HF | ISA (tests) | - | answer on a real image |
+| ReasonLite 0.6B, FunctionGemma 270M | HF | IMPLEMENTING | - | whole graph |
+| MusicGen-small, Kokoro 82M, SD 1.5 | HF | PLANNED (blocks only) | - | - |
+
 ## New workload families requested
 
 Updated 2026-10-19 (feature HEAD after the `9bd4d83c` upstream merge).

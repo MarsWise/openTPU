@@ -85,3 +85,22 @@ The integrated generic TMM path is not validated against a specific BitNet/Tern2
 Upstream descriptions of board runs, timing closure, MTP, VLM and offload performance are not
 measurements produced by this branch. The current read-only JTAG observation is recorded
 separately in `HARDWARE_CONNECTIVITY.md`; it is not PCIe, DMA, runtime or inference evidence.
+
+## Upstream check 2026-11-16: main `d84db557` (10 commits after `91df4109`)
+
+Fetched 2026-11-16 (git, FeSens/openTPU main). Not merged: `git merge-tree` against the r8 branch
+reports 60 conflicting files, the core RTL among them (otpu_mxu, otpu_seq, otpu_dma,
+otpu_native_dram, otpu_quant, otpu_ctrl, otpu_board), while an r8 rebuild is under way.
+
+| Upstream commit | Date | Feature | Files | Overlap with r8 | Decision | Verification |
+|---|---|---|---|---|---|---|
+| b2eeed69 | 2026-11-10 | Core wide-group (WG) memory path, a wider MXU option, multi-slice hubs (BCU1525) | 109 files, rtl +17.6k lines: otpu_mxu, otpu_native_dram, otpu_hbm_ch, otpu_coll, otpu_dma, otpu_quant, otpu_seq | Every r8 RTL change (TMM CQ / T5 / GRQ, OREG, QST4 / 6, k0) is in the same modules | DEFER until the r8 build with the k0 fix is accepted on the card; then port by module with RTL == ISA per step | NOT RUN |
+| ff0b3e2b | 2026-11-10 | Compiler, host and server for BCU1525: grouped weights, multi-slice; moe.py, gptoss.py, batch35.py, cards.py, board_perf.py | 177 files, +31k | compiler.py, isasim.py, qwen3.py, qwen35.py, board.py, progcache.py: all changed in r8 | DEFER with b2eeed69 (its ISA contract) | NOT RUN |
+| ab85880a, 44d7d4be, c2819255 | 2026-11-10 | boards/bcu1525 (VU9P, four DDR4 DIMMs), its tests and docs | boards, targets, tests, docs | none (another board); boards/bcu1525/Makefile conflicts | DEFER (no VU9P here) | NOT RUN |
+| 65fc3549, a22032fc | 2026-11-10 | Caches say when they do not keep (progcache, imgcache), a card says which image it holds (cardimage.py) | host | progcache.py (r8: OTPU_PROG_CACHE_FREE_GB) | PORT LATER: small, useful on YPCB (the card naming its image) | NOT RUN |
+| d67cc2ea | 2026-11-11 | docs/offload.md, mtp2.sh wording | docs | none | DEFER (docs) | - |
+
+Checked for r8's open problems: upstream's MXU takes MM's k0 as `w4[31:24]` (the r8 erratum is
+ours alone, from 6df6a665); its otpu_mem_ch change is otpu_sfifo's timing form (HCP column
+groups, registered flags) for 300-450 MHz clocks, not a functional fix; boards/ypcb-00338 changes
+only otpu_clk2x.tcl, the Makefile and create_project.tcl (to read when porting).
