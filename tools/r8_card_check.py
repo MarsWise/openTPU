@@ -40,10 +40,11 @@ from opentpu.host.opchecks import diag_image, mm_block_offset_case, op_checks  #
 from opentpu.isasim import Machine  # noqa: E402
 
 R8_HASH = 0x93e29b18
+R8Q_HASH = 0xa905c3db       # r8 with GRQ QUAD (CAPS2 bit20, Config.TGQ4: C2)
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
-          "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP")
+          "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4")
 IMG_MAX, DUMP, ZERO, END = 0x200000, 0x200000, 0x280000, 0x300000
 
 
@@ -104,6 +105,11 @@ def r8_cases(card) -> list:
     for grq in (False, True):
         cfg, img, head, gsc, gq, _ = GQ.case(kb=5, m=3, n=12, mcols=min(4, card.MCOLS))
         out.append((f"TMM GSC{' GRQ' if grq else ''}", head + [gq if grq else gsc, I.halt()], img))
+    if getattr(card, "TGQ4", False):             # GRQ QUAD: between a GRQ and itself, ACC
+        for kb, acc, n in ((5, False, 20), (7, True, 36)):
+            cfg, img, head, gq, quad = GQ.gq4_case(kb, acc, n, mcols=min(8, card.MCOLS))
+            out.append((f"TMM GRQ QUAD (KB {kb}{', ACC' if acc else ''})",
+                        head + [quad, gq, quad, I.halt()], img))
     for dense in (False, True):
         _, (cfg, prog, img) = T5.run(24, 2, 3, gsc=True, dense=dense)
         out.append((f"TMM {'T5 (dense trits)' if dense else 'GSC 2-bit'}", prog, img))
@@ -163,7 +169,8 @@ def main() -> int:
     check(not missing, "CAPS2: the r8 capabilities", "missing " + ", ".join(missing) if missing
           else "all of " + " ".join(R8_CAPS2))
     h = (info.get("cfg") or {}).get("hash", 0)
-    check(a.sim or h == R8_HASH, "CFG_HASH is r8's", f"{h:#010x}, r8 {R8_HASH:#010x}")
+    check(a.sim or h == (R8Q_HASH if c2.get("tgq4") else R8_HASH), "CFG_HASH is r8's",
+          f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}")
     try:
         check_hash(info)
         check(True, "CFG_HASH matches this host's Config")

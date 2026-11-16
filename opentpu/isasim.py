@@ -48,6 +48,7 @@ class Config:
     VAFF: bool = False       # VOP AFF, the fused row/column affine (LayerNorm, RMSNorm; CAPS2 bit17)
     VCSWP: bool = False      # VOP CSWP, the bitonic compare-exchange stage (kernels/sort.py; CAPS2 bit19)
     TGRQ: bool = False       # TMM GSC block-major layout, every chunk read once (CAPS2 bit9)
+    TGQ4: bool = False       # TMM GRQ QUAD: a GRQ chunk's four quarters an advance, M 1 (CAPS2 bit20)
     TFN: bool = False        # VOP table functions 0x20..0x29 (sigmoid, SiLU, GELU, ..., sin,
     #                          cos: opentpu/tfn.py) on the stream engine (CAPS2 bit3)
     DSTEP: bool = False      # the DMA runs DSTEP (Gated DeltaNet head steps on DRAM state)
@@ -118,6 +119,7 @@ def board_config(**kw) -> Config:
                 VBFLY=bool(int(env.get("OTPU_VBFLY", 0))),
                 VAFF=bool(int(env.get("OTPU_VAFF", 0))),
                 TGRQ=bool(int(env.get("OTPU_TGRQ", 0))),
+                TGQ4=bool(int(env.get("OTPU_TGQ4", 0))),
                 TFN=bool(int(env.get("OTPU_TFN", 0))),
                 DSTEP=bool(int(env.get("OTPU_DSTEP", 0))),
                 STREAM=bool(int(env.get("OTPU_STREAM", 0))),
@@ -640,6 +642,15 @@ class Slice:
         binary = bool(w[3] & I.TMM_BIN) and not dense
         grq = bool(w[3] & I.TMM_GRQ)
         cq, cq4 = bool(w[3] & I.TMM_CQ), bool(w[3] & I.TMM_CQ4) and not dense
+        # GRQ QUAD (GSC + GRQ + the QUAD flag): the MXU takes a chunk's four quarters in one
+        # advance, output n's from ACT row n % 4 (the row's QACT DUP4 copies); GRQ's math
+        gq4 = grq and quad
+        if gq4:
+            if not getattr(cfg, "TGQ4", False) or M != 1 or cfg.MCOLS < 4 or cq or cq4 or \
+                    ins.flags & (I.F_RMAX | I.F_ASCALE):
+                raise SimError("TMM GRQ QUAD: needs Config.TGQ4, M 1, MCOLS >= 4, ternary codes, "
+                               "no RMAX / ASCALE")
+            quad = False
         if w[3] & I.TMM_LUT:                       # LUTSET: eight LUT entries, no data moves
             if not cfg.TCQ or not gsc or w[3] != (1 | (1 << 16) | I.TMM_LUT) or \
                     (w[5] & 0xFFFF) > 1 or (w[5] >> 16) != 1:
@@ -717,7 +728,7 @@ class Slice:
                 sw = sw[:, 0]
         # the ACT row of each (output row, block): PAIR takes the odd blocks from row j + M,
         # QUAD block 4c + q from row j + q M
-        R = 4 * M if quad else 2 * M if pair else M
+        R = 4 * M if quad or gq4 else 2 * M if pair else M
         kk = np.arange(KB)
         rsel = np.arange(M)[:, None] + (M * (kk % 4) if quad else
                                         np.where(pair & (kk % 2 == 1), M, 0))[None, :]  # [M, KB]
@@ -769,6 +780,13 @@ class Slice:
                 lo, hi = g * group, (g + 1) * group
                 # QACT has one offset per D/4 group; hardware's two adjacent D/8
                 # ternary reductions share the same 2^(11-da) scale.
+                if gq4:                            # output n: ACT row n % 4 (a copy of row 0)
+                    a4 = self.act[:4, (ab + k) * D + lo:(ab + k) * D + hi].astype(np.int64)
+                    q4 = np.arange(N) % 4
+                    dots = np.einsum("nd,nd->n", a4[q4], weights[:, lo:hi])[None, :]
+                    sh4 = 11 - self.adoff[:4, ab + k][:, g].astype(np.int64)[q4][None, :]
+                    acc += np.where(sh4 >= 0, dots << np.maximum(sh4, 0), 0)
+                    continue
                 dots = act[:, k, lo:hi].astype(np.int64) @ weights[:, lo:hi].T
                 row_sh = 11 - da[:, k, g].astype(np.int64)
                 acc += np.where(row_sh[:, None] >= 0, dots << np.maximum(row_sh[:, None], 0), 0)

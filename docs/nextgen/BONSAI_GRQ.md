@@ -62,3 +62,20 @@ four-quarters-per-cycle consumption with separate scales is a further step.
    paths: the registered ACT row group, the Sw word select, the drain's per-entry group size).
 2. With permission, load it (volatile JTAG) and rerun `tools/bonsai2_validate.py --mode board`
    and the GSC microbenchmark with `OTPU_GRQ=1` and `OTPU_GRQ=0` on the same tokens.
+
+## GRQ QUAD (C2, 2026-11-16): the four quarters in one advance
+
+Status: **RTL SIMULATED** (Verilator 5.046, bit for bit the ISA and GRQ), not synthesized, not on
+the card. Decided after the r8 measurement: Bonsai 2 4B decodes at 3.43 tok/s on r8 `2c800a8f`
+(38.9 Mcycles a token; r5: 0.68), and GRQ still spends four advances on every chunk.
+
+`TMM GSC GRQ` with the QUAD flag (`Config.TGQ4`, CAPS2 bit 20; M 1, ternary codes, no RMAX): the
+adapter passes the flag to its plane subcommands; the MXU takes them as one group whose four
+columns read the chunk's four quarters against the row's ACT block (its QACT DUP4 copies, as TMM
+QUAD), adds nothing across the columns, carries the line's four Sw words with the result row and
+drains column `q` to `out + 4i + q` with Sw word `q`. The compiler emits it for a one-row GRQ
+`dot` whose operand has the copies (every projection of a decode step, the tied head included).
+
+Evidence and the estimate: `VERIFIED_RESULTS.csv` (TMM GRQ QUAD). Build: `r8_build_c2.cmd`
+(CFG_HASH `a905c3db`); the build needs its own timing closure (the MXU's result row is 96 bits
+wider; the epilogue lanes select their Sw).

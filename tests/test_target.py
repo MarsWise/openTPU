@@ -93,6 +93,7 @@ def _hash_without_numerics(cfg) -> int:
     d.pop("VAFF")
     d.pop("QST6")
     d.pop("VCSWP")
+    d.pop("TGQ4")
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
                    separators=(",", ":"))
     return int.from_bytes(hashlib.sha256(s.encode()).digest()[:4], "big")

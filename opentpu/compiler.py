@@ -2380,19 +2380,24 @@ class Builder:
                         getattr(self.cfg, "TQUAD", False)
                     tpair = not w.gsc and not w.binary and not w.dense and not tquad and \
                         st.pair and getattr(self.cfg, "TPAIR", False)
+                    # GRQ QUAD (Config.TGQ4): a GRQ chunk's four quarters an advance, for one
+                    # row whose QACT wrote its DUP4 copies (decode: M 1), GRQ's results
+                    gq4 = w.grq and not w.cq and st.quad and mc == 1 and not rowmax and \
+                        getattr(self.cfg, "TGQ4", False) and self.cfg.MCOLS >= 4
                     ins = I.tmm(sa + (k0 * w.rs if w.grq else (k0 // chunk_blocks) * self.cfg.D),
                                 ssa + (k0 * w.srs if w.grq else 4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
                                 w.srs, unit=unit, rsc=not unit and not w.gsc, gsc=w.gsc, binary=w.binary,
                                 grq=w.grq, dense=w.dense,
-                                pair=tpair, quad=tquad,
+                                pair=tpair, quad=tquad or gq4,
                                 acc=acc is not None or not first,
                                 rmax=rowmax and last,
                                 ascale=acc_scale.base if acc_scale is not None and first else None,
                                 ra=ra, rb=rb,
                                 comment=f"tmm {M}x{K} . {N}x{K}^T" + (f" cq{w.cq}" if w.cq else "")
                                 + (" t5" if w.dense else "")
-                                + (" grq" if w.grq else "") + (" pair" if tpair else "") + (" quad" if tquad else "")
+                                + (" grq" if w.grq else "") + (" pair" if tpair else "")
+                                + (" quad" if tquad or gq4 else "")
                                 + (f" part {k0}:{k1}" if len(parts) > 1 else "")
                                 + (" +rowmax" if rowmax and last else "")
                                 + (" acc*=scale" if acc_scale is not None and first else ""))

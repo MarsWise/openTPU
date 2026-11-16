@@ -86,7 +86,7 @@ def test_vpu_hadamard_kernel(inverse):
 @pytest.mark.parametrize("dstep", [False, True])
 def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep, grq,
                                                                  grouped_source=False, rtl=False,
-                                                                 wformat='ternary_gsc'):
+                                                                 wformat='ternary_gsc', gq4=False):
     """Both layer kinds and the tied head; the reference unfolds weights, the device rotates x."""
     from dataclasses import replace
     from opentpu.isasim import Config
@@ -168,7 +168,7 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
         spec = w.spec
     cfg = Config(D=128, MCOLS=4, ACT_ROWS=8, TGSC=True, DRAM_BYTES=32 << 20,
                  DSTEP=dstep, STREAM=dstep, TFN=dstep, PAIR=True, TQUAD=True, TPAIR=True,
-                 TGRQ=grq, TD5=wformat == 'ternary_t5')
+                 TGRQ=grq, TD5=wformat == 'ternary_t5', TGQ4=gq4)
     eng = Engine(spec, w, cap=128, cfg=cfg, resident=True, pipeline=False,
                  rows=1, wformat=wformat)
     tokens = [4, 9, 12, 7, 31]
@@ -195,6 +195,9 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
     from opentpu import isa as I
     tmms = [i for p in eng.image.compile_step(0, tok=4) for i in p if i.op == I.TMM]
     assert any(i.w[3] & I.TMM_GRQ for i in tmms) == grq
+    # GRQ QUAD (Config.TGQ4): every one-row GRQ TMM of the decode step takes it
+    assert [bool(i.flags & I.F_QUAD) for i in tmms if i.w[3] & I.TMM_GRQ] == \
+        [gq4] * sum(bool(i.w[3] & I.TMM_GRQ) for i in tmms)
     if wformat == 'ternary_t5':  # every projection T5 (the head GSC), bit for bit the GSC image's
         assert any(i.w[3] & I.TMM_T5 == I.TMM_T5 and not i.w[3] & I.TMM_CQ for i in tmms) and eng.image.nbytes <= Engine(
             spec, w, cap=128, cfg=cfg, resident=True, pipeline=False, rows=1,
@@ -206,6 +209,20 @@ def test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dst
         row = Engine(spec, w, cap=128, cfg=replace(cfg, TGRQ=False), resident=True,
                      pipeline=False, rows=1, wformat='ternary_gsc')
         np.testing.assert_array_equal(actual, np.stack([row.step(t) for t in tokens]))
+
+
+@pytest.mark.parametrize('dstep', [False, True])
+def test_native_hybrid_decoder_grq_quad(monkeypatch, dstep):
+    """Config.TGQ4: the decode's GRQ TMMs as GRQ QUAD; the logits the row-major engine's bit
+    for bit (the function's last check)."""
+    test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=dstep, grq=True,
+                                                                gq4=True)
+
+
+def test_native_hybrid_decoder_grq_quad_rtl(monkeypatch, have_verilator):
+    """A decode step of GRQ QUAD TMMs on the Verilator RTL: the logits and DRAM the ISA's."""
+    test_native_hybrid_decoder_against_unfolded_float_reference(monkeypatch, dstep=True, grq=True,
+                                                                gq4=True, rtl=True)
 
 
 @pytest.mark.parametrize('dstep', [False, True])

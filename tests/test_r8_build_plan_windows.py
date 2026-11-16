@@ -27,7 +27,7 @@ def test_bfly_plan_matches_architecture(script, enabled):
     if enabled:
         cfg = replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True,
                       VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True,
-                      QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True, QST6=True, VCSWP=True)
+                      QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True, QST6=True, VCSWP=True, TGQ4=True)
         assert f"hash={arch_hash(cfg):08x}" in text
 
 
@@ -48,7 +48,7 @@ def test_batch_launcher_propagates_powershell_failure(tmp_path, monkeypatch):
     launcher.parent.mkdir(parents=True)
     copyfile(ROOT / "tools" / "nextgen" / "windows" / "r8_build.cmd", launcher)
     (tmp_path / "rtl" / "shell").mkdir(parents=True)
-    (tmp_path / "rtl" / "shell" / "otpu_ctrl.sv").write_text("VAFF\nQST6\nVCSWP\n")
+    (tmp_path / "rtl" / "shell" / "otpu_ctrl.sv").write_text("VAFF\nQST6\nVCSWP\nTGQ4\n")
     (tmp_path / "tools" / "build_r8_133.ps1").write_text("throw 'intentional failure'\n")
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     result = subprocess.run(["cmd.exe", "/c", str(launcher), "Plan"], cwd=tmp_path,

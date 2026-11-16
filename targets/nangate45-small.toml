@@ -37,6 +37,7 @@ VBFLY = false                     # VOP BFLY, the Hadamard butterfly stage (CAPS
 VAFF = false                      # VOP AFF, the fused row/column affine (CAPS2 bit17)
 QST6 = false                      # QST Q6, 6-bit ROW rows as nibble and 2-bit planes (CAPS2 bit18)
 VCSWP = false                     # VOP CSWP, the bitonic compare-exchange stage (CAPS2 bit19)
+TGQ4 = false                      # TMM GRQ QUAD: a GRQ chunk's four quarters an advance (CAPS2 bit20)
 DSTEP = false
 STREAM = false
 SEQ_WC = false                  # the sequencer's wait entries (WAITC, EXPERIMENTAL: docs/seq_vpu.md):

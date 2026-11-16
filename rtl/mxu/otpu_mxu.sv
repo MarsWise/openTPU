@@ -132,6 +132,9 @@ module otpu_tmm_gsc
         m_cmd.w7 = 32'd16;
         // (CQ GRQ, 2-bit codes: the LUT's entries, the same block-major layout; kv6.py)
         m_cmd.w4 = {cq, 2'd0, 1'b1, 4'd0, 8'd1, 2'b00, held.w4[15:2]};
+        // GRQ QUAD (the GSC TMM's flag bit 4, M 1, not CQ): the subcommand's four quarters in
+        // one advance (the MXU's cmd_gq4)
+        m_cmd.flags[4] = held.flags[4] && !cq;
       end
     end
   end
@@ -207,7 +210,8 @@ module otpu_tmm_gsc
     if (start && gsc && !cmd.w4[30] && (cmd.w4[29] && !(cmd.w4[26] && !cmd.w4[27] && !cmd.w4[28]) &&
         (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) || cmd.w4[27] && cmd.w4[28] && (cmd.w4[29] || cmd.w4[26])))
       $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; GRQ only with 2-bit CQ (T5: BIN + CQ4 alone)");
-    if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[4:3] != 0 || cmd.flags[0] ||
+    if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[3] || cmd.flags[0] ||
+        (cmd.flags[4] && (!cmd.w4[28] || cmd.w4[27] || cmd.w6[23:16] != 8'd1 || cmd.flags[2])) ||
         cmd.w4[31:30] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
         cmd.w4[15:0] == 0 ||
         (cmd.w4[28] ? (cmd.w4[26] || cmd.w4[1:0] != 0 || cmd.w2[3:0] != 0 || cmd.w7[3:0] != 0 ||
@@ -337,9 +341,16 @@ module otpu_mxu
   // TMM QUAD (the ternary K-split by four; TMM's weight-format field is reserved, its bit4 the
   // flag): a chunk's four K blocks in one advance, column j + q*M taking block 4c + q from ACT row
   // j + q*M (QACT DUP4), 4M <= MCOLS; the four partners' integers are added before the result FIFO
-  wire cmd_quad = cmd_ternary && cmd.flags[4];
   // TMM GRQ: the adapter's block-major subcommand (four output rows a chunk, one per group)
   wire cmd_grq = cmd_ternary && !cmd_binary && !cmd_t5 && cmd.w4[28];
+  wire cmd_quad = cmd_ternary && cmd.flags[4] && !cmd_grq;
+  // GRQ QUAD (a GRQ subcommand with flag bit 4; M 1, ternary codes): the chunk's four quarters
+  // in one advance instead of four replay groups. Column q takes quarter q against the same ACT
+  // block (the row's copies in ACT rows 0..3: QACT DUP4, as TMM QUAD's), nothing is added across
+  // the columns: column q's integer is output 4i + q's, scaled by Sw word q (the result row
+  // carries the line's four Sw) and drained to out + 4i + q. The fp32 math per output is GRQ's.
+  wire cmd_gq4 = cmd_grq && cmd.flags[4];
+  wire cmd_aq = cmd_quad || cmd_gq4;       // the array takes four quarters an advance
   // TMM CQ (the adapter's subcommands: word 4 bit 31; bit 29 CQ4): codes through the LUT
   wire cmd_cq = cmd_ternary && cmd.w4[31];
   wire cmd_cq4 = cmd_cq && !cmd_binary && cmd.w4[29];
@@ -370,6 +381,8 @@ module otpu_mxu
                     cmd_pair || cmd_quad || int'(cmd.w6[23:16]) > MCOLS || cmd.w7 != 32'd16 ||
                     cmd.w2[3:0] != 0))
       $fatal(1, "otpu_mxu: TMM GRQ needs RSC, KB 1, M <= MCOLS and 16-byte scale rows");
+    if (cmd_gq4 && (cmd.w6[23:16] != 8'd1 || MCOLS < 4 || cmd_cq || cmd.flags[2] || cmd.flags[3]))
+      $fatal(1, "otpu_mxu: TMM GRQ QUAD needs M 1, MCOLS >= 4, ternary codes, no RMAX / ASCALE");
     if (int'(cmd.w6[23:16]) > ROWS) $fatal(1, "otpu_mxu: M %0d > ROWS %0d", cmd.w6[23:16], ROWS);
     if (int'(cmd.w6[23:16]) > MCOLS &&
         (cmd_binary ? (int'(cmd.w4[23:16]) + 7) / 8 :
@@ -444,6 +457,8 @@ module otpu_mxu
     logic [MCOLS-1:0][31:0] jo;        // j * ors
     logic [7:0]       G;               // groups: ceil(M / MCOLS) (GRQ: 4, the quarters)
     logic             grq;             // GRQ: groups are a chunk's quarters (output rows 4i + q)
+    logic             gq4;             // GRQ QUAD: one group, column q the quarter (output 4i + q)
+    logic             aq;              // the array reads four quarters an advance (QUAD, GRQ QUAD)
     logic [2:0]       rstep;           // drain address step to the next weight row (GRQ: 4)
     logic [MW-1:0]    Mg;              // results of a group not the row's last (GRQ: M)
     logic [MW:0]      stg;             // the first drain step of such a group (dstep(Mg, run))
@@ -480,15 +495,15 @@ module otpu_mxu
                     cmd_ternary ? {1'b0, cmd.w4[25:24]} : 3'b000;
     for (int j = 0; j < MCOLS; j++) begin
       cmd_e.hi[j] = cmd_pair && 32'(j) >= 32'(cmd.w6[23:16]);
-      cmd_e.qs[j] = !cmd_quad ? {1'b0, cmd_e.hi[j]} :
+      cmd_e.qs[j] = !cmd_aq ? {1'b0, cmd_e.hi[j]} :
                     (32'(j) >= 3 * 32'(cmd.w6[23:16])) ? 2'd3 :
                     (32'(j) >= 2 * 32'(cmd.w6[23:16])) ? 2'd2 :
                     (32'(j) >= 32'(cmd.w6[23:16])) ? 2'd1 : 2'd0;
-      if (cmd_quad && 32'(j) >= 4 * 32'(cmd.w6[23:16])) cmd_e.qs[j] = 2'd0;
+      if (cmd_aq && 32'(j) >= 4 * 32'(cmd.w6[23:16])) cmd_e.qs[j] = 2'd0;
     end
     cmd_e.mxo   = cmd.w3 + 32'(cmd.w6[23:16]) * 32'(cmd.w6[15:0]);
     cmd_e.M     = cmd.w6[23:16];
-    cmd_e.run   = drain_run(cmd.w6[15:0]);
+    cmd_e.run   = drain_run(cmd_gq4 ? 16'd1 : cmd.w6[15:0]);   // (GRQ QUAD: out + 4i + q)
     cmd_e.ab    = cmd.w6[31:24];
     cmd_e.unit  = cmd.flags[0];
     cmd_e.rsc   = cmd.flags[7] && !cmd.flags[0];
@@ -498,15 +513,18 @@ module otpu_mxu
     cmd_e.asc   = cmd.flags[3];
     cmd_e.go    = 1'b0;
     cmd_e.asa   = cmd.w2;
-    for (int j = 0; j < MCOLS; j++) cmd_e.jo[j] = 32'(j) * 32'(cmd.w6[15:0]);
+    for (int j = 0; j < MCOLS; j++) cmd_e.jo[j] = cmd_gq4 ? 32'(j) : 32'(j) * 32'(cmd.w6[15:0]);
     g = (int'(cmd.w6[23:16]) + MCOLS - 1) / MCOLS;
     if (g < 1) g = 1;
-    if (cmd_grq) g = 4;
+    if (cmd_grq) g = cmd_gq4 ? 1 : 4;
     cmd_e.G     = 8'(g);
     cmd_e.grq   = cmd_grq;
+    cmd_e.gq4   = cmd_gq4;
+    cmd_e.aq    = cmd_aq;
     cmd_e.rstep = cmd_grq ? 3'd4 : 3'd1;
-    cmd_e.Ml    = cmd_grq ? MW'(cmd.w6[23:16]) : MW'(int'(cmd.w6[23:16]) - (g - 1) * MCOLS);
-    cmd_e.Mg    = cmd_grq ? MW'(cmd.w6[23:16]) : MW'(MCOLS);
+    cmd_e.Ml    = cmd_gq4 ? MW'(4) : cmd_grq ? MW'(cmd.w6[23:16]) :
+                  MW'(int'(cmd.w6[23:16]) - (g - 1) * MCOLS);
+    cmd_e.Mg    = cmd_gq4 ? MW'(4) : cmd_grq ? MW'(cmd.w6[23:16]) : MW'(MCOLS);
     cmd_e.gs    = cmd_grq ? 32'd1 : 32'(MCOLS) * 32'(cmd.w6[15:0]);
     cmd_e.g1    = (g == 1);
     cmd_e.dnl   = (cmd_e.run < cmd_e.Ml) ? cmd_e.run : cmd_e.Ml;
@@ -515,7 +533,7 @@ module otpu_mxu
     // the ACT RAM columns its advances read: every column with replay (G > 1), else rows j < M
     // (PAIR: and the high rows j < 2M); the others are no output's
     for (int j = 0; j < MCOLS; j++)
-      cmd_e.cm[j] = (g > 1 && !cmd_grq) || 32'(j) < (cmd_quad ? 32'd4 : cmd_pair ? 32'd2 : 32'd1) *
+      cmd_e.cm[j] = (g > 1 && !cmd_grq) || 32'(j) < (cmd_aq ? 32'd4 : cmd_pair ? 32'd2 : 32'd1) *
                                      32'(cmd.w6[23:16]);
   end
 
@@ -551,6 +569,7 @@ module otpu_mxu
   wire        c_binary = pop_e.binary;
   wire [MCOLS-1:0] c_hi = pop_e.hi;
   wire        c_quad = pop_e.quad;
+  wire        c_aq = pop_e.aq;
   wire [MCOLS-1:0][1:0] c_qs = pop_e.qs;
   wire [7:0]  c_M = h.M, c_ab = pop_e.ab;
   wire [7:0]  p_M = pop_e.M, p_G = pop_e.G;
@@ -887,7 +906,8 @@ module otpu_mxu
   // cycle to S0's chunk, the records registered: asc0)
   assign a0 = act_data;
   logic [MCOLS*64-1:0] asc0;
-  logic cu0p, pr0p, rs0p, grq0p, qd0p;
+  logic cu0p, pr0p, rs0p, grq0p, qd0p, g40p;
+  logic g40;                                // GRQ QUAD: the four columns are four outputs
   logic [1:0] gq0p, wf0p;
   logic [MCOLS-1:0] hi0p;
   logic [MCOLS-1:0][1:0] qs0p;
@@ -1006,11 +1026,11 @@ module otpu_mxu
       m0p.o <= c_pair && !(last_k && c_KB[0]);
       m0p.ts <= pop_e.t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
                {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
-      m0p.qd <= c_quad;
+      m0p.qd <= c_aq;
       m0p.cq <= pop_e.cq;
       m0p.c4 <= pop_e.cq4;
       m0p.t5 <= pop_e.t5;
-      m0p.ov <= !(last_k && pop_e.kr != 2'd0) ? 4'b1111 :
+      m0p.ov <= (pop_e.gq4 || !(last_k && pop_e.kr != 2'd0)) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
     end
     cu0p <= c_unit;
@@ -1021,7 +1041,8 @@ module otpu_mxu
     pr0p <= c_pair;
     hi0p <= c_hi;
     qs0p <= c_qs;
-    qd0p <= c_quad;
+    qd0p <= c_aq;
+    g40p <= pop_e.gq4;
     M0p <= p_M;
   end
   always_ff @(posedge clk) begin
@@ -1035,6 +1056,7 @@ module otpu_mxu
     hi0 <= hi0p;
     qs0 <= qs0p;
     qd0 <= qd0p;
+    g40 <= g40p;
     M0 <= M0p;
     asc0 <= act_scale;
   end
@@ -1131,9 +1153,11 @@ module otpu_mxu
   wire [4:0] wk = m0.ternary ? 5'd11 :
                   (wf0 == WF_W8) ? 5'd16 : (wf0 == WF_NV) ? 5'd13 : 5'd11;
   logic [31:0] sw1;
+  logic [95:0] swx1;                        // GRQ QUAD: Sw of quarters 3, 2, 1 (sw1: quarter 0's)
   logic [MCOLS-1:0][31:0] sap1;
   always_ff @(posedge clk) begin
     sw1 <= sw0;
+    swx1 <= {sr1[31:0], sr0[31:0], sr0[63:32]};
     for (int j = 0; j < MCOLS; j++) sap1[j] <= fp_pow2m(asc0[j*64 +: 32], wk);
   end
 `ifndef SYNTHESIS
@@ -1168,7 +1192,7 @@ module otpu_mxu
       {wp_qd, wp_tn, wp_bn, wp_h, wp_pr, wp_cq, wp_c4, wp_t5, wp_ts, wp_wf};
   end
   always_ff @(posedge clk) begin
-    wp_qd <= pop && c_quad;
+    wp_qd <= pop && c_aq;
     wp_tn <= pop && c_ternary;
     wp_bn <= pop && c_binary;
     wp_cq <= pop && pop_e.cq;
@@ -1280,13 +1304,15 @@ module otpu_mxu
   logic             tl_v, tl_pr;
   logic [7:0]       tl_M;
   logic [31:0]      tl_sw;
+  logic [95:0]      tl_swx;
   logic [MCOLS-1:0][31:0] tl_sa;
-  logic             tl_qd;
+  logic             tl_qd;                  // QUAD: the four partners are added (not GRQ QUAD's)
   otpu_delay #(.W(1 + 1 + 1 + 8), .N(LROW)) u_tl (.clk, .en(1'b1),
-                                                 .d({m0.v && m0.last, pr0, qd0, M0}),
+                                                 .d({m0.v && m0.last, pr0, qd0 && !g40, M0}),
                                                  .q({tl_v, tl_pr, tl_qd, tl_M}));
-  otpu_skew #(.W(32 + MCOLS * 32), .N(LROW - 1)) u_ts (.clk, .en(1'b1), .d({sw1, sap1}),
-                                                      .q({tl_sw, tl_sa}));
+  otpu_skew #(.W(96 + 32 + MCOLS * 32), .N(LROW - 1)) u_ts (.clk, .en(1'b1),
+                                                           .d({swx1, sw1, sap1}),
+                                                           .q({tl_swx, tl_sw, tl_sa}));
   // Two-stage integer reduction: select partners and add pairs, then add the partial sums.
   // All modes take the same latency, with scales and valid alongside the data. Addition is
   // modulo 2^48 just as before; a new row can enter every cycle, including across commands.
@@ -1294,6 +1320,7 @@ module otpu_mxu
   logic [MCOLS-1:0][47:0] part_lo, part_hi;
   logic [MCOLS-1:0][31:0] part_sa;
   logic [31:0]      part_sw;
+  logic [95:0]      part_swx, rswx;
   logic             rv;
   logic [MCOLS-1:0][47:0] rowi;
   logic [MCOLS-1:0][31:0] rsa;
@@ -1318,9 +1345,10 @@ module otpu_mxu
       part_hi[j] <= c + d;
       rowi[j] <= part_lo[j] + part_hi[j];
     end
-    part_sa <= tl_sa; part_sw <= tl_sw;
+    part_sa <= tl_sa; part_sw <= tl_sw; part_swx <= tl_swx;
     rsa <= part_sa;
     rsw <= part_sw;
+    rswx <= part_swx;
   end
 
   // ================================================================== result FIFO
@@ -1329,8 +1357,8 @@ module otpu_mxu
   // and rf_q + 2 (a row written this cycle bypassed) with no grant on the address; each cycle the
   // head row and the row after it are registered (rh0, rh1) and the last pop picks the head
   // (rfh). One RAM copy per read address: a single read port each infers as LUT RAM.
-  // A row: MCOLS integers, MCOLS Sa', Sw
-  localparam int RW_ = MCOLS * 48 + MCOLS * 32 + 32;
+  // A row: MCOLS integers, MCOLS Sa', Sw, and GRQ QUAD's Sw of quarters 1..3
+  localparam int RW_ = MCOLS * 48 + MCOLS * 32 + 32 + 96;
   logic [RFW-1:0] rf_q, rf_t;
   logic [RFW:0]   rf_n;
   logic           rf_hs;                     // the last cycle popped a row
@@ -1339,7 +1367,7 @@ module otpu_mxu
   logic [2:0][RW_-1:0] rq;                   // rows rf_q + c, as they are after this cycle
   logic [2:0][RFW-1:0] rf_qc;
   always_comb begin
-    rowp = {rsw, rsa, rowi};
+    rowp = {rswx, rsw, rsa, rowi};
     for (int c = 0; c < 3; c++) rf_qc[c] = rf_q + RFW'(c);
   end
   // each copy has its own write enable and address (replicas of rv and rf_t): one register
@@ -1387,6 +1415,7 @@ module otpu_mxu
   wire [MCOLS-1:0][47:0] rfh_i  = rfh[0 +: MCOLS * 48];
   wire [MCOLS-1:0][31:0] rfh_sa = rfh[MCOLS * 48 +: MCOLS * 32];
   wire [31:0]            rfh_sw = rfh[MCOLS * 80 +: 32];
+  wire [3:0][31:0]       rfh_sw4 = rfh[MCOLS * 80 +: 128];   // GRQ QUAD: column q's Sw
 
   // ================================================================== drain
   // lanes this cycle: results dj .. dj+ncnt-1 of the head row, stopping at a bank conflict
@@ -1503,7 +1532,7 @@ module otpu_mxu
   logic [NL-1:0][7:0]  lo_col;
   logic [NL-1:0][47:0] p1_x;
   logic [NL-1:0][31:0] p1_sa;
-  logic [31:0]         p1_sw;
+  logic [NL-1:0][31:0] p1_sw;               // a lane's Sw: the row's (GRQ QUAD: its column's)
   f32_t                lo_y [NL];
   always_ff @(posedge clk)
     if (rst) p1 <= '0;
@@ -1515,10 +1544,11 @@ module otpu_mxu
     end
   always_ff @(posedge clk)
     if (ea) begin
-      p1_x <= dx_l; p1_sa <= dsa_l; p1_sw <= rfh_sw;
+      p1_x <= dx_l; p1_sa <= dsa_l;
+      for (int k = 0; k < NL; k++) p1_sw[k] <= h.gq4 ? rfh_sw4[2'(dj) + 2'(k)] : rfh_sw;
     end
   for (genvar k = 0; k < NL; k++) begin : g_lane
-    otpu_mx_lane #(.LM(LM)) u_l (.clk, .en(ea), .x(p1_x[k]), .sw(p1_sw), .sa(p1_sa[k]),
+    otpu_mx_lane #(.LM(LM)) u_l (.clk, .en(ea), .x(p1_x[k]), .sw(p1_sw[k]), .sa(p1_sa[k]),
                                  .y(lo_y[k]));
   end
   // the picks' addresses and columns in a delay line; their valid and lane bits in reset
@@ -2219,7 +2249,7 @@ module otpu_mxu
         dj <= '0;
         for (int j = 0; j < MCOLS; j++) begin
           logic [31:0] a;
-          a = (start && q_n == 2'd1) ? cmd.w3 + 32'(j) * 32'(cmd.w6[15:0]) : n.out + n.jo[j];
+          a = (start && q_n == 2'd1) ? cmd.w3 + cmd_e.jo[j] : n.out + n.jo[j];
           dad[j] <= a;
           drow[j] <= a;
           if (j < NL) dal[j] <= a;
@@ -2235,7 +2265,7 @@ module otpu_mxu
       if (start && q_n == 0) begin
         for (int j = 0; j < MCOLS; j++) begin
           logic [31:0] a;
-          a = cmd.w3 + 32'(j) * 32'(cmd.w6[15:0]);
+          a = cmd.w3 + cmd_e.jo[j];            // (j * ors; GRQ QUAD: j)
           dad[j] <= a;
           drow[j] <= a;
           if (j < NL) dal[j] <= a;
@@ -2279,7 +2309,7 @@ module otpu_mxu
         pop_q <= pnx ? npx : hpx;
         for (int j = 0; j < MCOLS; j++) begin
           pe_qs[j] <= pnx ? npx.qs[j] : hpx.qs[j];
-          pe_qd[j] <= pnx ? npx.quad : hpx.quad;
+          pe_qd[j] <= pnx ? npx.aq : hpx.aq;
         end
       end
       pn <= pnx;
@@ -2310,7 +2340,7 @@ module otpu_mxu
       end
     if (q_n != 0 && !cl_ld && pop_q != (pn ? n : h))
       $fatal(1, "otpu_mxu: pop_q is not the pop head's entry");
-    if (q_n != 0 && (pe_qs != pop_q.qs || pe_qd != {MCOLS{pop_q.quad}}))
+    if (q_n != 0 && (pe_qs != pop_q.qs || pe_qd != {MCOLS{pop_q.aq}}))
       $fatal(1, "otpu_mxu: the PEs' select copies %h / %b are not pop_q's %h / %b", pe_qs, pe_qd,
              pop_q.qs, pop_q.quad);
     if (32'(tg_n) > TD) $fatal(1, "otpu_mxu: %0d port A requests in flight", tg_n);

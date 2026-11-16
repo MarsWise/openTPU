@@ -297,6 +297,15 @@ scale-line reads instead of the row-major layout's N of each. With `N % 4 == 0` 
 `KB % 4 == 0` the planes take exactly the row-major matrix's bytes
 (`quant.pack_ternary_gsc_grq`), so the native Bonsai image keeps its addresses.
 
+`GRQ QUAD` (GRQ with the QUAD flag, CAPS2 bit 20, `Config.TGQ4`; M 1, ternary codes, no RMAX):
+the MXU takes a chunk's four quarters in one advance instead of four replay groups. Column `q`
+reads quarter `q` against the row's ACT block (the row's copies in ACT rows 0..3: QACT DUP4, as
+TMM QUAD's), nothing is added across the columns, and column `q`'s integer is output `4i+q`'s:
+scaled by Sw word `q` (the result row carries the line's four Sw words) and drained to
+`out + 4i + q`. GRQ's results bit for bit, a block in N/4 advances instead of N (a decode
+step's projections: one row). The compiler emits it for a one-row GRQ `dot` whose operand's QACT
+wrote the copies (`Stationary.quad`).
+
 `BIN` (`w4[26]`, CAPS2 bit 6) stores eight signs per byte, low bit first: 0 is -1 and 1 is
 +1. A row occupies `ceil(KB/8)*D` bytes, padded to a D-byte boundary. BIN may use UNIT or
 RSC; BIN+GSC also requires CAPS2 bit 7 (TBGSC), because earlier BIN/TGSC firmware does
