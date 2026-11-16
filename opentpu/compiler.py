@@ -2382,8 +2382,10 @@ class Builder:
                         st.pair and getattr(self.cfg, "TPAIR", False)
                     # GRQ QUAD (Config.TGQ4): a GRQ chunk's four quarters an advance, for one
                     # row whose QACT wrote its DUP4 copies (decode: M 1), GRQ's results
+                    # (OTPU_GQ4=0: plain GRQ on the same firmware, for an A / B of the two)
                     gq4 = w.grq and not w.cq and st.quad and mc == 1 and not rowmax and \
-                        getattr(self.cfg, "TGQ4", False) and self.cfg.MCOLS >= 4
+                        getattr(self.cfg, "TGQ4", False) and self.cfg.MCOLS >= 4 and \
+                        os.environ.get("OTPU_GQ4", "1") != "0"
                     ins = I.tmm(sa + (k0 * w.rs if w.grq else (k0 // chunk_blocks) * self.cfg.D),
                                 ssa + (k0 * w.srs if w.grq else 4 * k0 if w.gsc else 0),
                                 out.base + m0 * ors, N, k1 - k0, w.rs, ors, mc, ab + k0,
