@@ -5,7 +5,8 @@ rem Updates C:\myOpenTPU\openTPU-r8 to origin/feature/r7-fpga (fast-forward only
 rem TGQ4, then r8_build.cmd (otpu.bit only if setup / hold pass). Nothing is loaded into the FPGA.
 setlocal
 set "R=C:\myOpenTPU\openTPU-r8"
-tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo A Vivado process is running: wait for it or close it first. & pause & exit /b 1)
+rem   r8_build_c2.cmd parallel   start although another Vivado is running (the 1a77396a build in its last steps)
+if /i "%~1"=="parallel" (set OTPU_ALLOW_PARALLEL=1) else (tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo A Vivado process is running: wait for it, or run "r8_build_c2.cmd parallel". & pause & exit /b 1))
 git -C "%R%" fetch origin feature/r7-fpga || goto :err
 git -C "%R%" status --porcelain --untracked-files=no | findstr . >nul && (echo %R% has local changes: not updated & goto :err)
 git -C "%R%" checkout -q feature/r7-fpga && git -C "%R%" merge -q --ff-only origin/feature/r7-fpga || goto :err

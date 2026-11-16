@@ -17,7 +17,8 @@ findstr /c:"VAFF" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no VAFF
 findstr /c:"QST6" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no QST6 capability & pause & exit /b 1)
 findstr /c:"VCSWP" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no VCSWP capability & pause & exit /b 1)
 findstr /c:"TGQ4" rtl\shell\otpu_ctrl.sv >nul || (echo This checkout has no TGQ4 capability & pause & exit /b 1)
-if not defined PLAN (
+rem OTPU_ALLOW_PARALLEL=1: start while another Vivado runs (a build in its last steps: memory for two)
+if not defined PLAN if not "%OTPU_ALLOW_PARALLEL%"=="1" (
     tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo a Vivado process is running: stop & pause & exit /b 1)
 )
 for /f %%h in ('git rev-parse --short^=8 HEAD') do set REV=%%h
