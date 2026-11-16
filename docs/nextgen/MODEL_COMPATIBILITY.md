@@ -9,16 +9,16 @@ over a long run is open; r8 2c800a8f has the MXU k0 erratum, see PROGRESS.md).
 |---|---|---|---|---|
 | Qwen3 tiny, KV int8 / kv6 / k6v6 | synthetic | PHYS exec r8, == ISA | launches | KV6 quality on a real model |
 | BitNet b1.58 2B4T (vLLM, 4 slots) | HF microsoft | PHYS exec r8 | tokenizer, scheduler | long run, ECC 0 / 0 |
-| Bonsai 2 4B (GRQ) | prism-ml 2-bit | PHYS exec r8 (logits) | tokenizer | generation, tok/s |
-| Qwen3-0.6B, Qwen3.5-0.8B / 2B, LFM2.5-230M | HF | PHYS r5; r8 NOT RUN | tokenizer | r8_speed.cmd |
+| Bonsai 2 4B (GRQ) | prism-ml 2-bit | PHYS exec r8: logits; chat 3.43 tok/s (16.11; r5 0.68) | tokenizer | C2 decision; soak |
+| Qwen3-0.6B, Qwen3.5-0.8B / 2B, LFM2.5-230M | HF | PHYS exec r8 (16.11): 25.6 / 20.1 / 8.4 / 66.9 tok/s decode; 0.8B had 1 SEC (not trusted) | tokenizer | repeat 0.8B; soak |
 | Qwen3.5-4B, LFM2-2.6B, LFM2.5-8B-A1B, gemma-4, SmolLM3, Phi-4-mini | HF cache on the host | SOURCE INTEGRATED | - | first card run |
 | YOLOX-Nano | Megvii | PHYS exec r8 (one frame), strict FPGA-only | image decode | COCO mAP on r8 (r5: 0.2825) |
 | Diffusion Policy pusht | lerobot | PHYS exec r8 | 10790 launches / 100 steps | long run; device loop |
 | SmolVLA base | lerobot | PHYS exec r8 | 12948 launches | action chunk buffer; device loop |
 | Cactus Needle 26M (int8, CQ4) | Cactus-Compute | PHYS exec r8 (16.11): card == ISA, token picked on the card, ECC 0 / 0 | tokenizer, a launch a token | device token loop |
 | LFM3 text decoder (24 layers) | lfm3-omni, rows extracted | PHYS exec r8 (16.11): cos 0.9999, 8.26 tok/s picked on the card, ECC 0 / 0 | tokenizer | chat, long context (past 255), soak |
-| MiniCPM5-2B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd minicpm5 |
-| Granite 4.2 3B | GGUF Q4_K_M | ISA (real weights, 6 tokens) | tokenizer | r8_llm.cmd granite |
+| MiniCPM5-2B | GGUF Q4_K_M | PHYS exec r8 (16.11): cos >= 0.9992, 6.73 tok/s, ECC 0 / 0 | tokenizer | chat template, soak |
+| Granite 4.2 3B | GGUF Q4_K_M | PHYS exec r8 (16.11), MLP NVFP4 / FP4: cos 0.89 (BOS) .. 0.99, 6.18 tok/s, ECC 0 / 0 | tokenizer | int8 MLP on the card (accuracy) |
 | Bonsai 2 2B | PTQ1_0 (T5) | ISA (real weights) | tokenizer | card |
 | Ouro 1.4B | HF | ISA (8 layers int8; 24 with int4 MLP) | - | 24 layers int8, early exit |
 | Dory 4B | GGUF Q5_K_M | ISA (subnet 4 + 16 + 4) | - | whole model |
