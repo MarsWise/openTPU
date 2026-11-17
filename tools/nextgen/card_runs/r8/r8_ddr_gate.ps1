@@ -1,9 +1,9 @@
-# Claude: reads r8_ddr_diag.log and r8_ddr_check.log (this folder) and says whether DRAM was clean:
+# Claude: reads r8_ddr_diag.log, r8_ddr_split.log and r8_ddr_check.log (this folder; -Logs for others) and says whether DRAM was clean:
 # every ECC counter 0 / 0, no run with ECC errors, no wrong word, no failure, judged from the point the
 # taps were centred under load (loadcal, which every run on an r8 card now gets) to the end; errors at
 # the calibration's own taps before it are counted, not judged. Exit 0 = clean,
 # 1 = not clean (the offending lines are printed), 2 = a log is missing. Reads files only.
-param([string[]]$Logs = @('r8_ddr_diag.log', 'r8_ddr_check.log'))
+param([string[]]$Logs = @('r8_ddr_diag.log', 'r8_ddr_split.log', 'r8_ddr_check.log'))
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bad = @()
 foreach ($l in $Logs) {
@@ -23,6 +23,7 @@ foreach ($l in $Logs) {
         elseif ($line -match 'ECC counters meanwhile.*ch0 (\d+) / (\d+), ch1 (\d+) / (\d+)' -and
                 ([int]$Matches[1] + [int]$Matches[2] + [int]$Matches[3] + [int]$Matches[4]) -gt 0) { $why = 'ECC counters' }
         elseif ($line -match '(\d+) with ECC errors' -and [int]$Matches[1] -gt 0) { $why = 'runs with ECC errors' }
+        elseif ($line -match '^run_rows split \(' -and (([regex]::Matches($line, '(\d+) / \d+ / \d+') | Where-Object { [int]$_.Groups[1].Value -gt 0 }).Count -gt 0)) { $why = 'run_rows split: runs with ECC errors' }
         elseif ($line -match 'wrong in read 1 / read 2 / both (\d+) / (\d+)' -and ([int]$Matches[1] + [int]$Matches[2]) -gt 0) { $why = 'wrong words' }
         elseif ($line -match '(\d+) lane-beats wrong' -and [int]$Matches[1] -gt 0) { $why = 'BIST lanes' }
         if ($why -and $why -ne 'not run' -and -not $on) { $pre++; continue }

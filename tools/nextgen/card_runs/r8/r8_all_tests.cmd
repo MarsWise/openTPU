@@ -9,6 +9,7 @@ rem   6 r8_speed       chat speed: Qwen3, Qwen3.5-0.8B / 2B, LFM2.5, BitNet, Bon
 rem   7 r8_ttft        time to first token, cold / warm program cache, 4-bit Qwen3
 rem The DDR3 step under the loadcal kind only (KINDS=ternary:4; the no-loadcal phase fails by
 rem design): set KINDS before running for another set. Takes sync_next.bundle first, if it is there.
+rem SKIP_DDR=1: without step 3 (r8_after_build.cmd ran the DDR3 steps already).
 rem The logs are copied to runs\<date-time>\ beside this file. No bitstream load, no rescan.
 rem Do not press Ctrl+C in this window (it interrupts the step; its host side goes on): to copy, select
 rem with the mouse and press Enter.
@@ -24,7 +25,7 @@ echo === logs: %OUT%
 call :step r8_models r8_models.log
 call :step r8_card_tests r8_card_tests.log
 if exist "%~dp0r8_card_tests.tgz" copy /y "%~dp0r8_card_tests.tgz" "%OUT%\" >nul
-call :step r8_ddr_check r8_ddr_check.log
+if not defined SKIP_DDR call :step r8_ddr_check r8_ddr_check.log
 call :step r8_needle r8_needle.log
 call :step "r8_llm lfm3" r8_llm_lfm3.log
 call :step "r8_llm minicpm5" r8_llm_minicpm5.log

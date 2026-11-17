@@ -1,11 +1,14 @@
 @echo off
-rem Claude: everything after a new r8 build (r8_build_ddr.cmd), in order, about 1.5 h before the long tests:
+rem Claude: everything after a new r8 build (r8_build_c3.cmd and the like), in order: about 2.5 h of DDR3
+rem checks, then every card test (6-8 h), unattended after the two questions in 1 and 2:
 rem   1 load the build over JTAG (asks yes)             r8_load_newest.cmd <build>
 rem   2 PCIe back on the host (asks the sudo password)   r8_restore_pcie.cmd
-rem   3 DDR3 diagnosis, ~25 min                          r8_ddr_diag.cmd
-rem   4 DDR3 soak, 4 passes, idle taps and loadcal, ~50 min   r8_ddr_check.cmd
-rem   5 the gate: every ECC counter 0 / 0 in 3 and 4      r8_ddr_gate.ps1
-rem   6 only if clean: every card test, 6-9 h            r8_all_tests.cmd
+rem   3 DDR3 diagnosis (written / read wrong, BIST lanes), ~25 min   r8_ddr_diag.cmd
+rem   3b run_rows split by phase under loadcal ternary:4, 3 passes, ~10 min   r8_ddr_split.cmd
+rem   4 DDR3 soak, 4 passes under loadcal ternary:4, ~1.7 h      r8_ddr_check.cmd
+rem   5 the verdict: every ECC counter 0 / 0 in 3, 3b and 4 (r8_ddr_gate.ps1): written to gate.txt
+rem   6 every card test (r8_all_tests.cmd without its DDR3 step): run whatever the verdict, the
+rem     results then marked by it (a step with any ECC error is NOT TRUSTED)
 rem Logs are copied to runs\after_<build>_<time>\. No rescan or load other than 1 and 2.
 rem   r8_after_build.cmd              the newest build with an otpu.bit
 rem   r8_after_build.cmd 58fecf08     that build
@@ -40,9 +43,16 @@ call "%~dp0r8_ddr_diag.cmd" < nul
 copy /y "%~dp0r8_ddr_diag.log" "%OUT%\" >nul
 
 echo.
-echo ================ 4. r8_ddr_check (4 passes)
+echo ================ 3b. r8_ddr_split (loadcal ternary:4, 3 passes)
+set PASSES=3
+set KINDS=ternary:4
+call "%~dp0r8_ddr_split.cmd" < nul
+copy /y "%~dp0r8_ddr_split.log" "%OUT%\" >nul
+
+echo.
+echo ================ 4. r8_ddr_check (4 passes, loadcal ternary:4)
 set PASSES=4
-set KINDS=
+set KINDS=ternary:4
 call "%~dp0r8_ddr_check.cmd" < nul
 copy /y "%~dp0r8_ddr_check.log" "%OUT%\" >nul
 
@@ -51,16 +61,13 @@ echo ================ 5. gate
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0r8_ddr_gate.ps1" > "%OUT%\gate.txt"
 set GATE=%errorlevel%
 type "%OUT%\gate.txt"
-if not "%GATE%"=="0" (
-  echo.
-  echo DRAM is not clean on %WANT%: the long tests are not started. Send the folder %OUT%
-  pause
-  exit /b 1
-)
-
+if not "%GATE%"=="0" (echo DRAM NOT CLEAN on %WANT%: the card tests run anyway, their results NOT TRUSTED where ECC moved) else (echo DRAM CLEAN on %WANT%)
 echo.
-echo ================ 6. every card test (6-9 h; do not close this window)
+echo ================ 6. every card test (6-8 h; do not close this window, do not press Ctrl+C)
+set SKIP_DDR=1
+set PASSES=4
+set KINDS=ternary:4
 call "%~dp0r8_all_tests.cmd"
-echo === done. Logs: %OUT% and runs\ (the newest folder of r8_all_tests)
+echo === done. DDR3 verdict: & type "%OUT%\gate.txt" & echo Logs: %OUT% and runs\ (the newest folder of r8_all_tests)
 pause
 exit /b 0
