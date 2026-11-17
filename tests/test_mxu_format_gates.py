@@ -175,3 +175,24 @@ def test_bitnet_tmm_plain_pair_quad_without_the_optional_decodes_rtl(have_verila
                                  uarch=OFF)
     np.testing.assert_array_equal(tmems[0], ref.tmem)
     np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+def test_r8_card_check_area_refusals_on_a_card_without_t5_bin():
+    """area_refusals: a board whose CAPS2 lacks TD5 / TBIN / TBGSC refuses all three (the
+    host's checks, nothing written); one that has them loads them (the check then fails)."""
+    import importlib.util
+    from opentpu.host.board import Board
+    from opentpu.host.fake import FakeTransport
+    spec = importlib.util.spec_from_file_location("r8cc", ROOT / "tools/r8_card_check.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    c4 = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
+                             tcq=True))
+    got = m.area_refusals(c4)
+    assert [w for _, w, _ in got] == ["the area build refuses TMM T5",
+                                      "the area build refuses TMM BIN",
+                                      "the area build refuses TMM BIN GSC"]
+    assert all(ok for ok, _, _ in got), got
+    c3 = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
+                             tcq=True, td5=True, tbin=True, tbgsc=True))
+    assert not any(ok for ok, _, _ in m.area_refusals(c3))

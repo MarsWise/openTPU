@@ -72,6 +72,27 @@ def caps_checks(info: dict, sim: bool = False) -> list:
     return out
 
 
+def area_refusals(b) -> list:
+    """[(ok, what, detail)] on the area build (C4): the host refuses TMM T5 / BIN / BIN GSC
+    programs (Board.load_program's CAPS2 checks, before anything is written to the card)."""
+    from opentpu.host.board import ConfigMismatch
+    head = [I.ld(0, 0, 128), I.qact(0, 1, 0, 1, 128)]
+    progs = {"TMM T5": I.tmm(0x10000, 0x8000, 4000, 4, 5, 128, 4, 1, 0, 20, gsc=True,
+                             dense=True),
+             "TMM BIN": I.tmm(0x10000, 0x8000, 4000, 4, 8, 128, 4, 1, 0, 4, rsc=True,
+                              binary=True),
+             "TMM BIN GSC": I.tmm(0x10000, 0x8000, 4000, 4, 8, 128, 4, 1, 0, 32, gsc=True,
+                                  binary=True)}
+    out = []
+    for name, ins in progs.items():
+        try:
+            b.load(PROG_AT, head + [ins, I.halt()])
+            out.append((False, f"the area build refuses {name}", "loaded"))
+        except ConfigMismatch as e:
+            out.append((True, f"the area build refuses {name}", str(e)[:80]))
+    return out
+
+
 def run_case(b: Board, card, prog: list, image: np.ndarray) -> tuple[bool, str]:
     """A test's program and DRAM image on the card and on the ISA simulator (the card's
     configuration): TMEM cleared first, all of it stored to DUMP last; DRAM [0, ZERO) compared."""
@@ -191,6 +212,9 @@ def main() -> int:
           "cfg hash", hex((info.get("cfg") or {}).get("hash", 0)), flush=True)
     for ok, what, detail in caps_checks(info, a.sim):
         check(ok, what, detail)
+    if (info.get("cfg") or {}).get("hash", 0) == R8A_HASH:
+        for ok, what, detail in area_refusals(b):
+            check(ok, what, detail)
     try:
         check_hash(info)
         check(True, "CFG_HASH matches this host's Config")
