@@ -61,3 +61,66 @@ for {set so_i 1} {$so_on && $so_i <= $so_iters && $so_w < 0} {incr so_i} {
   set so_h $so_h1
 }
 puts "signoff_cleanup: done, WNS [otpu_so_ws -setup] ns, WHS [otpu_so_ws -hold] ns"
+
+# Stage 2, when a few endpoints still fail after phys_opt (r8 a1ba144b, 2026-11-17: one userclk2
+# endpoint inside the XDMA at -0.097 ns, 10 levels, 69% of it route, X76-X93 Y293-297; post-route
+# phys_opt "did not improve" it): per try, the failing paths' nets are unrouted and routed again
+# for the least delay (route_design -nets -delay), then a re-entrant route_design for whatever that
+# left open; then post_place_opt (it moves the critical cells of a routed design) and a re-entrant
+# route. Each try is kept only if the worst setup slack improved, every net is routed and hold is
+# not worse below zero; else the checkpoint before it is reopened. Nothing changes the netlist's
+# function. OTPU_SIGNOFF_STAGE2=0: off; up to OTPU_SIGNOFF_STAGE2_PATHS failing endpoints (20).
+set so2_on [expr {$so_on && (![info exists ::env(OTPU_SIGNOFF_STAGE2)] || $::env(OTPU_SIGNOFF_STAGE2) ne "0")}]
+set so2_max [expr {[info exists ::env(OTPU_SIGNOFF_STAGE2_PATHS)] && $::env(OTPU_SIGNOFF_STAGE2_PATHS) ne "" ? \
+                   $::env(OTPU_SIGNOFF_STAGE2_PATHS) : 20}]
+proc otpu_so_failing {n} {
+  return [get_timing_paths -quiet -setup -max_paths $n -nworst 1 -slack_lesser_than 0]
+}
+proc otpu_so_try {label body out} {
+  set w0 [otpu_so_ws -setup]; set h0 [otpu_so_ws -hold]
+  set ck $out/pre_signoff_stage2.dcp
+  file delete -force $ck
+  set keep 0
+  if {[catch {
+    write_checkpoint -force $ck
+    uplevel #0 $body
+    if {[otpu_so_open]} { route_design }
+    set w1 [otpu_so_ws -setup]; set h1 [otpu_so_ws -hold]; set o1 [otpu_so_open]
+    puts "signoff_cleanup stage 2 ($label): WNS $w0 -> $w1 ns, WHS $h0 -> $h1 ns, $o1 nets not routed"
+    set keep [expr {$w1 > $w0 && $o1 == 0 && ($h1 >= 0 || $h1 >= $h0)}]
+  } msg]} {
+    puts "CRITICAL WARNING: signoff_cleanup stage 2 ($label) failed: $msg"
+  }
+  if {!$keep && [file exists $ck]} {
+    puts "signoff_cleanup stage 2 ($label) not kept: reopened from $ck"
+    close_design
+    open_checkpoint $ck
+  }
+  return $keep
+}
+set so2_fail [otpu_so_failing [expr {$so2_max + 1}]]
+if {$so2_on && [otpu_so_ws -setup] < 0 && [llength $so2_fail] > 0 && [llength $so2_fail] <= $so2_max} {
+  puts "signoff_cleanup stage 2: [llength $so2_fail] failing endpoint(s)"
+  foreach so2_i {1 2} {
+    if {[otpu_so_ws -setup] >= 0} { break }
+    otpu_so_try "delay route $so2_i" {
+      set so2_nets [get_nets -quiet -of_objects [otpu_so_failing 20]]
+      set so2_nets [filter -quiet $so2_nets {TYPE != GLOBAL_CLOCK && TYPE != POWER && TYPE != GROUND}]
+      puts "signoff_cleanup stage 2: [llength $so2_nets] nets of the failing paths: unrouted, routed for delay"
+      route_design -unroute -nets $so2_nets
+      route_design -nets $so2_nets -delay
+    } $out
+  }
+  if {[otpu_so_ws -setup] < 0} {
+    otpu_so_try "post_place_opt" {
+      place_design -post_place_opt
+      route_design
+    } $out
+  }
+  if {[otpu_so_ws -setup] < 0} {
+    otpu_so_try "phys_opt AggressiveFanoutOpt" {
+      phys_opt_design -directive AggressiveFanoutOpt
+    } $out
+  }
+  puts "signoff_cleanup stage 2: done, WNS [otpu_so_ws -setup] ns, WHS [otpu_so_ws -hold] ns"
+}
