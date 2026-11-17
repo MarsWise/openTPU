@@ -4,7 +4,7 @@
 # on-card picks clean in 4 passes; run_rows (4 rows, logits to the host) 7 corrected; vLLM one
 # uncorrectable)? tools/ddr_diag.py steps, now with run_rows split in phases: the run alone, then
 # the host reads the logits three times, the ECC counters after each phase (verdict: the core's reads,
-# the host's C2H read path, or stored wrong). Phases now also the rows program WITHOUT the LM head. Per KINDS (default
+# the host's C2H read path, or stored wrong). Phases now also the run with ONE logit row (a quarter of the head's logit stores; the rows program without the head did not compile: TMEM 8 words short, 15:44). Per KINDS (default
 # "ternary:4 int8:4": loadcal under the BitNet steps' load, then under an int8 LM head's) selfcal +
 # loadcal, then the steps PASSES times (default 2). Volatile only; no bitstream load, no rescan, no mode registers. ~25 minutes.
 set -u

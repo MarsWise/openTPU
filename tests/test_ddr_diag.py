@@ -75,12 +75,3 @@ def test_split_verdict():
     sp = {"run": [1, 1, 0], "read 1": z(), "read 2": z(), "read 3": z()}
     assert "core" in split_verdict(sp)
 
-
-def test_split_verdict_no_head():
-    z = lambda: [0, 0, 0]
-    sp = {"no head": z(), "run": [3, 3, 0], "read 1": z(), "read 2": z(), "read 3": z()}
-    assert "only with the LM head" in dd.split_verdict(sp)
-    sp["no head"] = [1, 1, 0]
-    assert "also without" in dd.split_verdict(sp)
-    sp["run"] = z()
-    assert "without the LM head only" in dd.split_verdict(sp)
