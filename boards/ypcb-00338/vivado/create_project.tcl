@@ -201,6 +201,14 @@ foreach {knob name pat} {OTPU_TMEM_PBLOCK tmem *u_slice/u_tmem OTPU_XDMA_PBLOCK 
   puts $fh "set pb \[create_pblock otpu_$name\]"
   puts $fh "resize_pblock \$pb -add {$tpb}"
   puts $fh "set_property IS_SOFT false \$pb"
+  # not over another pblock's area (r8 58fecf08: the VPU's pblock over X0Y3 / X0Y4 took the sys
+  # reset's pblock (otpu_ddr_phy_place.tcl, rst_mid) as its child, and place_design crashed with
+  # an access violation in its first phase): each earlier pblock's ranges are cut out
+  puts $fh "foreach o \[get_pblocks -quiet\] {"
+  puts $fh "  if {\$o eq \$pb} { continue }"
+  puts $fh "  set g \[get_property GRID_RANGES \$o\]"
+  puts $fh "  if {\$g ne {} && !\[catch {resize_pblock \$pb -remove \$g}\]} { puts \"otpu_${name}_pblock: \$o's area cut out\" }"
+  puts $fh "}"
   puts $fh "add_cells_to_pblock \$pb \$c"
   puts $fh "puts \"otpu_${name}_pblock: \$c in {$tpb}\""
   close $fh
