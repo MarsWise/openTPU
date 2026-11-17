@@ -92,6 +92,9 @@ $buildEnv = @{
     OTPU_TMEM_PBLOCK = ''; OTPU_XDMA_PBLOCK = ''; OTPU_STRICT_R5 = '1'
     # the VPU's pblock from the caller's environment (r8_build_ddr.cmd): none unless set
     OTPU_VPU_PBLOCK = $(if ($env:OTPU_VPU_PBLOCK) { $env:OTPU_VPU_PBLOCK } else { '' })
+    # incremental implementation from an earlier routed checkpoint (r8_build_incr.cmd): none unless set
+    OTPU_INCR_DCP = $(if ($env:OTPU_INCR_DCP) { $env:OTPU_INCR_DCP } else { '' })
+    OTPU_INCR_DIRECTIVE = $(if ($env:OTPU_INCR_DIRECTIVE) { $env:OTPU_INCR_DIRECTIVE } else { '' })
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
 # m4: r4's recipe (bb27096f: WNS +0.031 / WHS +0.018 at 133.33 MHz) with r5's units -- the

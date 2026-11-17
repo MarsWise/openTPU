@@ -151,6 +151,19 @@ foreach {knob step} {OTPU_PHYSOPT_DIRECTIVE PHYS_OPT_DESIGN OTPU_ROUTE_DIRECTIVE
 }
 puts "impl_1: route_design -directive [get_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]],\
   post-route phys_opt_design -directive [get_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE [get_runs impl_1]]"
+# OTPU_INCR_DCP (a routed checkpoint of an earlier build; unset: none): incremental implementation
+# that reuses its placement and routing where the netlist is the same (r8 + C2 from 2c800a8f's
+# placement: the MXU's k0 / GRQ QUAD changes, the VPU, TMEM and memory logic where 2c800a8f had
+# them). OTPU_INCR_DIRECTIVE: RuntimeOptimized, TimingClosure (default) or Quick.
+if {[info exists ::env(OTPU_INCR_DCP)] && [string trim $::env(OTPU_INCR_DCP)] ne ""} {
+  set idcp [file normalize [string trim $::env(OTPU_INCR_DCP)]]
+  if {![file exists $idcp]} { error "OTPU_INCR_DCP: no checkpoint $idcp" }
+  set idir [expr {[info exists ::env(OTPU_INCR_DIRECTIVE)] && $::env(OTPU_INCR_DIRECTIVE) ne "" ? $::env(OTPU_INCR_DIRECTIVE) : "TimingClosure"}]
+  catch {set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs impl_1]}
+  set_property INCREMENTAL_CHECKPOINT $idcp [get_runs impl_1]
+  set_property INCREMENTAL_CHECKPOINT.DIRECTIVE $idir [get_runs impl_1]
+  puts "impl_1: incremental from $idcp ($idir)"
+}
 reset_run impl_1
 launch_runs impl_1 -jobs $jobs
 # A run that fails after routing (r5-m8 db36f818: its worker exited inside the post-route
