@@ -93,6 +93,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8 C3 (6dce3d19): C2 (k0 fix, GRQ QUAD) + LiteDRAM rtw 4, trace 4096, TMM GSC LUT writes replicated; WNS +0.060, WHS +0.031 (margins core 0.15 / x2c 0.45 / sys 0.10 / wr 0.05 / uc2 0.10 in P&R)",
+      "build_id": "0x6dce3d19",
+      "cfg_hash": "0xa905c3db",
+      "bitstream_sha256": "C45E9BDDC72A047481B29768424F0EB014A21E1DB1AB35FAFEDE2DC257A001ED",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }
