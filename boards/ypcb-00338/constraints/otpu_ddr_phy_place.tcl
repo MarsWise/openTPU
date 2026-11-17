@@ -16,6 +16,14 @@
 # cycle changes; pblocks only (not EXCLUDE_PLACEMENT: other cells may share the slices).
 #
 # - OTPU_DDR_PHY_PLACE=0 skips the whole file; OTPU_DDR_PHY_COLS sets the columns.
+# - OTPU_DDR_PHY_KEEPOUT=1 (default 0, an experiment): the pblocks also take the flops the read
+#   ISERDES drive (Q1..Q8: the read data's first registers) and are EXCLUDE_PLACEMENT, so nothing
+#   else (the MXU's, TMEM's, the VPU's switching) is placed in those columns beside the PHY. r8 + C2
+#   (c969ca4c, 2026-11-17): the host's writes and reads clean idle and under load, the core's reads
+#   under load closing the read windows to 1-2 taps on channel 1 lanes 7 / 8 (tools/ddr_diag.py wr,
+#   r8_ddr_check): the read capture, not the write path. Wider columns cost the core that fabric:
+#   with it OTPU_DDR_PHY_COLS (default 4) is the keep-out's width; look at r8_place_report.tcl's
+#   counts of what sits there first.
 # - The sys reset's first register (crg_rst_t0) goes midway between the channels (rst_mid, below).
 # It stops the run (error) when no OSERDES has a flop driver or a pad. Summary line:
 # "otpu_ddr_phy_place: N flops of M OSERDES in K pblocks (...)" (or "off").
@@ -42,7 +50,9 @@ proc ::otpu_ddr_phy_place::run {} {
     puts "otpu_ddr_phy_place: off (OTPU_DDR_PHY_PLACE=0)"
     return
   }
-  set ncol [expr {[info exists ::env(OTPU_DDR_PHY_COLS)] ? $::env(OTPU_DDR_PHY_COLS) : 4}]
+  set ncol [expr {[info exists ::env(OTPU_DDR_PHY_COLS)] && $::env(OTPU_DDR_PHY_COLS) ne "" ? $::env(OTPU_DDR_PHY_COLS) : 4}]
+  if {![string is integer -strict $ncol] || $ncol < 1 || $ncol > 16} { error "OTPU_DDR_PHY_COLS '$ncol': 1 to 16 columns" }
+  set keep [expr {[info exists ::env(OTPU_DDR_PHY_KEEPOUT)] && $::env(OTPU_DDR_PHY_KEEPOUT) eq "1"}]
   set osers [get_cells -quiet -hier -filter {REF_NAME =~ OSERDESE* && IS_PRIMITIVE}]
   if {![llength $osers]} { puts "otpu_ddr_phy_place: no OSERDES"; return }
   # flops per clock region of their pads; a flop with OSERDES in two regions takes the first
@@ -73,6 +83,34 @@ proc ::otpu_ddr_phy_place::run {} {
     }
   }
   if {![array size ffs]} { error "otpu_ddr_phy_place: no OSERDES with a flop driver and a pad" }
+  # with the keep-out: the read ISERDES' first flops, by the clock region of their pads
+  set nrx 0
+  if {$keep} {
+    foreach i [get_cells -quiet -hier -filter {REF_NAME =~ ISERDESE* && IS_PRIMITIVE}] {
+      set port ""
+      foreach pin [list $i/D $i/DDLY] {
+        set p [get_pins -quiet $pin]
+        if {$p eq ""} { continue }
+        set ports [get_ports -quiet [all_fanin -quiet -flat -startpoints_only $p]]
+        if {[llength $ports]} { set port [lindex $ports 0]; break }
+      }
+      if {$port eq ""} { continue }
+      set site [get_sites -quiet -of_objects [get_package_pins -quiet [get_property PACKAGE_PIN $port]]]
+      if {$site eq ""} { continue }
+      set cr [get_property CLOCK_REGION $site]
+      if {![info exists ffs($cr)]} { continue }
+      foreach pin [get_pins -quiet -of_objects $i -filter {DIRECTION == OUT && REF_PIN_NAME =~ Q*}] {
+        set net [get_nets -quiet -of_objects $pin]
+        if {$net eq ""} { continue }
+        foreach f [get_cells -quiet -of_objects [get_pins -quiet -leaf -of_objects $net -filter {DIRECTION == IN}]] {
+          if {[info exists seen($f)] || ![string match FD* [get_property REF_NAME $f]]} { continue }
+          set seen($f) 1
+          lappend ffs($cr) $f
+          incr nrx
+        }
+      }
+    }
+  }
   set n 0; set desc {}; set soft {}
   foreach cr [lsort [array names ffs]] {
     # the region's slice columns by their distance from its I/O column (RPM_X: one grid for all
@@ -94,13 +132,14 @@ proc ::otpu_ddr_phy_place::run {} {
     set pb [create_pblock otpu_ddr_phy_$cr]
     foreach c $cols { resize_pblock $pb -add "SLICE_X${c}Y${ymin}:SLICE_X${c}Y${ymax}" }
     set_property IS_SOFT false $pb
+    if {$keep} { set_property EXCLUDE_PLACEMENT true $pb }
     add_cells_to_pblock $pb [get_cells $ffs($cr)]
     incr n [llength $ffs($cr)]
     lappend desc "$cr: [llength $ffs($cr)] on SLICE_X[join $cols ,]"
     lappend soft [get_property IS_SOFT $pb]
   }
   puts "otpu_ddr_phy_place: $n flops of $nos OSERDES in [array size ffs] pblocks ([join $desc {; }]),\
-        IS_SOFT [join [lsort -unique $soft] /]"
+        IS_SOFT [join [lsort -unique $soft] /][expr {$keep ? ", keep-out (EXCLUDE_PLACEMENT, $nrx read flops)" : ""}]"
   rst_mid [lsort [array names ffs]]
 }
 

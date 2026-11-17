@@ -1,5 +1,5 @@
 @echo off
-rem Claude: DDR3 diagnosis on the LOADED firmware (r8, or r5 as the control), about 15 minutes:
+rem Claude: DDR3 diagnosis on the LOADED firmware (r8, or r5 as the control), about 25 minutes:
 rem a wrong word written wrong or read wrong, idle or under the core's load. Saves r8_ddr_diag.log here.
 rem No bitstream load, no rescan, no mode registers. Not during another run on the card.
 rem Takes sync_next.bundle (the tree with the tool) as sync.bundle first, if it is there.

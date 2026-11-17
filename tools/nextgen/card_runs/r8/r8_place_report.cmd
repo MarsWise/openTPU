@@ -1,6 +1,6 @@
 @echo off
 rem Claude: read-only placement reports (what sits beside the DDR3 PHYs) of r5 45b1c1d3, r8 2c800a8f and
-rem r8 + C2 c969ca4c: opens each routed checkpoint in Vivado, writes place_<name>.txt here. About 10 minutes
+rem r8 + C2 c969ca4c, 1a77396a: opens each routed checkpoint in Vivado, writes place_<name>.txt here. About 5 minutes
 rem each. Nothing is built, changed or loaded. Not while a Vivado build is running (memory).
 setlocal
 set "VIV=C:\Xilinx\Vivado\2024.2\bin\vivado.bat"

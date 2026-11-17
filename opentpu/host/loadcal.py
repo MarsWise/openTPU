@@ -28,9 +28,13 @@ IDELAY at the next bitslip, the two eyes about as wide idle, so which one a lane
 load to load, and under load they differ: the narrowest lanes have been far along the delay line
 (r150o's window load: channel 1 lane 6 at tap 26, 2 taps under load, where the load before had it
 at tap 13 with 4, then 21 corrected words in phi4-mini's xl qual; the narrowest lane of E3, r150m
-and r150n under prefill each at tap 20-21). So the scan also runs with each lane's bitslip one
-either side (SLIPS; OTPU_LOAD_SLIPS=0: the calibrated ones only) and each lane takes the widest
-window under load, the lowest tap of equals. Board.scrub runs it once per configuration, between
+and r150n under prefill each at tap 20-21). So the scan also runs with each lane's bitslip one and
+two either side (SLIPS; OTPU_LOAD_SLIPS=0: the calibrated ones only) and each lane takes the widest
+window under load, the lowest tap of equals. Two: a lane the calibration put two bit times along
+the IDELAY has its widest eye two bitslips away (r8 + C2 c969ca4c, 2026-11-17: channel 1 lane 8
+calibrated at tap 27 three times of five, the eye one bitslip down 1-2 taps wide under load and
+kept at its calibrated tap; the run where it was calibrated at 15, one bitslip down gave 5 taps;
+the narrow runs read uncorrectable words within minutes, the wide one read none in four passes). Board.scrub runs it once per configuration, between
 two passes of zeros, when wanted_on(): the core clock is not the controllers' (OTPU_LOAD_CENTER=1
 / 0 forces it on / off). The BIST writes without ECC check bits
 and the core's reads at the scan's far taps count ECC errors: the second pass of zeros and the
@@ -54,10 +58,10 @@ ENV_KIND = "OTPU_LOAD_KIND"
 MIN_WINDOW = 3              # taps under load for a lane to take its centre there
 NTAPS = 32                  # IDELAYE2 taps
 NSLIPS = 8                  # read bitslips
-SLIPS = (0, -1, 1)          # the read bitslips scanned, against each lane's calibrated one
+SLIPS = (0, -1, 1, -2, 2)   # the read bitslips scanned, against each lane's calibrated one
 REPS, MIB = 10, 128         # per tap: REPS BIST reads of MIB MiB per channel (~12 s a scan)
 SEED = 0x0F1E2D3C4B5A6978
-LOAD_ITERS = 2_000_000      # the load's loop: minutes, ended by Board.stop after the scan
+LOAD_ITERS = 6_000_000      # the load's loop: minutes (five bitslip scans), ended by Board.stop after the scan
 
 # the load: prefill's MXU work in one hardware loop (ROWS x H activations against R x H fp4
 # weights on port A) beside 64 KiB DMA tiles stored and reloaded on port B

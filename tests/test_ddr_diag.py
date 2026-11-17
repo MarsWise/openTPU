@@ -52,3 +52,12 @@ def test_wr_read_wrong():
     assert (r["first"], r["second"], r["both"]) == (1, 0, 0)
     assert dd.wr_verdict(r).startswith("read wrong")
     assert np.flatnonzero(r["bits"]).tolist() == [56, 57]
+
+
+def test_lane_bits_and_line():
+    bits = (1 << (8 * 8 + 3)) | (1 << (8 * 8 + 6)) | (1 << (8 * 7 + 0))
+    assert dd.lane_bits(bits) == {7: [0], 8: [3, 6]}
+    r = {"lanes": [0] * 7 + [2, 9], "bits": bits, "runs": 3}
+    line = dd.lanes_line(1, r, 20)
+    assert line.startswith("channel 1: 11 lane-beats wrong in 3 of 20 reads")
+    assert "{7: 2, 8: 9}" in line and "{7: [0], 8: [3, 6]}" in line

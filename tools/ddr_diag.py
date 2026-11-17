@@ -5,6 +5,14 @@
     python tools/ddr_diag.py steps MODEL_DIR [--n 32]
     python tools/ddr_diag.py rmw [--iters 200000]
     python tools/ddr_diag.py wr [--mib 256] [--load ternary:4]
+    python tools/ddr_diag.py lanes [--load ternary:4] [--reps 20]
+
+lanes: which lanes and bits read wrong under the core's load at the taps the PHY has now (the
+calibration's, or loadcal's): LiteDRAM's BIST writes its data to the last quarter of each channel,
+then reads it back reps times, idle and while the core runs the load; per channel and lane the
+beats read wrong, the data bits of the lane seen wrong (OR over the reads), and how many reads
+had any. The core's own reads do not count here (the ECC counters do; printed too). The BIST
+writes without ECC check bits: zeros over DRAM after it (Board.scrub).
 
 wr: is a wrong word written wrong or read wrong, and does it need the core's load? Per channel
 random data is written by the host and read back twice, in four phases: written idle or under
@@ -204,6 +212,66 @@ def cmd_wr(a) -> int:
     return 0 if not bad else 1
 
 
+def lane_bits(bits: int, nm: int = 9) -> dict:
+    """bist_lane_bits (bit 8m + b: data bit b of lane m read wrong) -> {lane: [bits]}."""
+    return {m: [b for b in range(8) if bits >> (8 * m + b) & 1] for m in range(nm) if bits >> (8 * m) & 0xFF}
+
+
+def lanes_line(ch, r, reps):
+    bad = {m: n for m, n in enumerate(r["lanes"]) if n}
+    return (f"channel {ch}: {sum(r['lanes'])} lane-beats wrong in {r['runs']} of {reps} reads; "
+            f"by lane {bad or '-'}; bits {lane_bits(r['bits']) or '-'}")
+
+
+def cmd_lanes(a) -> int:
+    from opentpu.host import ddrcal, loadcal, memcal
+    from opentpu.host.board import CH_BYTES, Board, XdmaTransport, device_config
+    b = Board(XdmaTransport(a.dev), check=False)
+    t, info = b.t, b.info()
+    c = memcal.csr(t, memcal.DATA)
+    chans = [ddrcal.Chan(c, ch) for ch in (0, 1)]
+    hz = loadcal.sys_hz(memcal.DATA)
+    ch_beats = ((info.get("cfg") or {}).get("channel_bytes") or CH_BYTES) // 64
+    base = ch_beats * 3 // 4
+    beats = min(ch_beats // 4, a.mib << 14)
+    print(f"card build {info.get('build_id') or 0:#x}, temp {info.get('temp_c')}; load {a.load}; "
+          f"BIST {beats * 64 >> 20} MiB a channel x {a.reps} reads at the current taps")
+    b.scrub(force=True)
+    loadcal.bist_write(chans, base, beats, hz)
+    kind, rows = loadcal.load_kind(a.load)
+    img, lay, prog = loadcal.build(device_config(info, DRAM_BYTES=1 << 30), rows=rows, kind=kind)
+    b.write(0, img)
+    bad = 0
+    for on in (False, True):
+        acc = [{"lanes": [0] * 9, "bits": 0, "runs": 0} for _ in chans]
+        _ecc(t)
+        if on:
+            b.load(lay["prog"], prog)
+            b.start()
+        try:
+            for _ in range(a.reps):
+                for k in chans:
+                    loadcal._bist(k, base, beats, 1)
+                for i, k in enumerate(chans):
+                    r = ddrcal.bist_wait(k, beats, 1, hz, timeout=120)
+                    acc[i]["lanes"] = [x + y for x, y in zip(acc[i]["lanes"], r["lanes"])]
+                    acc[i]["bits"] |= r["bits"]
+                    acc[i]["runs"] += bool(r["errors"])
+        finally:
+            if on and b.stop():
+                print("   (the load ended before the reads did)")
+        e = _ecc(t)
+        print(f"{'under the load' if on else 'idle'}:")
+        for i in range(len(chans)):
+            print("   " + lanes_line(i, acc[i], a.reps))
+            bad += sum(acc[i]["lanes"])
+        print(f"   ECC counters meanwhile (the core's reads and the host's): ch0 {e[0][0]} / {e[0][1]}, "
+              f"ch1 {e[1][0]} / {e[1][1]}")
+    print(f"temp {b.info().get('temp_c')}")
+    b.scrub(force=True)
+    return 0 if not bad else 1
+
+
 def cmd_steps(a) -> int:
     from opentpu.llm import batch as BA
     from opentpu.host import chat as CH
@@ -381,8 +449,14 @@ def main() -> int:
     w.add_argument("--alone", type=int, default=30)
     w.add_argument("--seed", type=int, default=0)
     w.add_argument("--dev", default="/dev/xdma0")
+    n = sp.add_parser("lanes")
+    n.add_argument("--load", default="ternary:4")
+    n.add_argument("--reps", type=int, default=20)
+    n.add_argument("--mib", type=int, default=128)
+    n.add_argument("--dev", default="/dev/xdma0")
     a = ap.parse_args()
-    return {"pattern": cmd_pattern, "steps": cmd_steps, "rmw": cmd_rmw, "wr": cmd_wr}[a.cmd](a)
+    return {"pattern": cmd_pattern, "steps": cmd_steps, "rmw": cmd_rmw, "wr": cmd_wr,
+            "lanes": cmd_lanes}[a.cmd](a)
 
 
 if __name__ == "__main__":

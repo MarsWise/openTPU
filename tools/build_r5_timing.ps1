@@ -79,6 +79,9 @@ $buildEnv = @{
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
     OTPU_MXU_WRAM_COL = '2'; OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
     OTPU_MXU_PLACE = '1'; OTPU_DDR_PHY_PLACE = '1'
+    # the PHY keep-out (otpu_ddr_phy_place.tcl) and its width from the caller's environment: off unless set
+    OTPU_DDR_PHY_KEEPOUT = $(if ($env:OTPU_DDR_PHY_KEEPOUT) { $env:OTPU_DDR_PHY_KEEPOUT } else { '0' })
+    OTPU_DDR_PHY_COLS = $(if ($env:OTPU_DDR_PHY_COLS) { $env:OTPU_DDR_PHY_COLS } else { '' })
     OTPU_MXU_FENCE = $(if ($NoFence) { '0' } else { '1' })
     # r5-m8 db36f818 (after phys_opt -0.503 ns, TMEM's pumped RAM outputs -> the units): the
     # clk2x -> core checks at 0.45 ns of margin while placing and routing (removed for the

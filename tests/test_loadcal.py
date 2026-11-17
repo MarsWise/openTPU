@@ -182,3 +182,17 @@ def test_the_int8_load_runs_int8_mm_on_the_isa_simulator():
     for i in range(2):
         y = out[i * 4:(i + 1) * 4]
         assert float(np.linalg.norm(y - want) / np.linalg.norm(want)) < 0.03
+
+
+def test_a_lane_two_bit_times_along_finds_its_eye_two_bitslips_away():
+    """r8 + C2 (2026-11-17): channel 1 lane 8 calibrated at tap 27; under load its eye one bitslip
+    down is 1-2 taps wide, the one two bitslips down 5. The scan at +-2 finds it."""
+    narrow = [[0 if t in (14, 15) else 5] for t in range(32)]
+    none = [[5] for t in range(32)]
+    wide = [[0 if 0 <= t <= 4 else 5] for t in range(32)]
+    lanes = L.choose_slips({0: none, -1: narrow, 1: none, -2: wide, 2: none}, [27],
+                           {d: [True] for d in L.SLIPS})
+    assert (lanes[0]["slip"], lanes[0]["taps"], lanes[0]["tap"], lanes[0]["narrow"]) == (-2, 5, 2, False)
+    assert -2 in L.SLIPS and 2 in L.SLIPS and L.SLIPS[0] == 0
+    # a lane whose bitslip cannot move by -2 (its range's end) stays where it can
+    assert not L.slips_ok(1, [0] * 8, -2) and L.slips_ok(2, [0] * 8, -2)

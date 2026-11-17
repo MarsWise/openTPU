@@ -82,6 +82,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8 + MXU MM k0 fix (1a77396a: WNS +0.005, WHS +0.021 after r8_signoff_resume: userclk1 reroute, post-route phys_opt)",
+      "build_id": "0x1a77396a",
+      "cfg_hash": "0x93e29b18",
+      "bitstream_sha256": "84050D53F46EE96F0375C0D90E2BE6F84BC1280751C79DB6587562D8C9317929",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }
