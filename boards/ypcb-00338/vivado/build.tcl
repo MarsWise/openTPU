@@ -179,8 +179,8 @@ if {![regexp {otpu_ddr_phy_place: (\d+ flops|off)} $ilog]} {
   error "otpu_ddr_phy_place.tcl did not place the PHY's flops (no summary line in impl_1/runme.log;\
          OTPU_DDR_PHY_PLACE=0 builds without it)"
 }
-# and the TMEM's / XDMA's pblock when OTPU_TMEM_PBLOCK / OTPU_XDMA_PBLOCK asked for one (create_project.tcl)
-foreach name {tmem xdma} {
+# and the TMEM's / XDMA's / VPU's pblock when OTPU_TMEM_PBLOCK / OTPU_XDMA_PBLOCK / OTPU_VPU_PBLOCK asked for one
+foreach name {tmem xdma vpu} {
   if {[llength [get_files -quiet -of_objects [get_filesets constrs_1] *otpu_${name}_pblock.tcl]] &&
       ![regexp "otpu_${name}_pblock: \\S+ in " $ilog]} {
     error "otpu_${name}_pblock.tcl did not place its cell (no summary line in impl_1/runme.log)"

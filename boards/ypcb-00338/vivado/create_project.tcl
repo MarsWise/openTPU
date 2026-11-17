@@ -180,7 +180,11 @@ if {$mf ne ""} { lappend late $mf }
 # OTPU_XDMA_PBLOCK, the same for the XDMA (u_bd's xdma_0, e.g. CLOCKREGION_X1Y3:CLOCKREGION_X1Y6
 # around the PCIe block at X1Y4): with the MXU array right of DSP X1-X8 the placer moved most of the
 # XDMA to X0Y5-Y7 (r150m: userclk2 -0.176 ns); as otpu_xdma_pblock.tcl.
-foreach {knob name pat} {OTPU_TMEM_PBLOCK tmem *u_slice/u_tmem OTPU_XDMA_PBLOCK xdma *otpu_bd_i/xdma_0} {
+# OTPU_VPU_PBLOCK, the same for the VPU (u_slice's u_vpu): r8's VPU (105 000 cells against r5's
+# 91 000) was placed beside channel 0's PHY (clock regions X0Y0 / X0Y1: 63 000 of its cells, r5
+# 17 000; r8_place_report 2026-11-17) and channel 0 lane 0 (X0Y0) read wrong under the core's load
+# where r5 read clean; as otpu_vpu_pblock.tcl.
+foreach {knob name pat} {OTPU_TMEM_PBLOCK tmem *u_slice/u_tmem OTPU_XDMA_PBLOCK xdma *otpu_bd_i/xdma_0 OTPU_VPU_PBLOCK vpu *u_slice/u_vpu} {
   set tpb [expr {[info exists ::env($knob)] ? [string trim $::env($knob)] : ""}]
   if {$tpb eq ""} { continue }
   foreach r $tpb {

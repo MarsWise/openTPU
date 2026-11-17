@@ -90,6 +90,8 @@ $buildEnv = @{
     OTPU_PHYSOPT_DIRECTIVE = 'AggressiveExplore'; OTPU_ROUTE_DIRECTIVE = 'Explore'
     OTPU_POSTROUTE_PHYSOPT_DIRECTIVE = 'AggressiveExplore'
     OTPU_TMEM_PBLOCK = ''; OTPU_XDMA_PBLOCK = ''; OTPU_STRICT_R5 = '1'
+    # the VPU's pblock from the caller's environment (r8_build_ddr.cmd): none unless set
+    OTPU_VPU_PBLOCK = $(if ($env:OTPU_VPU_PBLOCK) { $env:OTPU_VPU_PBLOCK } else { '' })
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
 # m4: r4's recipe (bb27096f: WNS +0.031 / WHS +0.018 at 133.33 MHz) with r5's units -- the
