@@ -288,3 +288,31 @@ def test_bitnet_mlp_chunked_over_f_is_bit_identical(tmp_path, monkeypatch, aff):
         assert max(runs) > 1
         out.append(got)
     assert np.array_equal(_bits(out[0]), _bits(out[1]))
+
+
+def test_four_rows_of_2b4t_compile_at_later_positions(tmp_path):
+    """The rows program of 4 slots at later positions on r8's configuration: the whole-row MLP's
+    three [4, 6912] tiles did not fit once the attention had split TMEM (slots past ~72: a gap
+    8 words short, the card's r8_ddr_split 2026-11-17); with three tiles over half of TMEM the
+    MLP goes by column chunks (bit-identical: test_bitnet_mlp_chunked_over_f_is_bit_identical)."""
+    import dataclasses
+    from opentpu.isasim import Config
+    cfg_json = {"architectures": ["BitNetForCausalLM"], "model_type": "bitnet",
+                "hidden_size": 2560, "intermediate_size": 6912, "num_hidden_layers": 30,
+                "num_attention_heads": 20, "num_key_value_heads": 5, "vocab_size": 128256,
+                "head_dim": 128, "rope_theta": 500000.0, "rms_norm_eps": 1e-5,
+                "hidden_act": "relu2", "max_position_embeddings": 4096,
+                "tie_word_embeddings": True, "bos_token_id": 128000, "eos_token_id": 128001,
+                "quantization_config": {"quant_method": "bitnet", "linear_class": "autobitlinear",
+                                        "quantization_mode": "offline"}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg_json))
+    spec = load_spec(tmp_path)
+    names = {f.name for f in dataclasses.fields(Config)}
+    caps = ("PAIR DSTEP STREAM TPAIR TQUAD TFN TGSC VCMP TBIN VU8 TGRQ VRAND TCQ TATAN QST4 LDX "
+            "TD5 VBFLY VAFF QST6 VCSWP TGQ4").split()
+    cfg = board_config(MCOLS=8, LANES=8, TMEM_WORDS=131072, **{k: True for k in caps if k in names})
+    img = spec.image(cfg, 512, 4, 4, wformat="ternary", head_format="int8", lookup=True)
+    for p in (72, 104, 200, 400):
+        rows = [(0, p + 32)] + [(s, p) for s in (1, 2, 3)]
+        progs = img.compile_rows(rows, list(range(4)), getattr(img, "block", 256), tokens=[13] * 4)
+        assert max(map(len, progs)) * 8 <= cfg.IMEM_WORDS

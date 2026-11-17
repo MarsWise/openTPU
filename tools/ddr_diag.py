@@ -337,7 +337,9 @@ def cmd_steps(a) -> int:
                 eng.poss[s] += 1
             return lg
         one("run_rows (4 rows, logits to the host)", rows)
-    # run_rows split in phases: the run with the host's logits read stubbed out, then the
+    # run_rows split in phases (every run at the same positions: the rows program of 4 slots at
+    # some later positions did not compile, TMEM 8 words short, 2026-11-17 15:44 / 15:52): the run
+    # with the host's logits read stubbed out, then the
     # host reads the logits three times, the counters read and cleared after each phase. Errors
     # in the run: the core's reads; only in the first read: the host's read path (C2H);
     # in every read: the logits were stored wrong (the write path)
@@ -380,8 +382,6 @@ def cmd_steps(a) -> int:
             eng.run_rows(rows, [tok] * 4, list(range(4)))
         finally:
             eng.backend.read = real
-            for s in range(4):
-                eng.poss[s] += 1
 
     def rows_one_logit():       # the same rows with the LM head's logits for one row only (a
         rows = [(s, eng.poss[s]) for s in range(4)]     # quarter of the logits' stores)
@@ -391,8 +391,6 @@ def cmd_steps(a) -> int:
             eng.run_rows(rows, [tok] * 4, [3])
         finally:
             eng.backend.read = real
-            for s in range(4):
-                eng.poss[s] += 1
 
     if board is not None:
         for _ in range(a.n):

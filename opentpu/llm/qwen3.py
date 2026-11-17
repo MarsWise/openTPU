@@ -1572,7 +1572,11 @@ def _bitnet_mlp(x, lw, spec: Spec):
     R, F = (x.shape[0] if len(x.shape) == 2 else 1), lw.wg.shape[0]
     D = ol.current().cfg.D
     lim = ol.tmem_words() // 2 if BITNET_CHUNK_WORDS is None else BITNET_CHUNK_WORDS
-    chunked = 2 * R * F > lim and F % D == 0 and F > 4 * D
+    # three [R, F] tiles (gate, up and relu's) live at once in the whole-row path: 4 rows of
+    # 2B4T (3 x 27,648 words) did not fit r8's 131072-word TMEM once the attention's tiles at
+    # later positions (slots past ~72) had split the free space (a gap 8 words short; the rows
+    # program, 2026-11-17 r8_ddr_split), so the whole-row path only when three fit in half
+    chunked = 3 * R * F > lim and F % D == 0 and F > 4 * D
     # the chunked path's whole [R, F] tile first, while TMEM's upper 64K is still one gap (above
     # 64K words the STREAM descriptors sit at the top of the first 64K and split TMEM in two)
     a = ol.empty([R, F]) if chunked else None
