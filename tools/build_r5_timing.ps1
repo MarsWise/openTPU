@@ -71,11 +71,12 @@ $buildEnv = @{
     OTPU_QST6_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_VCSWP_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_TGQ4_GEN = $(if ($R8) { '1' } else { '0' })
-    TRACE_DEPTH = '16384'; COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
+    TRACE_DEPTH = $(if ($env:TRACE_DEPTH) { $env:TRACE_DEPTH } else { '16384' }); COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'
     # the memory margins (margins.tcl) from the caller's environment: none unless set (r8_build_ddr.cmd)
     OTPU_SYS_MARGIN = $(if ($env:OTPU_SYS_MARGIN) { $env:OTPU_SYS_MARGIN } else { '' })
     OTPU_WR_MARGIN = $(if ($env:OTPU_WR_MARGIN) { $env:OTPU_WR_MARGIN } else { '' })
+    OTPU_UC2_MARGIN = $(if ($env:OTPU_UC2_MARGIN) { $env:OTPU_UC2_MARGIN } else { '' })
     OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
     OTPU_MXU_WRAM_COL = '2'; OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
     OTPU_MXU_PLACE = '1'; OTPU_DDR_PHY_PLACE = '1'

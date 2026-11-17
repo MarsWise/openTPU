@@ -85,11 +85,20 @@ module otpu_tmm_gsc
   state_t state;
   logic [3:0] lj;                            // LUTSET: the entry written
   wire [63:0] lset = {held.w7, held.w5};
+  // the LUT write port fans out to every position's copy (1,500-1,800 loads each on r8's
+  // a1ba144b, the most loaded nets of the MXU's congested area): max_fanout lets synthesis
+  // replicate these registers per group of positions (the same values, the same cycle)
+  (* max_fanout = 128 *) logic       lw_we_q;
+  (* max_fanout = 128 *) logic [3:0] lw_a_q;
+  (* max_fanout = 128 *) logic [7:0] lw_d_q;
   always_ff @(posedge clk) begin
-    lw_we <= !rst && state == LUT && !lj[3];
-    lw_a <= {held.w6[0], lj[2:0]};
-    lw_d <= lset[8 * lj[2:0] +: 8];
+    lw_we_q <= !rst && state == LUT && !lj[3];
+    lw_a_q <= {held.w6[0], lj[2:0]};
+    lw_d_q <= lset[8 * lj[2:0] +: 8];
   end
+  assign lw_we = lw_we_q;
+  assign lw_a = lw_a_q;
+  assign lw_d = lw_d_q;
   cmd_t held;
   logic [7:0] k;
   logic [1:0] pending, unreleased;
