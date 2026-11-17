@@ -71,6 +71,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8 + C2: m8 133.33 MHz, r8 + MXU MM k0 fix + TMM GRQ QUAD (TGQ4), TMEM 131072 (c969ca4c: WNS +0.003, WHS +0.015)",
+      "build_id": "0xc969ca4c",
+      "cfg_hash": "0xa905c3db",
+      "bitstream_sha256": "634F740273940C8C79446CCF1913D6126AF76F23A83AB5AD8479B704C269832D",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }
