@@ -61,3 +61,16 @@ def test_lane_bits_and_line():
     line = dd.lanes_line(1, r, 20)
     assert line.startswith("channel 1: 11 lane-beats wrong in 3 of 20 reads")
     assert "{7: 2, 8: 9}" in line and "{7: [0], 8: [3, 6]}" in line
+
+
+def test_split_verdict():
+    split_verdict = dd.split_verdict
+    z = lambda: [0, 0, 0]
+    sp = {"run": z(), "read 1": z(), "read 2": z(), "read 3": z()}
+    assert split_verdict(sp) == "clean"
+    sp["read 1"] = [2, 2, 0]
+    assert "C2H" in split_verdict(sp)
+    sp["read 2"] = [1, 1, 0]
+    assert "stored wrong" in split_verdict(sp)
+    sp = {"run": [1, 1, 0], "read 1": z(), "read 2": z(), "read 3": z()}
+    assert "core" in split_verdict(sp)

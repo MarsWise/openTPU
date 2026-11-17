@@ -48,7 +48,7 @@ cases() {
   for p in 1 2; do timeout 1800 python tools/ddr_diag.py rmw --iters 200000 2>&1 | tail -11; done
   ecc scrub
   echo; echo "== $(date +%H:%M:%S) [$1] BitNet decode modes, ECC after every run"
-  PYTHONPATH="$R" timeout 3600 "$H" tools/ddr_diag.py steps "$MD" --n 32 2>&1 | grep -viE "warn|regex|tokenizer you are" | tail -7
+  PYTHONPATH="$R" timeout 3600 "$H" tools/ddr_diag.py steps "$MD" --n 32 2>&1 | grep -viE "warn|regex|tokenizer you are" | tail -9
   ecc scrub
   echo; echo "== $(date +%H:%M:%S) [$1] vLLM BitNet 4 slots"
   OTPU_VLLM_BACKEND=board PYTHONPATH="$R" timeout 3600 "$V/bin/python" tools/vllm_smoke.py "$MD" --slots 4 \

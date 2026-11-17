@@ -42,6 +42,9 @@ the decode in four ways, the ECC counters read and cleared after every run: one 
 resident decode step (step), 4 rows as one rows program with logits to the host (run_rows),
 4 and 2 rows as llm/batch.py's steps (picked on the card). Reports per mode the runs, the runs
 with ECC errors, corrected / uncorrectable. Tokens are not checked (the counters are the point).
+Then (on the card) run_rows split in phases -- the run alone (the host's logits read stubbed out)
+and three host reads of its logits -- with a verdict: the core's reads, the host's read path or
+stored wrong (split_verdict).
 """
 from __future__ import annotations
 
@@ -333,6 +336,50 @@ def cmd_steps(a) -> int:
                 eng.poss[s] += 1
             return lg
         one("run_rows (4 rows, logits to the host)", rows)
+    # run_rows split in phases: the run with the host's logits read stubbed out, then the
+    # host reads the logits three times, the counters read and cleared after each phase. Errors
+    # in the run: the core's reads; only in the first read: the host's read path (C2H);
+    # in every read: the logits were stored wrong (the write path)
+    split = {k: [0, 0, 0] for k in ("run", "read 1", "read 2", "read 3")}
+    io, v, vl, S = eng.image.io, spec.vocab, eng.image.v_loc, eng.cfg.S
+
+    def logits_read():
+        for r in range(4):
+            for s in range(S):
+                eng.backend.read(s, io["logits"] + 4 * (r * v + s * vl), 4 * vl)
+
+    def phase(k, fn):
+        try:
+            fn()
+        except RuntimeError as e:
+            if "ECC" not in str(e):
+                raise
+        c = _ecc(t)
+        n0, n1 = c[0][0] + c[1][0], c[0][1] + c[1][1]
+        x = split[k]
+        x[0] += bool(n0 or n1)
+        x[1] += n0
+        x[2] += n1
+        if (n0 or n1) and len(x) < 7:
+            x.append((c[0], c[1]))
+
+    def rows_run_only():
+        rows = [(s, eng.poss[s]) for s in range(4)]
+        real = eng.backend.read
+        eng.backend.read = lambda s, a, n: np.zeros(n, np.uint8)
+        try:
+            eng.run_rows(rows, [tok] * 4, list(range(4)))
+        finally:
+            eng.backend.read = real
+            for s in range(4):
+                eng.poss[s] += 1
+
+    if board is not None:
+        for _ in range(a.n):
+            phase("run", rows_run_only)
+            for k in ("read 1", "read 2", "read 3"):
+                phase(k, logits_read)
+
     def steps(n):
         rows = [(s, eng.poss[s]) for s in range(n)]
         try:
@@ -349,11 +396,32 @@ def cmd_steps(a) -> int:
         ch = [x for x in r[4:]][:4]
         print(f"{mode}: {r[0]} runs, {r[1]} with ECC errors, corrected {r[2]}, uncorrectable "
               f"{r[3]}" + (f"; first per channel {ch}" if ch else ""))
+    if board is not None:
+        print("run_rows split (" + str(a.n) + " runs; runs with errors, corrected, uncorrectable"
+              "): " + "; ".join(f"{k} {x[0]} / {x[1]} / {x[2]}" + (f" {x[3:]}" if x[3:] else "")
+                                for k, x in split.items()))
+        print("run_rows split verdict: " + split_verdict(split))
     print(f"temp {temp()}")
     close = getattr(eng.backend, "close", None)
     if close is not None:
         close()
     return 0
+
+
+def split_verdict(split) -> str:
+    """run_rows split's phases -> where the errors come from."""
+    run, r1 = split["run"][0], split["read 1"][0]
+    again = split["read 2"][0] + split["read 3"][0]
+    if not (run or r1 or again):
+        return "clean"
+    out = []
+    if run:
+        out.append("the core's reads during the run")
+    if again:
+        out.append("stored wrong (re-reads fail too: the write path)")
+    elif r1:
+        out.append("the host's first read only (the C2H read path, transient)")
+    return "; ".join(out)
 
 
 def _rmw_kernel():
