@@ -6,6 +6,9 @@ rem   3 r8_ddr_check   the DDR3 soak, 4 passes under each calibration (criterion
 rem   4 r8_needle      Cactus Needle int8 / CQ4
 rem   5 r8_llm         LFM3, MiniCPM5-2B, Granite 4.2 3B against the fp32 reference
 rem   6 r8_speed       chat speed: Qwen3, Qwen3.5-0.8B / 2B, LFM2.5, BitNet, Bonsai
+rem   7 r8_ttft        time to first token, cold / warm program cache, 4-bit Qwen3
+rem The DDR3 step under the loadcal kind only (KINDS=ternary:4; the no-loadcal phase fails by
+rem design): set KINDS before running for another set. Takes sync_next.bundle first, if it is there.
 rem The logs are copied to runs\<date-time>\ beside this file. No bitstream load, no rescan.
 rem Before it: r8_load_newest.cmd (or r8_load.cmd), then r8_restore_pcie.cmd.
 setlocal
@@ -13,6 +16,8 @@ for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss
 set "OUT=%~dp0runs\%TS%"
 mkdir "%OUT%" || (echo cannot create %OUT% & pause & exit /b 1)
 set PASSES=4
+if not defined KINDS set KINDS=ternary:4
+if exist "%~dp0sync_next.bundle" (copy /y "%~dp0sync_next.bundle" "%~dp0sync.bundle" >nul & del "%~dp0sync_next.bundle")
 echo === logs: %OUT%
 call :step r8_models r8_models.log
 call :step r8_card_tests r8_card_tests.log
@@ -23,6 +28,7 @@ call :step "r8_llm lfm3" r8_llm_lfm3.log
 call :step "r8_llm minicpm5" r8_llm_minicpm5.log
 call :step "r8_llm granite" r8_llm_granite.log
 call :step r8_speed r8_speed.log
+call :step r8_ttft r8_ttft.log
 echo.
 echo === ALL DONE. Results by step:
 type "%OUT%\steps.txt"
