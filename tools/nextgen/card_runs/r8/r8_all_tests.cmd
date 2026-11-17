@@ -10,6 +10,8 @@ rem   7 r8_ttft        time to first token, cold / warm program cache, 4-bit Qwe
 rem The DDR3 step under the loadcal kind only (KINDS=ternary:4; the no-loadcal phase fails by
 rem design): set KINDS before running for another set. Takes sync_next.bundle first, if it is there.
 rem The logs are copied to runs\<date-time>\ beside this file. No bitstream load, no rescan.
+rem Do not press Ctrl+C in this window (it interrupts the step; its host side goes on): to copy, select
+rem with the mouse and press Enter.
 rem Before it: r8_load_newest.cmd (or r8_load.cmd), then r8_restore_pcie.cmd.
 setlocal
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "TS=%%t"
@@ -38,6 +40,18 @@ exit /b 0
 :step
 echo.
 echo ================ %date% %time% %~1
+rem a run still holding the card (a step whose window was interrupted: its host side goes on): wait
+rem for it, up to an hour, instead of every later step failing "another run is using the card"
+set /a W=0
+:wait
+call "%~dp0r8_stop.cmd" check >nul 2>&1
+if not errorlevel 3 goto go
+if %W% geq 60 (echo the card stayed busy for an hour: %~1 skipped & echo %~1: busy, skipped >> "%OUT%\steps.txt" & exit /b 0)
+if %W%==0 echo the card is busy (an earlier run on the host): waiting, a minute at a time
+set /a W+=1
+timeout /t 60 /nobreak >nul
+goto wait
+:go
 for /f "tokens=1,*" %%a in ("%~1") do call "%~dp0%%a.cmd" %%b < nul
 echo %~1: exit %errorlevel% >> "%OUT%\steps.txt"
 if exist "%~dp0%~2" copy /y "%~dp0%~2" "%OUT%\" >nul
