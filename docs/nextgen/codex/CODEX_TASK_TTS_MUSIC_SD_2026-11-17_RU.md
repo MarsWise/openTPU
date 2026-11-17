@@ -8,7 +8,7 @@
 
 ### 0.1 Git и публикация
 - Работай в **своём клоне**: `git clone https://github.com/MarsWise/openTPU.git C:\myOpenTPU\codex-gen`
-  (или в WSL), ветка `feature/r7-fpga` от коммита не старше `9739f2bd`. Локальная ветка —
+  (или в WSL), ветка `feature/r7-fpga` от коммита не старше `27f90e59`. Локальная ветка —
   `codex/<модель>`.
 - **Ничего не пушь.** Ни в MarsWise, ни тем более в FeSens. Сдача — `git format-patch` от базового
   коммита в `C:\myOpenTPU\_claude\codex\<модель>\` плюс `REPORT_<модель>.md`.
