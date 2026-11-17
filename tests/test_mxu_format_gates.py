@@ -138,3 +138,40 @@ def test_r8_card_check_takes_the_area_build():
     assert not all(ok for ok, _, _ in m.caps_checks(bad))
     bad = {"caps2": {**full, "tbin": False, "tbgsc": False}, "cfg": {"hash": 0x37f51889}}
     assert not all(ok for ok, _, _ in m.caps_checks(bad))
+
+
+@pytest.mark.parametrize("KB,unit,acc,M", [(7, False, True, 2), (20, False, False, 1),
+                                           (5, True, False, 2)])
+def test_bitnet_tmm_plain_pair_quad_without_the_optional_decodes_rtl(have_verilator, KB, unit,
+                                                                     acc, M):
+    """BitNet b1.58's path (2-bit TMM codes 00 / 01 / 10, plain, PAIR and QUAD) on the m8 MXU
+    built without BIN / CQ / T5: RTL == ISA under AXI stalls."""
+    from opentpu import rtlsim
+    from opentpu.quant import pack_ternary_mxu
+    rng = np.random.default_rng(0xB17 + KB)
+    cfg = Config(S=1, D=128, MCOLS=8, ACT_ROWS=16, ACT_BLOCKS=32, DRAM_BYTES=1 << 22)
+    D, N = cfg.D, 9
+    x = rng.standard_normal((M, KB * D), dtype=np.float32)
+    packed = pack_ternary_mxu(rng.choice(np.array([-1, 0, 1], np.int8), (N, KB * D)), D)
+    wa, sa, oa, ia, ors = 0x100000, 0x200000, 4096, 0x280000, N + 2
+    img = np.zeros(cfg.DRAM_BYTES, np.uint8)
+    img[:x.nbytes] = x.view(np.uint8).reshape(-1)
+    img[wa:wa + packed.size] = packed.reshape(-1)
+    img[sa:sa + 4 * N] = rng.uniform(0.05, 0.2, N).astype(np.float32).view(np.uint8)
+    init = rng.standard_normal((M, ors), dtype=np.float32)
+    img[ia:ia + init.nbytes] = init.view(np.uint8).reshape(-1)
+    s, rs = 0 if unit else sa, packed.shape[1]
+    prog = [I.ld(0, 0, M * KB * D)] + ([I.ld(ia, oa, M * ors)] if acc else []) + [
+        I.qact(0, M, 0, KB, KB * D, dup4=True),
+        I.tmm(wa, s, oa, N, KB, rs, ors, M, 0, 4, unit=unit, rsc=not unit, acc=acc, rmax=True,
+              quad=True),
+        I.tmm(wa, s, oa + 2 * M * ors, N, KB, rs, ors, M, 0, 4, unit=unit, rsc=not unit),
+        I.qact(0, M, 0, KB, KB * D, dup=True),
+        I.tmm(wa, s, oa + 4 * M * ors, N, KB, rs, ors, M, 0, 4, unit=unit, rsc=not unit,
+              rmax=True, pair=True),
+        I.halt()]
+    ref = Machine(cfg, [prog], [img.copy()]).run().slices[0]
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [img.copy()], axi=True, stall=25, seed=KB,
+                                 uarch=OFF)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)
+    np.testing.assert_array_equal(drams[0], ref.dram)
