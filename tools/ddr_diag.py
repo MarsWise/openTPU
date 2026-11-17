@@ -4,6 +4,16 @@
     python tools/ddr_diag.py pattern [--mib 512] [--load none|fp4|ternary:4] [--passes 2]
     python tools/ddr_diag.py steps MODEL_DIR [--n 32]
     python tools/ddr_diag.py rmw [--iters 200000]
+    python tools/ddr_diag.py wr [--mib 256] [--load ternary:4]
+
+wr: is a wrong word written wrong or read wrong, and does it need the core's load? Per channel
+random data is written by the host and read back twice, in four phases: written idle or under
+the core's load, read idle or under it. A word wrong in both reads was stored wrong (the write,
+or the cell); a word wrong in one read only was read wrong. Per phase and channel: the words
+wrong in the first / second / both reads, the byte lanes and data bits they differ in, the
+first addresses, the ECC counters. The host sees data after the ECC, so a word read wrong here
+is an uncorrectable (or miscorrected) one; the corrected ones are in the counters only. The
+counters of a phase under load include the core's own reads: the first line is the load alone.
 
 rmw: the accelerator streams 4 MiB of DRAM (64 KiB tiles, every DRAM row in turn) and between
 two tile loads stores to one 64-byte beat: nothing (reads only), a whole beat (64 B), one 4-byte
@@ -95,6 +105,103 @@ def cmd_pattern(a) -> int:
     print(f"{gb:.1f} GB moved in {dt:.0f} s; temp {b.info().get('temp_c')}")
     b.scrub(force=True)
     return 0 if not any(bad.values()) and not any(x[1] for x in e) else 1
+
+
+def _piece(seed, ch, off, n):
+    return np.random.default_rng([seed, ch, off]).integers(0, 256, n, np.uint8)
+
+
+def wr_write(t, ch, offs, piece, seed):
+    for off in offs:
+        t.mem_write(ch, off, _piece(seed, ch, off, piece))
+
+
+def wr_read(t, ch, offs, piece, seed):
+    """Two reads of what wr_write wrote: words wrong in the first, the second, both; the byte
+    lanes and the bits (of the 64-bit word) the first read differs in; the first addresses."""
+    r = {"first": 0, "second": 0, "both": 0, "lanes": np.zeros(8, np.int64),
+         "bits": np.zeros(64, np.int64), "at": []}
+    for off in offs:
+        d = _piece(seed, ch, off, piece).view(np.uint64)
+        x1 = d ^ np.asarray(t.mem_read(ch, off, piece)).view(np.uint64)
+        x2 = d ^ np.asarray(t.mem_read(ch, off, piece)).view(np.uint64)
+        w1, w2 = x1 != 0, x2 != 0
+        r["first"] += int(w1.sum())
+        r["second"] += int(w2.sum())
+        r["both"] += int((w1 & w2).sum())
+        if w1.any():
+            x = x1[w1]
+            r["lanes"] += (x.view(np.uint8).reshape(-1, 8) != 0).sum(0, dtype=np.int64)
+            r["bits"] += np.unpackbits(x.view(np.uint8).reshape(-1, 8), axis=1, bitorder="little").sum(0, dtype=np.int64)
+            r["at"] += [(off + 8 * int(i), int(v)) for i, v in zip(np.flatnonzero(w1)[:4], x[:4])]
+    r["at"] = r["at"][:4]
+    return r
+
+
+def wr_verdict(r):
+    if not r["first"] and not r["second"]:
+        return "clean"
+    if r["both"] == r["first"] == r["second"]:
+        return "stored wrong (the write, or the cell)"
+    if not r["both"]:
+        return "read wrong (the stored word is right)"
+    return "both: stored wrong and read wrong"
+
+
+def cmd_wr(a) -> int:
+    from opentpu.host import loadcal
+    from opentpu.host.board import Board, XdmaTransport, device_config
+    b = Board(XdmaTransport(a.dev), check=False)
+    t, info = b.t, b.info()
+    print(f"card build {info.get('build_id') or 0:#x}, core {info.get('core_khz')} kHz, "
+          f"temp {info.get('temp_c')}; load {a.load}; {a.mib} MiB a channel")
+    b.scrub(force=True)
+    kind, rows = loadcal.load_kind(a.load)
+    img, lay, prog = loadcal.build(device_config(info, DRAM_BYTES=1 << 30), rows=rows, kind=kind)
+    b.write(0, img)
+    state = {"on": False}
+
+    def load(on):
+        if on and not state["on"]:
+            b.load(lay["prog"], prog)
+            b.start()
+        elif state["on"] and not on:
+            b.stop()
+        state["on"] = on
+
+    piece = 64 << 20
+    offs = range(1 << 30, (1 << 30) + (a.mib << 20), piece)
+    bad = 0
+    try:
+        _ecc(t)
+        load(True)
+        time.sleep(a.alone)
+        load(False)
+        e = _ecc(t)
+        print(f"the load alone, {a.alone} s: ECC ch0 {e[0][0]} / {e[0][1]}, ch1 {e[1][0]} / {e[1][1]}")
+        for wl in (False, True):
+            for rl in (False, True):
+                for ch in (0, 1):
+                    load(wl)
+                    wr_write(t, ch, offs, piece, a.seed)
+                    load(False)
+                    _ecc(t)
+                    load(rl)
+                    r = wr_read(t, ch, offs, piece, a.seed)
+                    load(False)
+                    e = _ecc(t)
+                    bad += r["first"] + r["second"] + sum(x[1] for x in e)
+                    print(f"write {'load' if wl else 'idle'} / read {'load' if rl else 'idle'}, channel {ch}: "
+                          f"wrong in read 1 / read 2 / both {r['first']} / {r['second']} / {r['both']}: "
+                          f"{wr_verdict(r)}; ECC during the reads ch0 {e[0][0]} / {e[0][1]}, ch1 {e[1][0]} / {e[1][1]}")
+                    if r["first"]:
+                        print(f"    byte lanes {r['lanes'].tolist()}; bits {np.flatnonzero(r['bits']).tolist()[:24]}; "
+                              f"first {[(hex(o), hex(v)) for o, v in r['at']]}")
+    finally:
+        load(False)
+    print(f"temp {b.info().get('temp_c')}")
+    b.scrub(force=True)
+    return 0 if not bad else 1
 
 
 def cmd_steps(a) -> int:
@@ -268,8 +375,14 @@ def main() -> int:
     r = sp.add_parser("rmw")
     r.add_argument("--iters", type=int, default=200000)
     r.add_argument("--dev", default="/dev/xdma0")
+    w = sp.add_parser("wr")
+    w.add_argument("--mib", type=int, default=256)
+    w.add_argument("--load", default="ternary:4")
+    w.add_argument("--alone", type=int, default=30)
+    w.add_argument("--seed", type=int, default=0)
+    w.add_argument("--dev", default="/dev/xdma0")
     a = ap.parse_args()
-    return {"pattern": cmd_pattern, "steps": cmd_steps, "rmw": cmd_rmw}[a.cmd](a)
+    return {"pattern": cmd_pattern, "steps": cmd_steps, "rmw": cmd_rmw, "wr": cmd_wr}[a.cmd](a)
 
 
 if __name__ == "__main__":

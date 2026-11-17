@@ -11,6 +11,10 @@
 # - OTPU_SYS_MARGIN (sys): LiteDRAM's sys clock to itself (the controllers, the PHY's read data
 #   into the ECC decoders), which carries no uncertainty of its own (otpu_litedram.xdc's are on the
 #   ld MMCMs' clock pairs: not here, as build.tcl sets these back to 0).
+# - OTPU_WR_MARGIN (wr): LiteDRAM's sys clock into the two channels' write clocks (outs2: the
+#   PHY's OSERDES inputs, 729 paths a channel), which carries no uncertainty either (the xdc's
+#   1 ns pairs are sys <-> outs0). r8 + C2 c969ca4c closed channel 0's at +0.029 ns (2c800a8f
+#   +0.193, r5 45b1c1d3 +0.206) and read uncorrectable words on channel 0 within minutes.
 # One "# margin NAME {FROM} {TO} NS" line a group in the file (build.tcl parses them).
 proc otpu_write_margins {out} {
   set margins {}
@@ -19,6 +23,7 @@ proc otpu_write_margins {out} {
                            {core_clk_otpu_bd_clk_wiz_0_0 core_clk2x_otpu_bd_clk_wiz_0_0}
     OTPU_X2C_MARGIN   x2c  {core_clk2x_otpu_bd_clk_wiz_0_0} {core_clk_otpu_bd_clk_wiz_0_0}
     OTPU_SYS_MARGIN   sys  {crg_s7mmcm_clkout} {crg_s7mmcm_clkout}
+    OTPU_WR_MARGIN    wr   {crg_s7mmcm_clkout} {writeclocks0_outs2 writeclocks1_outs2}
   } {
     set m [expr {[info exists ::env($knob)] && $::env($knob) ne "" ? $::env($knob) : 0}]
     if {![string is double -strict $m] || $m < 0 || $m > 1} { error "$knob '$m': a margin in ns, 0 to 1" }
@@ -26,7 +31,7 @@ proc otpu_write_margins {out} {
   }
   if {![llength $margins]} { return "" }
   set fh [open $out/otpu_margin.tcl w]
-  puts $fh "# otpu_margin.tcl (margins.tcl, OTPU_SETUP_MARGIN / OTPU_X2C_MARGIN / OTPU_SYS_MARGIN): more setup"
+  puts $fh "# otpu_margin.tcl (margins.tcl, OTPU_SETUP_MARGIN / OTPU_X2C_MARGIN / OTPU_SYS_MARGIN / OTPU_WR_MARGIN): more setup"
   puts $fh "# uncertainty on the checks of each group (implementation only; build.tcl removes it)"
   foreach g $margins { puts $fh "# margin [lindex $g 0] {[lindex $g 1]} {[lindex $g 2]} [lindex $g 3]" }
   puts $fh "proc otpu_margin_set {name from to m} {"
