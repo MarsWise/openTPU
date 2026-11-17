@@ -1,5 +1,5 @@
 @echo off
-rem Claude: run_rows ECC errors split by phase (the run, the host reads of the logits), about 15 minutes.
+rem Claude: run_rows ECC errors split by phase (the run, the host reads of the logits), about 25 minutes.
 rem Saves r8_ddr_split.log here. Card must be loaded and restored (PCIe) already.
 rem No bitstream load, no rescan, no mode registers. Not during another run on the card.
 rem Takes sync_next.bundle (the tree with the tool) as sync.bundle first, if it is there.

@@ -42,7 +42,8 @@ the decode in four ways, the ECC counters read and cleared after every run: one 
 resident decode step (step), 4 rows as one rows program with logits to the host (run_rows),
 4 and 2 rows as llm/batch.py's steps (picked on the card). Reports per mode the runs, the runs
 with ECC errors, corrected / uncorrectable. Tokens are not checked (the counters are the point).
-Then (on the card) run_rows split in phases -- the run alone (the host's logits read stubbed out)
+Then (on the card) run_rows split in phases -- the rows program without the LM head, the run alone
+(the host's logits read stubbed out)
 and three host reads of its logits -- with a verdict: the core's reads, the host's read path or
 stored wrong (split_verdict).
 """
@@ -340,7 +341,7 @@ def cmd_steps(a) -> int:
     # host reads the logits three times, the counters read and cleared after each phase. Errors
     # in the run: the core's reads; only in the first read: the host's read path (C2H);
     # in every read: the logits were stored wrong (the write path)
-    split = {k: [0, 0, 0] for k in ("run", "read 1", "read 2", "read 3")}
+    split = {k: [0, 0, 0] for k in ("no head", "run", "read 1", "read 2", "read 3")}
     io, v, vl, S = eng.image.io, spec.vocab, eng.image.v_loc, eng.cfg.S
 
     def logits_read():
@@ -374,8 +375,17 @@ def cmd_steps(a) -> int:
             for s in range(4):
                 eng.poss[s] += 1
 
+    def rows_no_head():         # the same rows program without the LM head (no logit rows)
+        rows = [(s, eng.poss[s]) for s in range(4)]
+        try:
+            eng.run_rows(rows, [tok] * 4, [])
+        finally:
+            for s in range(4):
+                eng.poss[s] += 1
+
     if board is not None:
         for _ in range(a.n):
+            phase("no head", rows_no_head)
             phase("run", rows_run_only)
             for k in ("read 1", "read 2", "read 3"):
                 phase(k, logits_read)
@@ -412,11 +422,17 @@ def split_verdict(split) -> str:
     """run_rows split's phases -> where the errors come from."""
     run, r1 = split["run"][0], split["read 1"][0]
     again = split["read 2"][0] + split["read 3"][0]
-    if not (run or r1 or again):
+    if not (run or r1 or again or split.get("no head", [0])[0]):
         return "clean"
     out = []
+    nohead = split.get("no head", [0])[0]
     if run:
-        out.append("the core's reads during the run")
+        out.append("the core's reads during the run" + (
+            "" if "no head" not in split else
+            " (also without the LM head)" if nohead else
+            " (only with the LM head storing its logits: the rows program without it is clean)"))
+    elif nohead:
+        out.append("the core's reads in the rows program without the LM head only")
     if again:
         out.append("stored wrong (re-reads fail too: the write path)")
     elif r1:
