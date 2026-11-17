@@ -37,7 +37,7 @@ from .platform import BLOCK_SIZE, Unsupported
 logger = init_logger(__name__)
 
 DEFAULTS = dict(dev="/dev/xdma0", slots=4, wformat="auto", head_format=None,
-                resident=True, prompt_runs=True, fpga_only=False)
+                resident=True, prompt_runs=True, fpga_only=False, device_prefill=True)
 
 
 def card_dram_bytes() -> int:
@@ -59,6 +59,11 @@ def options(vllm_config) -> dict:
         if flag not in ("0", "1"):
             raise ValueError("OTPU_VLLM_FPGA_ONLY must be 0 or 1")
         o["fpga_only"] = flag == "1"
+    if "OTPU_VLLM_DEVICE_PREFILL" in os.environ:
+        flag = os.environ["OTPU_VLLM_DEVICE_PREFILL"].strip()
+        if flag not in ("0", "1"):
+            raise ValueError("OTPU_VLLM_DEVICE_PREFILL must be 0 or 1")
+        o["device_prefill"] = flag == "1"
     return o
 
 
@@ -368,7 +373,15 @@ class OpenTPUWorker(WorkerBase):
             if len(part) != n:
                 raise RuntimeError(f"openTPU: {rid} scheduled {n} tokens, {len(part)} known")
             last = p0 + n == len(r.tokens)
-            if self.opts["fpga_only"]:
+            # device_prefill (default): a request the batched step serves (its sampling on the
+            # card) takes the FPGA-only route even without fpga_only: no prefill run stores
+            # logits. The r8 card read DDR3 ECC errors only where the LM head stores its logits
+            # between the MXU's weight reads (rows programs; vLLM's prefill, r8_ddr_split
+            # 2026-11-17), never in the batched step's on-card picks.
+            on_card = self.opts["fpga_only"] or (
+                self.opts.get("device_prefill", True) and self.steps is not None
+                and _greedy(r.params))
+            if on_card:
                 # Process every prompt chunk without materializing logits on the host; its last
                 # token goes through the same on-device greedy head as subsequent decode steps.
                 feed = part[:-1] if last else part
