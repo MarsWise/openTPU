@@ -80,7 +80,10 @@ module otpu_slice
                                       //   at bit 3p; 0: PRANK3, below)
   parameter int TMEM_SDM   = -1,      // TMEM_TDP: the read ports' RAM sides (bit p: port p on
                                       //   port A; -1: TM_SIDED, below)
-  parameter bit SEQ_WC     = 1'b0     // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
+  parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
+  parameter bit HAS_TBIN   = 1'b1,    // the MXU's weight formats (otpu_mxu HAS_BIN / HAS_CQ / HAS_T5):
+  parameter bit HAS_TCQ    = 1'b1,    //   0 leaves a format's decode out (the board's TBIN / TCQ /
+  parameter bit HAS_TD5    = 1'b1     //   TD5, which CAPS2 reports)
 ) (
   input  logic          clk,
   input  logic          clk_f,      // TMEM_PMP 1: 2 x clk, rising with it (the MMCM's); else unused
@@ -516,7 +519,8 @@ module otpu_slice
     .rdy(r_mxu), .done(d_mxu), .m_start(mx_start), .m_go(mx_go), .m_cmd(mx_cmd),
     .m_rdy(mx_rdy), .m_done(mx_done), .lw_we(cq_we), .lw_a(cq_a), .lw_d(cq_d));
   otpu_mxu #(.D(D), .MCOLS(MCOLS), .ROWS(ACT_ROWS), .DEPTH(FIFO_DEPTH), .LANES(ULANES), .IMPL(MXU_IMPL),
-             .CL(MXU_CL), .E(MXU_E), .TQ(MXU_TQ), .SID(SID), .TLANES(LANES)) u_mxu (
+             .CL(MXU_CL), .E(MXU_E), .TQ(MXU_TQ), .SID(SID), .TLANES(LANES),
+             .HAS_BIN(HAS_TBIN), .HAS_CQ(HAS_TCQ), .HAS_T5(HAS_TD5)) u_mxu (
     .clk, .rst(rst_mxu), .start(mx_start), .go(mx_go), .cmd(mx_cmd), .rdy(mx_rdy), .done(mx_done),
     .lw_we(cq_we), .lw_a(cq_a), .lw_d(cq_d),
     .computing(mxu_pop), .pf_level(mxu_level), .pf_starve(mxu_starve), .pf_block(mxu_block),

@@ -250,7 +250,13 @@ module otpu_mxu
   parameter int E     = 0,       // epilogue lanes (0: MCOLS / 2, at least 1; more than MCOLS: MCOLS)
   parameter bit TQ    = 1'b0,    // reads not granted (TMEM replays them), writes through a queue,
                                  //   the epilogue's advance from flip-flops (the slice: TMEM_IMPL 3 RPL)
-  parameter int SID   = 0
+  parameter int SID   = 0,
+  // weight formats a build may leave out (CAPS2 says which it has; the host refuses the
+  // commands then): the decode's paths for them are not built. The command bits still pass
+  // through the FIFO, but every use after it is gated, so synthesis removes the logic.
+  parameter bit HAS_BIN = 1'b1,  // TMM BIN, packed binary weights (CAPS2 TBIN)
+  parameter bit HAS_CQ  = 1'b1,  // TMM CQ / CQ4, codebook LUT weights (CAPS2 TCQ): the D LUT RAMs
+  parameter bit HAS_T5  = 1'b1   // TMM T5, dense trits (CAPS2 TD5): the D trit tables
 ) (
   input  logic                  clk,
   input  logic                  rst,
@@ -345,8 +351,8 @@ module otpu_mxu
   wire cmd_ternary = cmd.op == OP_TMM;
   // TMM T5 (the GSC adapter's subcommands: word 4 bits 26 and 29, 27 clear; the trit in 28,
   // 25:24): dense trits, five a byte (opentpu/trits.py)
-  wire cmd_t5 = cmd_ternary && cmd.w4[26] && cmd.w4[29] && !cmd.w4[27];
-  wire cmd_binary = cmd_ternary && cmd.w4[26] && !cmd_t5;
+  wire cmd_t5 = HAS_T5 && cmd_ternary && cmd.w4[26] && cmd.w4[29] && !cmd.w4[27];
+  wire cmd_binary = HAS_BIN && cmd_ternary && cmd.w4[26] && !cmd_t5;
   // TMM QUAD (the ternary K-split by four; TMM's weight-format field is reserved, its bit4 the
   // flag): a chunk's four K blocks in one advance, column j + q*M taking block 4c + q from ACT row
   // j + q*M (QACT DUP4), 4M <= MCOLS; the four partners' integers are added before the result FIFO
@@ -361,7 +367,7 @@ module otpu_mxu
   wire cmd_gq4 = cmd_grq && cmd.flags[4];
   wire cmd_aq = cmd_quad || cmd_gq4;       // the array takes four quarters an advance
   // TMM CQ (the adapter's subcommands: word 4 bit 31; bit 29 CQ4): codes through the LUT
-  wire cmd_cq = cmd_ternary && cmd.w4[31];
+  wire cmd_cq = HAS_CQ && cmd_ternary && cmd.w4[31];
   wire cmd_cq4 = cmd_cq && !cmd_binary && cmd.w4[29];
   // the weight format of the entry: TMM's is 8-bit's (its field holds QUAD)
   wire [1:0] cmd_wf = cmd_ternary ? 2'd0 : cmd.flags[5:4];
@@ -575,7 +581,9 @@ module otpu_mxu
   // the pop head's (c_KB .. c_wf, p_*) and the drain head's (the rest)
   wire [15:0] c_KB = pop_e.KB, c_KBa = pop_e.KBa;
   wire        c_pair = pop_e.pair, c_ternary = pop_e.ternary;
-  wire        c_binary = pop_e.binary;
+  wire        c_binary = HAS_BIN && pop_e.binary;
+  // the popped entry's CQ / CQ4 / T5 (gated: a build without them has none)
+  wire        c_cq = HAS_CQ && pop_e.cq, c_cq4 = HAS_CQ && pop_e.cq4, c_t5 = HAS_T5 && pop_e.t5;
   wire [MCOLS-1:0] c_hi = pop_e.hi;
   wire        c_quad = pop_e.quad;
   wire        c_aq = pop_e.aq;
@@ -1033,12 +1041,12 @@ module otpu_mxu
       m0p.first <= (ck == 16'd0);
       m0p.h <= c_w4 && !c_pair && ck[0];
       m0p.o <= c_pair && !(last_k && c_KB[0]);
-      m0p.ts <= pop_e.t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
+      m0p.ts <= c_t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter : c_pair ? {1'b0, ck[0], 1'b0} :
                {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
       m0p.qd <= c_aq;
-      m0p.cq <= pop_e.cq;
-      m0p.c4 <= pop_e.cq4;
-      m0p.t5 <= pop_e.t5;
+      m0p.cq <= c_cq;
+      m0p.c4 <= c_cq4;
+      m0p.t5 <= c_t5;
       m0p.ov <= (pop_e.gq4 || !(last_k && pop_e.kr != 2'd0)) ? 4'b1111 :
                (pop_e.kr == 2'd1) ? 4'b0001 : (pop_e.kr == 2'd2) ? 4'b0011 : 4'b0111;
     end
@@ -1204,11 +1212,11 @@ module otpu_mxu
     wp_qd <= pop && c_aq;
     wp_tn <= pop && c_ternary;
     wp_bn <= pop && c_binary;
-    wp_cq <= pop && pop_e.cq;
-    wp_c4 <= pop && pop_e.cq4;
-    wp_t5 <= pop && pop_e.t5;
+    wp_cq <= pop && c_cq;
+    wp_c4 <= pop && c_cq4;
+    wp_t5 <= pop && c_t5;
     wp_h <= pop && c_w4 && !c_pair && ck[0];
-    wp_ts <= !pop ? 3'b000 : pop_e.t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter :
+    wp_ts <= !pop ? 3'b000 : c_t5 ? pop_e.quarter : c_binary ? ck[2:0] + pop_e.quarter :
              c_pair ? {1'b0, ck[0], 1'b0} :
              {1'b0, ck[1:0] + pop_e.quarter[1:0] + (pop_e.grq ? cg[1:0] : 2'b00)};
     wp_wf <= c_wf;
@@ -1233,10 +1241,14 @@ module otpu_mxu
     return {2'b00, w[2 * (int'(ts) * D + i) +: 2]};
   endfunction
   logic [D-1:0][7:0] cq_v;
-  for (genvar i = 0; i < D; i++) begin : g_cq
-    (* ram_style = "distributed" *) logic [7:0] m [16];
-    always_ff @(posedge clk) if (lw_we) m[lw_a] <= lw_d;
-    assign cq_v[i] = m[cqa(w0, i, wq_bn, wq_c4, wq_ts)];
+  if (HAS_CQ) begin : g_cqh
+    for (genvar i = 0; i < D; i++) begin : g_cq
+      (* ram_style = "distributed" *) logic [7:0] m [16];
+      always_ff @(posedge clk) if (lw_we) m[lw_a] <= lw_d;
+      assign cq_v[i] = m[cqa(w0, i, wq_bn, wq_c4, wq_ts)];
+    end
+  end else begin : g_nocq
+    assign cq_v = '0;                                  // (no CQ: wq_cq / wq_c4 are 0)
   end
   logic [D-1:0][15:0] wd;                             // S1: {high block, low block / half}
   always_ff @(posedge clk)

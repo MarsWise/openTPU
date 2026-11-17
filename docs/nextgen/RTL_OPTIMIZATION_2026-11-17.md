@@ -97,3 +97,34 @@
 `test_mm_block_offset_uses_all_eight_bits`, `test_tmm_cq.py::test_lutset_between_cq_tmms_rtl`
 (RTL == ISA); margins.tcl — tclsh; `test_r8_build_plan_windows`, `test_target`,
 `test_litedram_rtw` — 33 passed, 5 skipped.
+
+## 6. C4 — площадь: неиспользуемые форматы весов MXU (17.11.2026, ночь)
+
+**Находка (ИСХОДНИКИ).** Флаги сборки `TBIN`, `TCQ`, `TD5` и остальные из CAPS2 до сих пор доходили
+только до `otpu_ctrl` (биты CAPS2): тракт данных строился со всеми форматами всегда. Выключение
+флага не освобождало ни одного LUT.
+
+**Правка.** `otpu_mxu` получил параметры `HAS_BIN`, `HAS_CQ`, `HAS_T5` (по умолчанию 1); их
+проводят `otpu_slice` / `otpu_top` / `tb_top` (`HAS_TBIN`, `HAS_TCQ`, `HAS_TD5`), а `otpu_board`
+подаёт туда флаги платы `TBIN` / `TCQ` / `TD5`. Декод команды и каждое использование после FIFO
+(`c_binary`, `c_cq`, `c_cq4`, `c_t5`, регистры `wp_*` / `m0p.*`) умножены на параметр, D LUT-RAM
+кодовой книги CQ строятся только при `HAS_CQ`. Синтез убирает таблицы тритов T5 (D штук) и декод
+BIN. Хост и раньше отказывал таким программам по CAPS2 (`Board.load_program`).
+
+**Сборка.** `OTPU_DROP_FEATURES` (build_r5_timing.ps1) обнуляет `OTPU_<f>_GEN`; CFG_HASH
+считается из того, что собирается. `r8_build_c4.cmd`: C3 (rtw 4, трасса 4096, запасы) без
+`TD5 TBIN TBGSC`, ожидаемый CFG_HASH **37f51889** (`r8_build_c4.cmd plan` печатает его без
+Vivado). TCQ остаётся: на нём 6-битный KV-кэш (kv6 / k6v6: QST6 + TMM CQ2 GRQ), Needle CQ4, веса
+Cactus CQ. `r8_card_check.py`, `r8_card_tests.sh`, `r8_restore_pcie.cmd` принимают C4.
+
+**Выигрыш — ОЦЕНКА, не измерено:** декод весов MXU вырос с r5 на +8,6 тыс. LUT (раздел 1), из них
+T5 и BIN — часть; точную цифру даст отчёт C4 (`util_hier.rpt`, узел `g_wsk` / `u_mxu`).
+Yosys здесь без плагина slang, поэтому SV-дизайн им не синтезируется.
+
+**Проверка (RTL SIMULATED, Verilator 5.046):** `tests/test_mxu_format_gates.py` — MM int8 / int4 /
+fp4 PAIR / NVFP4 PAIR и TMM GSC / GRQ / GRQ QUAD на m8 без BIN / CQ / T5 (и без одного CQ) ==
+ISA, с AXI-задержками; по умолчанию (всё включено) `test_tmm_t5`, `test_tmm_cq`, `test_tmm_grq`,
+адаптер CQ / GSC — 47 passed; BIN, BIN GSC, QST6 + проверки — 56 passed; хэши C3 / C4, разбор CAPS2 в `r8_card_check`.
+
+Дальше по площади (не в C4): VRAND один генератор (−5,7 тыс. LUT, нужна остановка VPU),
+LDX и TFN atan — тоже только биты CAPS2 (тракт строится всегда; моделей на карте нет), трасса 0.

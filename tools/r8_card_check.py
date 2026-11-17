@@ -41,11 +41,35 @@ from opentpu.isasim import Machine  # noqa: E402
 
 R8_HASH = 0x93e29b18
 R8Q_HASH = 0xa905c3db       # r8 with GRQ QUAD (CAPS2 bit20, Config.TGQ4: C2)
+# the area build (C4, r8_build_c4.cmd): C2's capabilities less TMM T5, BIN and BIN GSC, which no
+# model on the card uses (OTPU_DROP_FEATURES; otpu_mxu HAS_T5 / HAS_BIN 0)
+R8A_HASH = 0x37f51889
+R8A_LEFT_OUT = ("tbin", "tbgsc", "td5")
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
           "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4")
 IMG_MAX, DUMP, ZERO, END = 0x200000, 0x200000, 0x280000, 0x300000
+
+
+def caps_checks(info: dict, sim: bool = False) -> list:
+    """[(ok, what, detail)]: the bitstream's CAPS2 holds r8's capabilities (the area build C4:
+    less T5 / BIN / BIN GSC, and those clear) and its CFG_HASH is one of r8's builds."""
+    c2 = info.get("caps2") or {}
+    h = (info.get("cfg") or {}).get("hash", 0)
+    area = h == R8A_HASH                       # C4: T5 / BIN / BIN GSC left out
+    missing = [k for k in R8_CAPS2 if not c2.get(k) and not (area and k in R8A_LEFT_OUT)]
+    out = [(not missing, "CAPS2: the r8 capabilities", "missing " + ", ".join(missing) if missing
+            else "all of " + " ".join(k for k in R8_CAPS2 if c2.get(k))
+            + (" (left out for area: " + " ".join(R8A_LEFT_OUT) + ")" if area else ""))]
+    if area:
+        extra = [k for k in R8A_LEFT_OUT if c2.get(k)]
+        out.append((not extra, "CAPS2: the area build leaves out T5 / BIN / BIN GSC",
+                    ", ".join(extra)))
+    out.append((sim or h in ((R8Q_HASH, R8A_HASH) if c2.get("tgq4") else (R8_HASH,)),
+                "CFG_HASH is r8's", f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD "
+                f"{R8Q_HASH:#010x}, area build {R8A_HASH:#010x}"))
+    return out
 
 
 def run_case(b: Board, card, prog: list, image: np.ndarray) -> tuple[bool, str]:
@@ -110,7 +134,7 @@ def r8_cases(card) -> list:
             cfg, img, head, gq, quad = GQ.gq4_case(kb, acc, n, mcols=min(8, card.MCOLS))
             out.append((f"TMM GRQ QUAD (KB {kb}{', ACC' if acc else ''})",
                         head + [quad, gq, quad, I.halt()], img))
-    for dense in (False, True):
+    for dense in ((False, True) if getattr(card, "TD5", False) else (False,)):
         _, (cfg, prog, img) = T5.run(24, 2, 3, gsc=True, dense=dense)
         out.append((f"TMM {'T5 (dense trits)' if dense else 'GSC 2-bit'}", prog, img))
     cfg, img, prog, _ = Q4.case(rows=9, kb=1, m=2)
@@ -165,12 +189,8 @@ def main() -> int:
     c2 = info.get("caps2") or {}
     print("build", hex(info.get("build_id") or 0), "core_khz", info.get("core_khz"),
           "cfg hash", hex((info.get("cfg") or {}).get("hash", 0)), flush=True)
-    missing = [k for k in R8_CAPS2 if not c2.get(k)]
-    check(not missing, "CAPS2: the r8 capabilities", "missing " + ", ".join(missing) if missing
-          else "all of " + " ".join(R8_CAPS2))
-    h = (info.get("cfg") or {}).get("hash", 0)
-    check(a.sim or h == (R8Q_HASH if c2.get("tgq4") else R8_HASH), "CFG_HASH is r8's",
-          f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}")
+    for ok, what, detail in caps_checks(info, a.sim):
+        check(ok, what, detail)
     try:
         check_hash(info)
         check(True, "CFG_HASH matches this host's Config")

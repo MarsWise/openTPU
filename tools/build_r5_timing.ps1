@@ -100,6 +100,23 @@ $buildEnv = @{
     OTPU_LITEDRAM_RTW = $(if ($env:OTPU_LITEDRAM_RTW) { $env:OTPU_LITEDRAM_RTW } else { '' })
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
+# capabilities left out of the build (OTPU_DROP_FEATURES, e.g. "TCQ TD5 TBIN TBGSC" or
+# "TRACE"): their OTPU_<f>_GEN 0, so CAPS2 clears them and the host refuses their programs; the
+# MXU leaves TBIN / TCQ / TD5's weight decode out (otpu_mxu HAS_BIN / HAS_CQ / HAS_T5: area).
+# TRACE: TRACE_DEPTH 0 (no trace buffer: -32 BRAM36 at 16384). Not set: every r8 capability.
+if ($env:OTPU_DROP_FEATURES) {
+    foreach ($f in ($env:OTPU_DROP_FEATURES -split '[ ,;]+' | Where-Object { $_ })) {
+        $f = $f.ToUpperInvariant()
+        if ($f -eq 'TRACE') { $buildEnv.TRACE_DEPTH = '0'; continue }
+        $k = "OTPU_${f}_GEN"
+        if (-not $buildEnv.ContainsKey($k)) { throw "OTPU_DROP_FEATURES: no capability '$f'" }
+        $buildEnv[$k] = '0'
+    }
+    if ($buildEnv.OTPU_TBIN_GEN -eq '0' -and $buildEnv.OTPU_TBGSC_GEN -ne '0') {
+        throw 'OTPU_DROP_FEATURES: TBIN needs TBGSC left out too'
+    }
+    Write-Host "=== capabilities left out: $env:OTPU_DROP_FEATURES"
+}
 # m4: r4's recipe (bb27096f: WNS +0.031 / WHS +0.018 at 133.33 MHz) with r5's units -- the
 # default placer, no MXU floorplan, no extra setup margin, 64K TMEM words
 $v = if ($Variant -eq 'm8') {
@@ -134,7 +151,13 @@ if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupSc
     $tbgsc = [int][bool]$BinaryGroupScales
     $vu8 = [int][bool]$UnsignedBytes
     $rb8 = [int][bool]$R8         # (not $r8: PowerShell names are case-blind, $r8 IS the switch)
-    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), TGSC=bool($gsc), VCMP=bool($vcmp), TBIN=bool($tbin), TBGSC=bool($tbgsc), VU8=bool($vu8), TGRQ=bool($gsc), VRAND=bool($rb8), TCQ=bool($rb8), TATAN=bool($rb8), QST4=bool($rb8), LDX=bool($rb8), TD5=bool($rb8), VBFLY=bool($rb8), VAFF=bool($rb8), QST6=bool($rb8), VCSWP=bool($rb8), TGQ4=bool($rb8))):08x}')").Trim()
+    # CFG_HASH from the capabilities the build gets ($buildEnv: the switches less OTPU_DROP_FEATURES)
+    $capList = @()
+    foreach ($c in 'TGSC','VCMP','TBIN','TBGSC','VU8','TGRQ','VRAND','TCQ','TATAN','QST4','LDX','TD5','VBFLY','VAFF','QST6','VCSWP','TGQ4') {
+        $capList += ('{0}=bool({1})' -f $c, [int]($buildEnv["OTPU_${c}_GEN"] -eq '1'))
+    }
+    $caps = $capList -join ', '
+    $v.hash = (& python -c "import sys,dataclasses; sys.path.insert(0, r'$repoRoot'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print(f'{arch_hash(dataclasses.replace(configuration(), $caps)):08x}')").Trim()
     if ($LASTEXITCODE -ne 0 -or $v.hash -notmatch '^[0-9a-f]{8}$') { throw 'Cannot calculate CFG_HASH' }
 }
 $buildLabel = if ($VectorCompare -or $BinaryWeights) { 'feature-enabled experimental' } else { 'r5 timing' }
