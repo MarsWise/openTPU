@@ -95,6 +95,8 @@ $buildEnv = @{
     # incremental implementation from an earlier routed checkpoint (r8_build_incr.cmd): none unless set
     OTPU_INCR_DCP = $(if ($env:OTPU_INCR_DCP) { $env:OTPU_INCR_DCP } else { '' })
     OTPU_INCR_DIRECTIVE = $(if ($env:OTPU_INCR_DIRECTIVE) { $env:OTPU_INCR_DIRECTIVE } else { '' })
+    # the LiteDRAM core's read-to-write turnaround (litedram_rtw.tcl, r8_build_rtw4.cmd): 3 unless set
+    OTPU_LITEDRAM_RTW = $(if ($env:OTPU_LITEDRAM_RTW) { $env:OTPU_LITEDRAM_RTW } else { '' })
     OTPU_STAGE_REPORT_DIR = (Join-Path $OutDir 'reports\stages')
 }
 # m4: r4's recipe (bb27096f: WNS +0.031 / WHS +0.018 at 133.33 MHz) with r5's units -- the

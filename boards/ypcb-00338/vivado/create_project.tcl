@@ -104,7 +104,9 @@ set rtl [list \
   rtl/shell/otpu_afifo.sv rtl/shell/otpu_mem_ch.sv \
   rtl/shell/otpu_axi_split2.sv rtl/boards/ypcb-00338/otpu_native_sys.sv \
   rtl/boards/ypcb-00338/otpu_fpga_top_ld.sv]
-add_files -norecurse $root/boards/ypcb-00338/litedram/otpu_litedram.v
+# the LiteDRAM core: the committed one, or OTPU_LITEDRAM_RTW=4's copy (litedram_rtw.tcl)
+source [file join [file dirname [info script]] litedram_rtw.tcl]
+add_files -norecurse [litedram_core_file $root $out/litedram]
 # the core's identifier ROM ("openTPU LiteDRAM"), which the Verilog $readmemh's by file name:
 # synthesis finds it as a project file
 add_files -norecurse $root/boards/ypcb-00338/litedram/otpu_litedram_mem.init
