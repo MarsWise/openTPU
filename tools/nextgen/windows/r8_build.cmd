@@ -31,7 +31,7 @@ echo === the python the build uses (CFG_HASH):
 where python
 python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'numpy', numpy.__version__)"
 if errorlevel 1 goto nopy
-python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), TGSC=True, VCMP=True, TBIN=True, TBGSC=True, VU8=True, TGRQ=True, VRAND=True, TCQ=True, TATAN=True, QST4=True, LDX=True, TD5=True, VBFLY=True, VAFF=True, QST6=True, VCSWP=True, TGQ4=True)), '08x'))"
+python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; import os; off=set(os.environ.get('OTPU_DROP_FEATURES','').upper().replace(',',' ').split()); caps={k: k not in off for k in 'TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4'.split()}; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), **caps)), '08x'), '(less ' + ' '.join(sorted(off)) + ')' if off else '')"
 if errorlevel 1 goto nohash
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & '.\tools\build_r8_133.ps1' -Mode '%MODE%' %PLAN% *>&1 | Tee-Object -FilePath $env:OTPU_R8_LOG -Append; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 0 } catch { Write-Error $_; exit 1 }"
 set RC=%errorlevel%
