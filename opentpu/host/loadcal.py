@@ -70,13 +70,17 @@ ROWS = 16                   # prefill's tokens per run
 TILE = 4 * NS * NS
 
 
-def wanted(core_khz, sys_hz: float, env: str | None = None) -> bool:
+def wanted(core_khz, sys_hz: float, env: str | None = None, r8: bool = False) -> bool:
     """Centre the read taps under load: the core clock (CORE_KHZ) is not the controllers' sys
-    clock. OTPU_LOAD_CENTER=1 / 0 (or `env`) forces it on / off."""
+    clock, or the bitstream is an r8 one (`r8`: CAPS2 has r8's VCSWP). The r8 builds at 133.33 MHz
+    read uncorrectable words under the core's load at the calibration's taps where r5 45b1c1d3 on
+    the same card read none (2026-11-17: c969ca4c channel 1 34022 / 151 in 30 s of int8 load,
+    2c800a8f 682 / 0, 1a77396a 36520 / 17; after loadcal with +-2 bitslips c969ca4c and 2c800a8f
+    0 / 0). OTPU_LOAD_CENTER=1 / 0 (or `env`) forces it on / off."""
     v = os.environ.get(ENV, "") if env is None else env
     if v in ("0", "1"):
         return v == "1"
-    return bool(core_khz) and abs(core_khz * 1e3 - sys_hz) > 1e3
+    return r8 or (bool(core_khz) and abs(core_khz * 1e3 - sys_hz) > 1e3)
 
 
 def sys_hz(data: Path) -> float:
@@ -92,7 +96,9 @@ def wanted_on(b, data: Path | None = None) -> bool:
     from . import memcal
     if not getattr(b.t, "ecc", False) or not memcal.hostcal(b.t):
         return False
-    return wanted(b.info().get("core_khz"), sys_hz(data or memcal.DATA))
+    i = b.info()
+    return wanted(i.get("core_khz"), sys_hz(data or memcal.DATA),
+                  r8=bool((i.get("caps2") or {}).get("vcswp")))
 
 
 def window(errs) -> tuple[int, int, int | None]:

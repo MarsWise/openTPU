@@ -26,6 +26,9 @@ def test_wanted_when_the_core_clock_is_not_the_controllers():
     assert not L.wanted(None, 133.333333e6, env="")                 # no CORE_KHZ: as before
     assert L.wanted(133333, 133.333333e6, env="1")
     assert not L.wanted(150000, 133.333333e6, env="0")
+    # r8 bitstreams (CAPS2 VCSWP): on at the same clock, off when forced
+    assert L.wanted(133333, 133.333333e6, env="", r8=True)
+    assert not L.wanted(133333, 133.333333e6, env="0", r8=True)
 
 
 def test_the_scan_finds_each_lane_s_window_and_takes_its_centre():
