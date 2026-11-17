@@ -56,8 +56,8 @@ def test_a_lane_narrower_than_the_minimum_keeps_its_calibrated_tap():
 def test_a_lane_takes_the_widest_eye_under_load_over_its_bitslips():
     """Lane 0's calibrated eye narrows under load (taps 20-22) while the same data reads at the
     next bitslip a bit time earlier on the IDELAY (taps 8-14): the scan at the bitslips either
-    side finds it, the lane moves there and reads right; lane 1's other eye is no wider (the
-    lower tap of equals: it moves too); every other lane keeps its bitslip and centre."""
+    side finds it, the lane moves there and reads right; lane 1's other eye is no wider (a tie:
+    it keeps its calibrated bitslip, 2026-11-17); every other lane keeps its bitslip and centre."""
     fake = C.FakeCsr(DATA)
     fake.RB[0], fake.LO[0], fake.HI[0] = 3, 18, 24
     fake.RB[1], fake.LO[1], fake.HI[1] = 4, 16, 21
@@ -71,7 +71,7 @@ def test_a_lane_takes_the_widest_eye_under_load_over_its_bitslips():
     errs, ok = L.scan_slips([fake], cs, L.SLIPS, base=0, beats=1 << 10, hz=133.333e6, reps=1)
     lanes = L.choose_slips(errs[0], cal, ok[0])
     assert (lanes[0]["slip"], lanes[0]["taps"], lanes[0]["tap"]) == (1, 7, 11)
-    assert (lanes[1]["slip"], lanes[1]["taps"], lanes[1]["tap"]) == (-1, 6, 6)
+    assert (lanes[1]["slip"], lanes[1]["taps"], lanes[1]["tap"]) == (0, 6, 18)
     for m in range(2, fake.nm):
         assert lanes[m]["slip"] == 0
         assert lanes[m]["tap"] == fake.LO[m] + (min(fake.HI[m], 31) - fake.LO[m]) // 2
@@ -199,3 +199,17 @@ def test_a_lane_two_bit_times_along_finds_its_eye_two_bitslips_away():
     assert -2 in L.SLIPS and 2 in L.SLIPS and L.SLIPS[0] == 0
     # a lane whose bitslip cannot move by -2 (its range's end) stays where it can
     assert not L.slips_ok(1, [0] * 8, -2) and L.slips_ok(2, [0] * 8, -2)
+
+
+def test_choose_slips_keeps_the_calibrated_bitslip_on_a_tie():
+    """Equal windows at d = 0 and d = -1: the calibrated bitslip stays (r8 2c800a8f channel 0
+    lane 0, 2026-11-17); a strictly wider one still moves it; between moved ones the lower tap."""
+    def scan(lo, hi, n=32):          # one lane, a window of taps lo..hi-1
+        return [[0 if lo <= t < hi else 9] for t in range(n)]
+    can = {0: [True], -1: [True], 1: [True]}
+    lanes = L.choose_slips({0: scan(11, 14), -1: scan(0, 3), 1: scan(20, 22)}, [13], can)
+    assert lanes[0]["slip"] == 0 and lanes[0]["taps"] == 3
+    lanes = L.choose_slips({0: scan(11, 14), -1: scan(0, 4), 1: scan(20, 22)}, [13], can)
+    assert lanes[0]["slip"] == -1 and lanes[0]["taps"] == 4
+    lanes = L.choose_slips({0: scan(11, 13), -1: scan(5, 9), 1: scan(1, 5)}, [12], can)
+    assert lanes[0]["slip"] == 1                       # equal moved windows: the lower centre

@@ -210,8 +210,11 @@ def choose(err_ch, cal: list, min_window: int = MIN_WINDOW) -> list[dict]:
 def choose_slips(errs: dict, cal: list, ok: dict, min_window: int = MIN_WINDOW) -> list[dict]:
     """choose() over scans at several bitslips (errs[d]: the channel's scan with each lane's
     bitslip moved by d; ok[d][m]: lane m could move by d): per lane the widest window under load,
-    the lowest centre of equals, as choose() gives it plus "slip" (d); a lane narrow at every
-    bitslip keeps its calibrated tap and bitslip (d = 0)."""
+    as choose() gives it plus "slip" (d); between equal windows the calibrated bitslip (d = 0),
+    else the lowest centre; a lane narrow at every bitslip keeps its calibrated tap and bitslip.
+    (The calibrated bitslip on a tie: r8 2c800a8f channel 0 lane 0, a 3-tap window at tap 12
+    with d = 0 or at tap 1 with d = -1; the runs that took d = -1 read 7-35 of 64 rows runs
+    wrong, those at d = 0 0-2 of 64 (one 11 of 96) (r8_ddr_split / r8_ddr_check 2026-11-17).)"""
     per = {d: choose(e, cal, min_window) for d, e in errs.items()}
     out = []
     for m in range(len(cal)):
@@ -220,7 +223,9 @@ def choose_slips(errs: dict, cal: list, ok: dict, min_window: int = MIN_WINDOW) 
             x = ls[m]
             if d == 0 or not ok[d][m] or x["narrow"]:
                 continue
-            if best["narrow"] or (x["taps"], -x["tap"]) > (best["taps"], -best["tap"]):
+            if (best["narrow"] or x["taps"] > best["taps"]
+                    or (x["taps"] == best["taps"] and best["slip"] != 0
+                        and x["tap"] < best["tap"])):
                 best = dict(x, slip=d)
         out.append(best)
     return out
