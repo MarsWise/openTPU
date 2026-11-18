@@ -115,6 +115,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8 experiment A (4459973c-a): r8 less BIN / BIN GSC with r5's memory write path (otpu_mem_ch WREG 0), LiteDRAM rtw 3, trace 16384; WNS +0.044, WHS +0.013",
+      "build_id": "0x4459973c",
+      "cfg_hash": "0x432e34c2",
+      "bitstream_sha256": "5201108D28426D6346AA299ABFD7ED9AF8A53DB03F97F533EC29A8ABF3DA3CCA",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }
