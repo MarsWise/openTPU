@@ -11,15 +11,12 @@
 // "distributed" or "auto"); the macros ignore it. In simulation every word starts at 0, unless
 // ZERO is 0 (a user that loads the memory from its own initial block: their order is undefined).
 
-// One read port and one write port (simple dual-port). OREG: a second read register (the block
-// RAM's output register, DOB_REG): rd is the word read two edges after its address, both
-// registers enabled by re.
+// One read port and one write port (simple dual-port).
 module otpu_ram_1r1w #(
   parameter int    W     = 32,
   parameter int    N     = 1024,
   parameter string STYLE = "block",
-  parameter bit    ZERO  = 1'b1,
-  parameter bit    OREG  = 1'b0
+  parameter bit    ZERO  = 1'b1
 ) (
   input  logic                 clk,
   input  logic                 we,
@@ -29,17 +26,11 @@ module otpu_ram_1r1w #(
   input  logic [$clog2(N)-1:0] ra,
   output logic [W-1:0]         rd
 );
-  logic [W-1:0] rq;
-  if (OREG) begin : g_oreg
-    always_ff @(posedge clk) if (re) rd <= rq;
-  end else begin : g_noreg
-    assign rd = rq;
-  end
   if (STYLE == "distributed") begin : g_lut
     (* ram_style = "distributed" *) logic [W-1:0] mem [N];
     always_ff @(posedge clk) begin
       if (we) mem[wa] <= wd;
-      if (re) rq <= mem[ra];
+      if (re) rd <= mem[ra];
     end
 `ifndef SYNTHESIS
     initial if (ZERO) for (int i = 0; i < N; i++) mem[i] = '0;
@@ -48,7 +39,7 @@ module otpu_ram_1r1w #(
     logic [W-1:0] mem [N];
     always_ff @(posedge clk) begin
       if (we) mem[wa] <= wd;
-      if (re) rq <= mem[ra];
+      if (re) rd <= mem[ra];
     end
 `ifndef SYNTHESIS
     initial if (ZERO) for (int i = 0; i < N; i++) mem[i] = '0;
@@ -57,7 +48,7 @@ module otpu_ram_1r1w #(
     (* ram_style = "block" *) logic [W-1:0] mem [N];
     always_ff @(posedge clk) begin
       if (we) mem[wa] <= wd;
-      if (re) rq <= mem[ra];
+      if (re) rd <= mem[ra];
     end
 `ifndef SYNTHESIS
     initial if (ZERO) for (int i = 0; i < N; i++) mem[i] = '0;
