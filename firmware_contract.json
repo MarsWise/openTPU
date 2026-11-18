@@ -104,6 +104,17 @@
         "MCOLS": 8,
         "LANES": 8
       }
+    },
+    {
+      "name": "r8 C4 (508da1c6): C3 less TMM T5 / BIN / BIN GSC (OTPU_DROP_FEATURES; otpu_mxu HAS_T5 / HAS_BIN 0): -9 498 LUT (MXU -9 473); WNS +0.059, WHS +0.031 (same margins)",
+      "build_id": "0x508da1c6",
+      "cfg_hash": "0x37f51889",
+      "bitstream_sha256": "3492CA48CDE4C27807A62A2E6B01743B8890D7F13E431330E154DEAA7C394331",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      }
     }
   ]
 }
