@@ -142,7 +142,8 @@ def r8_cases(card) -> list:
     from opentpu.kernels import sort as SO
     prog, img = mm_block_offset_case(card)
     out = [("MM k0 scale offsets", prog, img)]
-    for bits in (1, 2, 3, 4):
+    # CQ1 is BIN's layout (TMM BIN CQ: Config.TBIN; the area build C4 leaves it out)
+    for bits in ((1, 2, 3, 4) if getattr(card, "TBIN", False) else (2, 3, 4)):
         cfg, img, prog, _ = CQ.case(bits=bits, kb=3, m=min(4, card.MCOLS), n=12)
         out.append((f"TMM CQ{bits} (LUTSET, GSC epilogue)", prog, img))
     cfg, img, prog, _ = CQ.case(bits=4, kb=2, m=2, n=8, acc=True)
