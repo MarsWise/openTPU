@@ -24,9 +24,12 @@ if not defined PLAN if not "%OTPU_ALLOW_PARALLEL%"=="1" (
 for /f %%h in ('git rev-parse --short^=8 HEAD') do set REV=%%h
 git log --oneline -1
 if not exist "build\logs" mkdir "build\logs" || (echo Cannot create build\logs & exit /b 1)
-set "LOG=%CD%\build\logs\r8_build_%MODE%_%REV%.log"
+rem OTPU_BUILD_TAG (e.g. a, b): a second build of one commit in its own directory, <rev>-<tag>
+set "TREV=%REV%"
+if defined OTPU_BUILD_TAG set "TREV=%REV%-%OTPU_BUILD_TAG%"
+set "LOG=%CD%\build\logs\r8_build_%MODE%_%TREV%.log"
 set "OTPU_R8_LOG=%LOG%"
-echo === %MODE% of %REV%; log %LOG%; output build\vivado-r8-m8-133.33-%REV%
+echo === %MODE% of %REV%; log %LOG%; output build\vivado-r8-m8-133.33-%TREV%
 echo === the python the build uses (CFG_HASH):
 where python
 python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'numpy', numpy.__version__)"
@@ -36,7 +39,7 @@ if errorlevel 1 goto nohash
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & '.\tools\build_r8_133.ps1' -Mode '%MODE%' %PLAN% *>&1 | Tee-Object -FilePath $env:OTPU_R8_LOG -Append; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 0 } catch { Write-Error $_; exit 1 }"
 set RC=%errorlevel%
 echo === exit %RC%
-set OUTD=build\vivado-r8-m8-133.33-%REV%
+set OUTD=build\vivado-r8-m8-133.33-%TREV%
 if not defined PLAN if exist "%OUTD%\reports\SUMMARY.txt" type "%OUTD%\reports\SUMMARY.txt"
 if not defined PLAN for /r "%OUTD%" %%f in (*.bit) do certutil -hashfile "%%f" SHA256
 echo (nothing was loaded into the FPGA)

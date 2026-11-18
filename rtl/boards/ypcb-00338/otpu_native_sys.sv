@@ -62,7 +62,8 @@ module otpu_native_sys #(
   parameter bit VAFF = 1'b0,
   parameter bit QST6 = 1'b0,
   parameter bit VCSWP = 1'b0,
-  parameter bit TGQ4 = 1'b0                 // TMM GRQ QUAD (CAPS2 bit20)
+  parameter bit TGQ4 = 1'b0,                // TMM GRQ QUAD (CAPS2 bit20)
+  parameter bit MEMCH_WREG = 1'b1           // otpu_mem_ch WREG: the write data's register (0: r5's)
 ) (
   // core clock and reset (synchronous, high), XDMA's clock and reset
   input  logic                  clk,
@@ -167,7 +168,7 @@ module otpu_native_sys #(
     .m_araddr, .m_arlen, .m_rvalid, .m_rready, .m_rid, .m_rdata, .m_rresp, .m_rlast);
 
   // one bridge per channel
-  otpu_mem_ch #(.XIDW(4)) u_ch0 (
+  otpu_mem_ch #(.XIDW(4), .WREG(MEMCH_WREG)) u_ch0 (
     .clk, .rst,
     .n_cvalid(n_cvalid[0]), .n_cready(n_cready[0]), .n_cwe(n_cwe[0]), .n_caddr(n_caddr[0]),
     .n_wvalid(n_wvalid[0]), .n_wready(n_wready[0]), .n_wdata(n_wdata[0]), .n_wmask(n_wmask[0]),
@@ -188,7 +189,7 @@ module otpu_native_sys #(
     .c_wdata_valid(c_wdata_valid[0]), .c_wdata_ready(c_wdata_ready[0]),
     .c_wdata_data(c_wdata_data[0]), .c_wdata_we(c_wdata_we[0]),
     .c_rdata_valid(c_rdata_valid[0]), .c_rdata_data(c_rdata_data[0]));
-  otpu_mem_ch #(.XIDW(4)) u_ch1 (
+  otpu_mem_ch #(.XIDW(4), .WREG(MEMCH_WREG)) u_ch1 (
     .clk, .rst,
     .n_cvalid(n_cvalid[1]), .n_cready(n_cready[1]), .n_cwe(n_cwe[1]), .n_caddr(n_caddr[1]),
     .n_wvalid(n_wvalid[1]), .n_wready(n_wready[1]), .n_wdata(n_wdata[1]), .n_wmask(n_wmask[1]),

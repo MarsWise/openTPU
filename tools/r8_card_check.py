@@ -45,6 +45,11 @@ R8Q_HASH = 0xa905c3db       # r8 with GRQ QUAD (CAPS2 bit20, Config.TGQ4: C2)
 # model on the card uses (OTPU_DROP_FEATURES; otpu_mxu HAS_T5 / HAS_BIN 0)
 R8A_HASH = 0x37f51889
 R8A_LEFT_OUT = ("tbin", "tbgsc", "td5")
+# experiment A (r8_build_a.cmd): r8 less BIN / BIN GSC (T5 kept), r5's memory write path
+R8X_HASH = 0x432e34c2
+R8X_LEFT_OUT = ("tbin", "tbgsc")
+# the builds with capabilities left out: CFG_HASH -> the CAPS2 bits it must not have
+LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT}
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
@@ -53,26 +58,27 @@ IMG_MAX, DUMP, ZERO, END = 0x200000, 0x200000, 0x280000, 0x300000
 
 
 def caps_checks(info: dict, sim: bool = False) -> list:
-    """[(ok, what, detail)]: the bitstream's CAPS2 holds r8's capabilities (the area build C4:
-    less T5 / BIN / BIN GSC, and those clear) and its CFG_HASH is one of r8's builds."""
+    """[(ok, what, detail)]: the bitstream's CAPS2 holds r8's capabilities (a build in LEFT_OUT:
+    less its own, and those clear) and its CFG_HASH is one of r8's builds."""
     c2 = info.get("caps2") or {}
     h = (info.get("cfg") or {}).get("hash", 0)
-    area = h == R8A_HASH                       # C4: T5 / BIN / BIN GSC left out
-    missing = [k for k in R8_CAPS2 if not c2.get(k) and not (area and k in R8A_LEFT_OUT)]
+    gone = LEFT_OUT.get(h, ())
+    missing = [k for k in R8_CAPS2 if not c2.get(k) and k not in gone]
     out = [(not missing, "CAPS2: the r8 capabilities", "missing " + ", ".join(missing) if missing
             else "all of " + " ".join(k for k in R8_CAPS2 if c2.get(k))
-            + (" (left out for area: " + " ".join(R8A_LEFT_OUT) + ")" if area else ""))]
-    if area:
-        extra = [k for k in R8A_LEFT_OUT if c2.get(k)]
-        out.append((not extra, "CAPS2: the area build leaves out T5 / BIN / BIN GSC",
+            + (" (left out: " + " ".join(gone) + ")" if gone else ""))]
+    if gone:
+        extra = [k for k in gone if c2.get(k)]
+        out.append((not extra, "CAPS2: the build leaves out " + " / ".join(gone),
                     ", ".join(extra)))
-    out.append((sim or h in ((R8Q_HASH, R8A_HASH) if c2.get("tgq4") else (R8_HASH,)),
-                "CFG_HASH is r8's", f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD "
-                f"{R8Q_HASH:#010x}, area build {R8A_HASH:#010x}"))
+    known = (R8Q_HASH, *LEFT_OUT) if c2.get("tgq4") else (R8_HASH,)
+    out.append((sim or h in known, "CFG_HASH is r8's",
+                f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}, area build "
+                f"{R8A_HASH:#010x}, experiment A {R8X_HASH:#010x}"))
     return out
 
 
-def area_refusals(b) -> list:
+def area_refusals(b, gone=R8A_LEFT_OUT) -> list:
     """[(ok, what, detail)] on the area build (C4): the host refuses TMM T5 / BIN / BIN GSC
     programs (Board.load_program's CAPS2 checks, before anything is written to the card)."""
     from opentpu.host.board import ConfigMismatch
@@ -83,6 +89,8 @@ def area_refusals(b) -> list:
                               binary=True),
              "TMM BIN GSC": I.tmm(0x10000, 0x8000, 4000, 4, 8, 128, 4, 1, 0, 32, gsc=True,
                                   binary=True)}
+    if "td5" not in gone:
+        progs.pop("TMM T5")
     out = []
     for name, ins in progs.items():
         try:
@@ -213,8 +221,8 @@ def main() -> int:
           "cfg hash", hex((info.get("cfg") or {}).get("hash", 0)), flush=True)
     for ok, what, detail in caps_checks(info, a.sim):
         check(ok, what, detail)
-    if (info.get("cfg") or {}).get("hash", 0) == R8A_HASH:
-        for ok, what, detail in area_refusals(b):
+    if (info.get("cfg") or {}).get("hash", 0) in LEFT_OUT:
+        for ok, what, detail in area_refusals(b, LEFT_OUT[info["cfg"]["hash"]]):
             check(ok, what, detail)
     try:
         check_hash(info)

@@ -4,7 +4,7 @@ heavy: run it on omarchy, one at a time:
 
     tools/omarchy_test.sh --exec python tools/memch_test.py [suite ...]
 
-suites: quick, func (default), perf, mut (or mut=I,J: those mutations), all. One line per run: the
+suites: quick, func (default), wreg (the write register vs r5's path), perf, mut (or mut=I,J: those mutations), all. One line per run: the
 build (tb_memch's ARD), the scenario, PASS / FAIL / TIMEOUT / ABORT (a model's $fatal or an RTL
 $error), and each master's beats per cycle of its own clock. A mutation is a text substitution in
 a scratch copy of otpu_mem_ch.sv (or of another source it names); it is caught when one of its
@@ -38,6 +38,10 @@ BUILDS = {
     # LiteDRAM's own controller (otpu_ldc_ch.v, the production core's settings) for the model
     "ldc": dict(LDC=1),
     "ldcx": dict(LDC=1, XREG=1),
+    # otpu_mem_ch without the write register (r5 45b1c1d3's write path): suite wreg
+    "ldnw0": dict(WREG=0),
+    "ldcw0": dict(LDC=1, WREG=0),
+    "ldcxw0": dict(LDC=1, XREG=1, WREG=0),
     # the arbiter without XDMA's batches (otpu_mem_ch XT 0, its FIFOs as before them)
     "ldcn": dict(LDC=1, XQD=16, XT=0, XB=0),
 }
@@ -355,6 +359,11 @@ def run(exe: Path, logname: Path, args: list[str]) -> tuple[str, dict, str]:
     return res, tp, why
 
 
+# suite wreg: read-after-write, partial beats, shared beats, controller stalls, Gen2 clocks
+WREG_SCEN = ["default", "partial", "rawpart", "shared", "ctlstall", "pubstall", "gen2part",
+             "gen2full", "fastcore", "slowcore"]
+
+
 def fmt(tp: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in tp.items())
 
@@ -368,6 +377,12 @@ def main(argv: list[str]) -> int:
     if "quick" in suites:
         exe = build("ldn", BUILDS["ldn"])
         jobs.append(("ldn default", exe, OUT / "ldn" / "default.log", SCEN["default"]))
+    if "wreg" in suites:
+        # the write register (r8) against r5's write path: the same scenarios on both
+        for s in WREG_SCEN:
+            for b in ("ldn", "ldnw0", "ldc", "ldcw0", "ldcx", "ldcxw0"):
+                exe = build(b, BUILDS[b])
+                jobs.append((f"{b} {s}", exe, OUT / b / f"{s}.log", SCEN[s] + FBASE))
     if "func" in suites:
         for b, s in FUNC:
             exe = build(b, BUILDS[b])

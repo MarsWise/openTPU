@@ -119,6 +119,7 @@ def test_the_c4_hash_is_the_capabilities_built():
         return arch_hash(dataclasses.replace(configuration(), **{k: bool(v) for k, v in d.items()}))
     assert h(on) == 0xa905c3db                                  # C2 / C3
     assert h(dict(on, TD5=0, TBIN=0, TBGSC=0)) == 0x37f51889    # C4 (r8_build_c4.cmd)
+    assert h(dict(on, TBIN=0, TBGSC=0)) == 0x432e34c2           # A (r8_build_a.cmd)
 
 
 def test_r8_card_check_takes_the_area_build():
@@ -138,6 +139,9 @@ def test_r8_card_check_takes_the_area_build():
     assert not all(ok for ok, _, _ in m.caps_checks(bad))
     bad = {"caps2": {**full, "tbin": False, "tbgsc": False}, "cfg": {"hash": 0x37f51889}}
     assert not all(ok for ok, _, _ in m.caps_checks(bad))
+    # experiment A: less BIN / BIN GSC, T5 kept
+    a = {"caps2": {**full, "tbin": False, "tbgsc": False}, "cfg": {"hash": 0x432e34c2}}
+    assert all(ok for ok, _, _ in m.caps_checks(a))
 
 
 @pytest.mark.parametrize("KB,unit,acc,M", [(7, False, True, 2), (20, False, False, 1),
@@ -196,3 +200,25 @@ def test_r8_card_check_area_refusals_on_a_card_without_t5_bin():
     c3 = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
                              tcq=True, td5=True, tbin=True, tbgsc=True))
     assert not any(ok for ok, _, _ in m.area_refusals(c3))
+
+
+def test_t5_without_bin_is_not_refused_as_bin():
+    """T5's pattern carries the BIN bit: the host's BIN check skips it (T5 has its own, TD5), so
+    experiment A (TD5, no TBIN) runs T5; a real BIN TMM is still refused there."""
+    import importlib.util
+    from opentpu.host.board import Board, ConfigMismatch
+    from opentpu.host.fake import FakeTransport
+    spec = importlib.util.spec_from_file_location("r8cc", ROOT / "tools/r8_card_check.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    a = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
+                            tcq=True, td5=True))
+    head = [I.ld(0, 0, 128), I.qact(0, 1, 0, 1, 128)]
+    a.load(0x3C0000, head + [I.tmm(0x10000, 0x8000, 4000, 4, 5, 128, 4, 1, 0, 20, gsc=True,
+                                   dense=True), I.halt()])
+    with pytest.raises(ConfigMismatch):
+        a.load(0x3C0000, head + [I.tmm(0x10000, 0x8000, 4000, 4, 8, 128, 4, 1, 0, 4, rsc=True,
+                                       binary=True), I.halt()])
+    got = m.area_refusals(a, m.R8X_LEFT_OUT)
+    assert [w for _, w, _ in got] == ["the area build refuses TMM BIN",
+                                      "the area build refuses TMM BIN GSC"] and all(o for o, _, _ in got)

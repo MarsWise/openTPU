@@ -1067,7 +1067,10 @@ class Board:
             opflags = words_[:len(words_) // 8 * 8:8]
             functions = (words_[6:len(words_) // 8 * 8:8] >> 16) & 0xff
             dims = words_[4:len(words_) // 8 * 8:8]
-            if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0)):
+            # BIN: the bit without T5's pattern (T5 = BIN | CQ4 with CQ / LUT clear: dense
+            # trits, checked against TD5 below; the MXU decodes T5 without BIN, otpu_mxu cmd_t5)
+            t5 = ((dims & I.TMM_T5) == I.TMM_T5) & ((dims & (I.TMM_CQ | I.TMM_LUT)) == 0)
+            if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0) & ~t5):
                 if not (self._info or self.info()).get("caps2", {}).get("tbin", False):
                     raise ConfigMismatch("TMM BIN requires firmware with CAPS2 bit6 (TBIN)")
             k0b = ((opflags & 0xff) == I.MM) & ((dims >> 28) & 1 != 0)
@@ -1127,7 +1130,7 @@ class Board:
                       ((dims & (I.TMM_CQ | I.TMM_CQ4 | I.TMM_LUT)) != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tcq", False):
                     raise ConfigMismatch("TMM CQ / LUTSET requires firmware with CAPS2 bit11 (TCQ)")
-            if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0) &
+            if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_BIN) != 0) & ~t5 &
                       (((opflags >> 24) & I.F_GSC) != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tbgsc", False):
                     raise ConfigMismatch("TMM BIN GSC requires firmware with CAPS2 bit7 (TBGSC)")

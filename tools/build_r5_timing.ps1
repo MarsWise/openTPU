@@ -77,8 +77,15 @@ $buildEnv = @{
     OTPU_SYS_MARGIN = $(if ($env:OTPU_SYS_MARGIN) { $env:OTPU_SYS_MARGIN } else { '' })
     OTPU_WR_MARGIN = $(if ($env:OTPU_WR_MARGIN) { $env:OTPU_WR_MARGIN } else { '' })
     OTPU_UC2_MARGIN = $(if ($env:OTPU_UC2_MARGIN) { $env:OTPU_UC2_MARGIN } else { '' })
-    OTPU_MXU_DSP_COLS = '3 4 5 6 7 8 9 10'; OTPU_MXU_BRAM_COLS = '3 4 5 6 7 8 9 10'
-    OTPU_MXU_WRAM_COL = '2'; OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
+    # the MXU's columns (otpu_mxu_place.tcl): r5's 3..10 / weight RAMs 2 unless the caller sets them;
+    # OTPU_DSP_PROHIBIT_COLS keeps every other DSP off those DSP48 columns (an experiment)
+    OTPU_MXU_DSP_COLS = $(if ($env:OTPU_MXU_DSP_COLS) { $env:OTPU_MXU_DSP_COLS } else { '3 4 5 6 7 8 9 10' })
+    OTPU_MXU_BRAM_COLS = $(if ($env:OTPU_MXU_BRAM_COLS) { $env:OTPU_MXU_BRAM_COLS } else { '3 4 5 6 7 8 9 10' })
+    OTPU_MXU_WRAM_COL = $(if ($env:OTPU_MXU_WRAM_COL) { $env:OTPU_MXU_WRAM_COL } else { '2' }); OTPU_PLACE_DIRECTIVE = 'ExtraPostPlacementOpt'
+    OTPU_DSP_PROHIBIT_COLS = $(if ($env:OTPU_DSP_PROHIBIT_COLS) { $env:OTPU_DSP_PROHIBIT_COLS } else { '' })
+    # otpu_mem_ch's write register (create_project.tcl): 0 builds r5's write path
+    OTPU_MEMCH_WREG = $(if ($env:OTPU_MEMCH_WREG) { $env:OTPU_MEMCH_WREG } else { '1' })
+    OTPU_SIGNOFF_STAGE2 = $(if ($env:OTPU_SIGNOFF_STAGE2) { $env:OTPU_SIGNOFF_STAGE2 } else { '' })
     OTPU_MXU_PLACE = '1'; OTPU_DDR_PHY_PLACE = '1'
     # the PHY keep-out (otpu_ddr_phy_place.tcl) and its width from the caller's environment: off unless set
     OTPU_DDR_PHY_KEEPOUT = $(if ($env:OTPU_DDR_PHY_KEEPOUT) { $env:OTPU_DDR_PHY_KEEPOUT } else { '0' })

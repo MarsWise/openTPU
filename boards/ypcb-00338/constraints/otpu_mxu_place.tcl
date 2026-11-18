@@ -286,6 +286,30 @@ proc ::otpu_mxu_place::run {} {
       }
     }
   }
+  # ---- OTPU_DSP_PROHIBIT_COLS (an experiment, default none): DSP48 columns no other unit's DSP
+  # may use, e.g. "0" with the array on 1..8: the VPU's, QUANT's and the MXU's epilogue DSPs (and
+  # the logic around them) go to the far side of the die from the DDR3 PHYs (the left I/O
+  # column). An array column in the list is an error; the run stops when the DSPs do not fit.
+  if {[info exists ::env(OTPU_DSP_PROHIBIT_COLS)] && [string trim $::env(OTPU_DSP_PROHIBIT_COLS)] ne ""} {
+    set ps {}
+    foreach x $::env(OTPU_DSP_PROHIBIT_COLS) {
+      if {[lsearch -exact $dcols $x] >= 0} { error "otpu_mxu_place: OTPU_DSP_PROHIBIT_COLS $x is an array column" }
+      foreach st [get_sites -quiet DSP48_X${x}Y*] {
+        if {[get_property PROHIBIT $st] || [llength [get_cells -quiet -of_objects $st]]} { continue }
+        lappend ps $st
+      }
+    }
+    set ndsp [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ DSP48*}]]
+    set nfree [llength [get_sites -quiet -filter {PROHIBIT == 0} DSP48_X*]]
+    if {$nfree - [llength $ps] < $ndsp} {
+      error "otpu_mxu_place: OTPU_DSP_PROHIBIT_COLS leaves [expr {$nfree - [llength $ps]}] DSP sites for $ndsp DSPs"
+    }
+    foreach st $ps {
+      set_property PROHIBIT true [get_sites $st]
+      lappend lines "set_property PROHIBIT true \[get_sites {$st}\]"
+    }
+    puts "otpu_mxu_place: DSP48 columns $::env(OTPU_DSP_PROHIBIT_COLS) prohibited ([llength $ps] sites)"
+  }
   # ---- the ACT RAM: column j's memory beside it, piece p (bytes p*D/NP ..) level with its PEs
   set act [file dirname $pre]/u_act
   # the block RAM sites other cells hold (not ours, should this run twice on one netlist)

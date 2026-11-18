@@ -18,7 +18,10 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $safeRoot = $root.Replace('\', '/')
 $revision = (& git -c "safe.directory=$safeRoot" -C $root rev-parse --short=8 HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read r8 revision' }
-if (-not $OutDir) { $OutDir = Join-Path $root "build\vivado-r8-m8-133.33-$revision" }
+# OTPU_BUILD_TAG: a second build of one commit (another environment) in its own directory
+$tag = if ($env:OTPU_BUILD_TAG) { "-$($env:OTPU_BUILD_TAG)" } else { '' }
+if ($tag -and $tag -notmatch '^-[A-Za-z0-9]{1,8}$') { throw "OTPU_BUILD_TAG '$($env:OTPU_BUILD_TAG)': 1-8 letters or digits" }
+if (-not $OutDir) { $OutDir = Join-Path $root "build\vivado-r8-m8-133.33-$revision$tag" }
 Write-Warning 'Experimental r8: full FPGA-only model coverage and hardware timing are unverified.'
 
 # Give this process and its children a single scoped safe.directory entry;

@@ -63,7 +63,8 @@ module tb_memch #(
   parameter bit LDC = 1'b0,               // the controllers: LiteDRAM's own (otpu_ldc_model), else the model
   parameter int XQD = 32,                 // otpu_mem_ch's XDMA batches (its defaults)
   parameter int XT = 256,
-  parameter int XB = 24
+  parameter int XB = 24,
+  parameter bit WREG = 1'b1              // otpu_mem_ch WREG (0: r5's write path)
 );
   int cp = 414, up = 375, xp = 400;        // half periods: 120.8 / 133.3 / 125 MHz
   logic clk = 1'b0, uclk = 1'b0, xclk = 1'b0;
@@ -151,7 +152,7 @@ module tb_memch #(
       .n_rvalid(nrv[c]), .n_rdata(nrd[c]), .n_wdone(nwdone[c]),
       .a2x_pub(a2x_pub[c]), .x2a_pub(x2a_pub[c]), .done(adone[c]), .bad(abad[c]));
 
-    otpu_mem_ch #(.XIDW(4), .ARD(ARD), .XRD(XRD), .XQD(XQD), .XT(XT), .XB(XB)) u_ch (
+    otpu_mem_ch #(.XIDW(4), .ARD(ARD), .XRD(XRD), .XQD(XQD), .XT(XT), .XB(XB), .WREG(WREG)) u_ch (
       .clk, .rst,
       .n_cvalid(ncv[c]), .n_cready(ncr[c]), .n_cwe(ncwe[c]), .n_caddr(nca[c]),
       .n_wvalid(nwv[c]), .n_wready(nwr[c]), .n_wdata(nwd[c]), .n_wmask(nwm[c]),

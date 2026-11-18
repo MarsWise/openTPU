@@ -89,7 +89,8 @@ module otpu_fpga_top_ld #(
   parameter bit VAFF = 1'b0,                // VOP AFF, the fused row/column affine (CAPS2 bit17)
   parameter bit QST6 = 1'b0,                // QST Q6, 6-bit ROW rows as nibble and 2-bit planes (CAPS2 bit18)
   parameter bit VCSWP = 1'b0,                // VOP CSWP, the bitonic compare-exchange stage (CAPS2 bit19)
-  parameter bit TGQ4 = 1'b0                 // TMM GRQ QUAD (CAPS2 bit20)
+  parameter bit TGQ4 = 1'b0,                // TMM GRQ QUAD (CAPS2 bit20)
+  parameter bit MEMCH_WREG = 1'b1           // otpu_mem_ch WREG (0: r5's write path, OTPU_MEMCH_WREG=0)
 ) (
   // board
   input  logic        SYS_CLK,              // 50 MHz, AA28
@@ -314,7 +315,7 @@ module otpu_fpga_top_ld #(
                     .DSTEP(DSTEP), .HOSTCAL(1'b1), .XREG(PCIE_GEN == 2),
                     .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
                     .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
-                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .VAFF(VAFF), .QST6(QST6), .VCSWP(VCSWP), .TGQ4(TGQ4)) u_sys (
+                    .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .VAFF(VAFF), .QST6(QST6), .VCSWP(VCSWP), .TGQ4(TGQ4), .MEMCH_WREG(MEMCH_WREG)) u_sys (
     .clk(core_clk), .clk_f, .rst(core_rst), .ctl_mrst(lrs2), .xclk(xdma_aclk), .xrst,
     .calib, .ded, .temp(device_temp), .led(board_led), .i2c_lo, .i2c_pin({lm73_alert_n, i2c_lvl}),
     .s_ctl_awaddr(ctl_awaddr[11:0]), .s_ctl_awvalid(ctl_awvalid), .s_ctl_awready(ctl_awready),

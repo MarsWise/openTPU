@@ -92,7 +92,9 @@ module otpu_mem_ch #(
   parameter int OD   = 32,        // output write-data FIFO per port: writes issued, data not taken
   parameter int XQD  = 32,        // XDMA's command and write-data FIFOs, beats (a batch's room)
   parameter int XT   = 256,       // XDMA's batches: uclk cycles a ready X waits for one (0: none)
-  parameter int XB   = 24         // ... or until XB of its commands are queued (0: the wait alone)
+  parameter int XB   = 24,        // ... or until XB of its commands are queued (0: the wait alone)
+  parameter bit WREG = 1'b1       // the accelerator's write data through a register (r8 bf422b88);
+                                  // 0: straight into u_ad's FIFO as r5 (45b1c1d3) had it
 ) (
   // accelerator (otpu_native_dram), core clock
   input  logic            clk,
@@ -290,16 +292,22 @@ module otpu_mem_ch #(
   // adapter's gathered beat, six LUT levels from its slot registers, to u_ad's RAM inputs across
   // the die, -1.20 ns at 133.33 MHz): a beat a cycle later, never lost (the register takes the
   // next only as it writes the last), u_ad's reader waits for the beat as before (a_ok)
-  logic          w_v;
-  logic [DW-1:0] w_d;
-  assign n_wready = !a_crst && (!w_v || ad_wr);
-  always_ff @(posedge clk) begin
-    if (a_crst) w_v <= 1'b0;
-    else if (n_wready) w_v <= n_wvalid;
-    if (n_wready && n_wvalid) w_d <= {~&n_wmask, n_wmask, n_wdata};
+  if (WREG) begin : g_wreg
+    logic          w_v;
+    logic [DW-1:0] w_d;
+    assign n_wready = !a_crst && (!w_v || ad_wr);
+    always_ff @(posedge clk) begin
+      if (a_crst) w_v <= 1'b0;
+      else if (n_wready) w_v <= n_wvalid;
+      if (n_wready && n_wvalid) w_d <= {~&n_wmask, n_wmask, n_wdata};
+    end
+    assign ad_wv    = w_v && ad_wr && !a_crst;
+    assign ad_wd    = w_d;
+  end else begin : g_wdirect                 // r5's: the beat straight into u_ad
+    assign n_wready = !a_crst && ad_wr;
+    assign ad_wv    = n_wvalid && n_wready;
+    assign ad_wd    = {~&n_wmask, n_wmask, n_wdata};
   end
-  assign ad_wv    = w_v && ad_wr && !a_crst;
-  assign ad_wd    = w_d;
   assign ar_rr    = 1'b1;
   always_ff @(posedge clk) begin
     n_rvalid <= ar_rv && !a_crst;
