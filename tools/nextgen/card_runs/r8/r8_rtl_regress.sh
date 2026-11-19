@@ -7,7 +7,13 @@ set -u
 N=${1:-8}
 W=${REGRESS_W:-/w}   # the mounted folder (rtl_src.tar.gz in, the results out)
 cd "$W" || exit 1
-echo "== $(date -Is) container: $(uname -m), $(nproc) CPUs, $(free -g | awk '/Mem:/{print $2}') GiB"
+MEM=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo)
+echo "== $(date -Is) container: $(uname -m), $(nproc) CPUs, $MEM GiB"
+# one compiler job a worker (OTPU_VERILATOR_JOBS) and a worker per 2 GiB: a big tb_top's cc1plus
+# takes about 1 GiB, and an out-of-memory kill reads as a failed test
+export OTPU_VERILATOR_JOBS=1
+MAXN=$(( MEM / 2 )); [ "$MAXN" -ge 1 ] || MAXN=1
+[ "$N" -le "$MAXN" ] || { echo "== $N workers need $((2 * N)) GiB: $MAXN workers"; N=$MAXN; }
 echo "== $(verilator --version)"
 if ! command -v python3 >/dev/null || ! python3 -m venv --help >/dev/null 2>&1 || ! command -v git >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
@@ -38,7 +44,10 @@ for c in s.iter('testcase'):
     for k in ('failure', 'error'):
         e = c.find(k)
         if e is not None:
-            print(k.upper(), c.get('classname'), c.get('name'), (e.get('message') or '')[:160])
+            oom = 'Killed signal' in (e.text or '') + (e.get('message') or '')
+            print(k.upper(), c.get('classname'), c.get('name'),
+                  '(OUT OF MEMORY: the compiler was killed; rerun with fewer workers)' if oom else '',
+                  (e.get('message') or '')[:160])
     e = c.find('skipped')
     if e is not None:
         skip[(e.get('message') or '')[:100]] += 1

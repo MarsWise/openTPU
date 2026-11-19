@@ -1,7 +1,8 @@
 @echo off
 rem Claude: the full test suite (3 600+ tests, the RTL ones on Verilator) of rtl_src.tar.gz's tree (git archive of one commit) in a
 rem Linux container with Docker Desktop: the regression the cloud sandbox (2 CPUs) cannot finish.
-rem   r8_rtl_regress.cmd [workers]       default 8 parallel pytest workers (about 1 GiB each)
+rem   r8_rtl_regress.cmd [workers]       default 8 parallel pytest workers, at most one per 2 GiB the container has
+rem   (Docker Desktop: Settings, Resources, Memory; 16 GiB or more for 8 workers)
 rem Needs Docker Desktop running and internet for the image and pip (numpy, pytest, pytest-xdist).
 rem The image: verilator/verilator:v5.046 (the version the tests were run with), else :latest.
 rem Results in rtlreg\ beside this script: regress.log, summary.txt, junit.xml. Several hours.
