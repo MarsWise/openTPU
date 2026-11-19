@@ -1,19 +1,20 @@
 {
   "schema_version": 1,
   "firmware": {
-    "name": "openTPU NextGen m4 ternary-MXU",
-    "source_commit": "e97273038ae1fdefc134845f9df6a4c700f5765a",
-    "build_id": "0xe9727303",
-    "bitstream_sha256": "1B248980DB51B9705BCB9499F9B6863CD8C025E6C1D741BAA3CCC67364677AAB",
+    "name": "openTPU NextGen r5x m8 133.33 MHz: r5 45b1c1d3's pipeline plus the r8 instructions, less TMM BIN / BIN GSC (current, 2026-11-19)",
+    "source_commit": "c42beb65c1196c4413af1802d4ac64d91adc4a14",
+    "build_id": "0xc42beb65",
+    "cfg_hash": "0x432e34c2",
+    "bitstream_sha256": "307FC451AF2C49AF767C5DCF73A0A29B52BE8B6684D5BDABCFD486C35435A2BF",
     "part": "xc7k480tffg1156-2",
     "version": {
       "D": 128,
-      "MCOLS": 4,
+      "MCOLS": 8,
       "LANES": 8
     }
   },
   "host": {
-    "branch": "feature/nextgen-hardware-first-vla-bitnet-vllm",
+    "branch": "feature/r7-fpga",
     "tmm_opcode": "0x23"
   },
   "known": [
@@ -70,7 +71,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
       "name": "r8 + C2: m8 133.33 MHz, r8 + MXU MM k0 fix + TMM GRQ QUAD (TGQ4), TMEM 131072 (c969ca4c: WNS +0.003, WHS +0.015)",
@@ -81,7 +83,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
       "name": "r8 + MXU MM k0 fix (1a77396a: WNS +0.005, WHS +0.021 after r8_signoff_resume: userclk1 reroute, post-route phys_opt)",
@@ -92,7 +95,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
       "name": "r8 C3 (6dce3d19): C2 (k0 fix, GRQ QUAD) + LiteDRAM rtw 4, trace 4096, TMM GSC LUT writes replicated; WNS +0.060, WHS +0.031 (margins core 0.15 / x2c 0.45 / sys 0.10 / wr 0.05 / uc2 0.10 in P&R)",
@@ -103,7 +107,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
       "name": "r8 C4 (508da1c6): C3 less TMM T5 / BIN / BIN GSC (OTPU_DROP_FEATURES; otpu_mxu HAS_T5 / HAS_BIN 0): -9 498 LUT (MXU -9 473); WNS +0.059, WHS +0.031 (same margins)",
@@ -114,7 +119,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
       "name": "r8 experiment A (4459973c-a): r8 less BIN / BIN GSC with r5's memory write path (otpu_mem_ch WREG 0), LiteDRAM rtw 3, trace 16384; WNS +0.044, WHS +0.013",
@@ -125,10 +131,11 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "superseded by r5x (DDR3 errors under load)"
     },
     {
-      "name": "r8 r5x (c42beb65, local exp/r5x): r5 45b1c1d3 plus the r8 instructions (no MXU FIFO OREG, no seq T stage), r5's write path, rtw 3, trace 16384; WNS +0.002, WHS +0.036",
+      "name": "r8 r5x (c42beb65; exp/r5x, merged into feature/r7-fpga as 25eb4e5c, the branch's RTL since): r5 45b1c1d3 plus the r8 instructions (no MXU FIFO OREG, no seq T stage), r5's write path, rtw 3, trace 16384; WNS +0.002, WHS +0.036",
       "build_id": "0xc42beb65",
       "cfg_hash": "0x432e34c2",
       "bitstream_sha256": "307FC451AF2C49AF767C5DCF73A0A29B52BE8B6684D5BDABCFD486C35435A2BF",
@@ -136,7 +143,8 @@
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
-      }
+      },
+      "status": "current"
     }
   ]
 }

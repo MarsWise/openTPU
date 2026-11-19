@@ -24,6 +24,26 @@ if ($tag -and $tag -notmatch '^-[A-Za-z0-9]{1,8}$') { throw "OTPU_BUILD_TAG '$($
 if (-not $OutDir) { $OutDir = Join-Path $root "build\vivado-r8-m8-133.33-$revision$tag" }
 Write-Warning 'Experimental r8: full FPGA-only model coverage and hardware timing are unverified.'
 
+# r5x's settings are the defaults (c42beb65, 2026-11-19: DDR3 on the card as r5 45b1c1d3's, every
+# card test PASS): r5's memory write path, LiteDRAM rtw 3, a 16384-record trace, no TMM BIN /
+# BIN GSC, the memory margins it closed with. A variable the caller set (even to '0') wins;
+# OTPU_DROP_FEATURES=none builds every capability (BIN / BIN GSC back: more area and timing).
+$r5xDefaults = [ordered]@{
+    OTPU_MEMCH_WREG = '0'; OTPU_LITEDRAM_RTW = '3'; TRACE_DEPTH = '16384'
+    OTPU_DROP_FEATURES = 'TBIN TBGSC'
+    OTPU_UC2_MARGIN = '0.10'; OTPU_SYS_MARGIN = '0.10'; OTPU_WR_MARGIN = '0.05'
+}
+foreach ($k in $r5xDefaults.Keys) {
+    $cur = [Environment]::GetEnvironmentVariable($k, 'Process')
+    if ($null -eq $cur -or $cur -eq '') {
+        [Environment]::SetEnvironmentVariable($k, $r5xDefaults[$k], 'Process')
+        Write-Host "=== $k=$($r5xDefaults[$k]) (r5x default)"
+    } else {
+        Write-Host "=== $k=$cur (set by the caller)"
+    }
+}
+if ($env:OTPU_DROP_FEATURES -ieq 'none') { $env:OTPU_DROP_FEATURES = '' }
+
 # Give this process and its children a single scoped safe.directory entry;
 # do not alter the user's global Git configuration or overwrite existing entries.
 $oldCount = $env:GIT_CONFIG_COUNT

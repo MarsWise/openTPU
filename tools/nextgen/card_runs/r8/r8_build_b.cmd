@@ -8,6 +8,12 @@ rem   the placement is the cause. CFG_HASH 37f51889 (as C4). Output build\vivado
 rem   A full build, several hours; otpu.bit only if setup / hold pass. Nothing is loaded.
 rem   "r8_build_b.cmd plan" first: no Vivado.
 rem   r8_build_b.cmd [parallel | plan]
+rem CLOSED 2026-11-19, never built: r5x (c42beb65, now the feature branch's RTL) has r5's DDR3
+rem   behaviour on the card with the MXU where r5 had it: the cause lies with r8's three timing commits
+rem   (5e6293e6, 63cbadcd, 800ae9d0) or the placement they bring. The MXU columns (OTPU_MXU_*_COLS, OTPU_DSP_PROHIBIT_COLS) stay as knobs.
+echo Experiment B is closed (r5x settled the DDR3 question): nothing built.
+pause
+exit /b 0
 setlocal
 set "R=C:\myOpenTPU\openTPU-r8"
 set OTPU_INCR_DCP=
