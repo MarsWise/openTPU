@@ -18,12 +18,13 @@ copy /y "%~dp0rtl_src.tar.gz" "%W%\rtl_src.tar.gz" >nul || (echo cannot copy rtl
 copy /y "%~dp0r8_rtl_regress.sh" "%W%\r8_rtl_regress.sh" >nul || (echo cannot copy r8_rtl_regress.sh & pause & exit /b 1)
 rem WSL first: a Linux there with verilator and python3 runs the suite as it is, no Docker
 echo === checking WSL for verilator and python3
-wsl -e bash -lc "command -v verilator && command -v python3 && python3 -m venv --help" >nul 2>&1 || goto docker
+rem the WSL Ubuntu of install_verilator_5046.cmd: /opt/verilator/bin is not on its PATH
+wsl bash -c "PATH=/opt/verilator/bin:$PATH; command -v verilator && command -v python3" >nul 2>&1 || goto docker
 set "WW="
-for /f "usebackq delims=" %%P in (`wsl -e wslpath -a "%W%"`) do set "WW=%%P"
+for /f "usebackq delims=" %%P in (`wsl wslpath -a "%W%"`) do set "WW=%%P"
 if not defined WW goto docker
 echo === WSL: %N% workers, results in %W% (the progress also in regress.log)
-wsl -e bash -lc "tr -d '\r' < '%WW%/r8_rtl_regress.sh' > /tmp/otpu_regress.sh && REGRESS_W='%WW%' bash /tmp/otpu_regress.sh %N%"
+wsl bash -c "tr -d '\r' < '%WW%/r8_rtl_regress.sh' > /tmp/otpu_regress.sh && PATH=/opt/verilator/bin:$PATH REGRESS_W='%WW%' OTPU_VENV=$HOME/otpu_venv bash /tmp/otpu_regress.sh %N%"
 set RC=%errorlevel%
 goto done
 :docker

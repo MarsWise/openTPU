@@ -24,9 +24,10 @@ if ! command -v python3 >/dev/null || ! python3 -m venv --help >/dev/null 2>&1 |
   apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip git >/dev/null \
     || { echo "== apt-get failed: no python / git in the container"; exit 2; }
 fi
-V=$(mktemp -d)/v
-echo "== $(date +%T) pip: numpy, pytest, pytest-xdist"
-python3 -m venv "$V" && "$V/bin/pip" install -q numpy pytest pytest-xdist \
+# an existing venv (OTPU_VENV: WSL's ~/otpu_venv of claude_rtl_r8_wsl.cmd) or a new one
+if [ -n "${OTPU_VENV:-}" ] && [ -x "$OTPU_VENV/bin/python" ]; then V=$OTPU_VENV; else V=$(mktemp -d)/v; python3 -m venv "$V" || V=; fi
+echo "== $(date +%T) pip: numpy, pytest, pytest-xdist in ${V:-(no venv)}"
+[ -n "$V" ] && "$V/bin/pip" install -q numpy pytest pytest-xdist \
   || { echo "== pip install failed (no internet, or Ubuntu without python3-venv: sudo apt install python3-venv)"; exit 2; }
 echo "== $(date +%T) unpacking the tree"
 # the tree: git archive of the commit under test (rtl_src.tar.gz; the commit id is in the tar)
