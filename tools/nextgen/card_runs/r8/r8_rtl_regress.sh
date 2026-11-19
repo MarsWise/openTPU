@@ -27,7 +27,7 @@ fi
 V=$(mktemp -d)/v
 echo "== $(date +%T) pip: numpy, pytest, pytest-xdist"
 python3 -m venv "$V" && "$V/bin/pip" install -q numpy pytest pytest-xdist \
-  || { echo "== pip install failed"; exit 2; }
+  || { echo "== pip install failed (no internet, or Ubuntu without python3-venv: sudo apt install python3-venv)"; exit 2; }
 echo "== $(date +%T) unpacking the tree"
 # the tree: git archive of the commit under test (rtl_src.tar.gz; the commit id is in the tar)
 SRC=$(mktemp -d) && mkdir "$SRC/t" && tar -xzf "$W/rtl_src.tar.gz" -C "$SRC/t" || { echo "== cannot unpack rtl_src.tar.gz"; exit 2; }
