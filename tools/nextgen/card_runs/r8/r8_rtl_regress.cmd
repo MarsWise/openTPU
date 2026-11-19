@@ -19,7 +19,8 @@ copy /y "%~dp0r8_rtl_regress.sh" "%W%\r8_rtl_regress.sh" >nul || (echo cannot co
 rem WSL first: a Linux there with verilator and python3 runs the suite as it is, no Docker
 echo === checking WSL for verilator and python3
 rem the WSL Ubuntu of install_verilator_5046.cmd: /opt/verilator/bin is not on its PATH
-wsl bash -c "PATH=/opt/verilator/bin:$PATH; command -v verilator && command -v python3" >nul 2>&1 || goto docker
+rem (shown, so a failed check says why); /usr/bin/verilator 4.038 there cannot build the RTL
+wsl bash -c "PATH=/opt/verilator/bin:$PATH; echo WSL $WSL_DISTRO_NAME; verilator --version | grep 5.046 && python3 --version" || goto docker
 set "WW="
 for /f "usebackq delims=" %%P in (`wsl wslpath -a "%W%"`) do set "WW=%%P"
 if not defined WW goto docker
@@ -28,7 +29,7 @@ wsl bash -c "tr -d '\r' < '%WW%/r8_rtl_regress.sh' > /tmp/otpu_regress.sh && PAT
 set RC=%errorlevel%
 goto done
 :docker
-echo === no verilator / python3 in WSL: Docker instead
+echo === no Verilator 5.046 / python3 in the default WSL distribution (see above): Docker instead
 echo === checking Docker (Docker Desktop must be running)
 docker version >nul 2>&1 || (echo Docker is not running: start Docker Desktop, then run this again. & pause & exit /b 1)
 rem the image: one already on this machine first (no download), v5.046 before latest
