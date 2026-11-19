@@ -20,12 +20,14 @@ rem WSL first: a Linux there with verilator and python3 runs the suite as it is,
 echo === checking WSL for verilator and python3
 rem the WSL Ubuntu of install_verilator_5046.cmd: /opt/verilator/bin is not on its PATH
 rem (shown, so a failed check says why); /usr/bin/verilator 4.038 there cannot build the RTL
-wsl bash -c "PATH=/opt/verilator/bin:$PATH; echo WSL $WSL_DISTRO_NAME; verilator --version | grep 5.046 && python3 --version" || goto docker
+rem wsl -e: no Windows-side shell between, so nothing is expanded before bash (the Windows PATH
+rem with its "Program Files (x86)" broke a plain wsl bash -c "...$PATH...")
+wsl -e bash -c "echo WSL $WSL_DISTRO_NAME; /opt/verilator/bin/verilator --version | grep 5.046 && python3 --version" || goto docker
 set "WW="
-for /f "usebackq delims=" %%P in (`wsl wslpath -a "%W%"`) do set "WW=%%P"
+for /f "usebackq delims=" %%P in (`wsl -e wslpath -a "%W%"`) do set "WW=%%P"
 if not defined WW goto docker
 echo === WSL: %N% workers, results in %W% (the progress also in regress.log)
-wsl bash -c "tr -d '\r' < '%WW%/r8_rtl_regress.sh' > /tmp/otpu_regress.sh && PATH=/opt/verilator/bin:$PATH REGRESS_W='%WW%' OTPU_VENV=$HOME/otpu_venv bash /tmp/otpu_regress.sh %N%"
+wsl -e bash -c "tr -d '\r' < '%WW%/r8_rtl_regress.sh' > /tmp/otpu_regress.sh && REGRESS_W='%WW%' bash /tmp/otpu_regress.sh %N%"
 set RC=%errorlevel%
 goto done
 :docker

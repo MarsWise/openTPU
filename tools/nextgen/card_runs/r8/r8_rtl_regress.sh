@@ -4,6 +4,10 @@
 # No card, no FPGA, no network but the package installs. r8_rtl_regress.sh [workers]
 # REGRESS_W: the folder (default /w); REGRESS_ARGS: extra pytest arguments (a smoke test: test files)
 set -u
+# WSL (install_verilator_5046.cmd): Verilator 5.046 in /opt/verilator, ahead of /usr/bin's 4.038;
+# its venv ~/otpu_venv (claude_rtl_r8_wsl.cmd). In the container neither exists.
+[ -x /opt/verilator/bin/verilator ] && export PATH=/opt/verilator/bin:$PATH
+[ -n "${OTPU_VENV:-}" ] || OTPU_VENV=$HOME/otpu_venv
 N=${1:-8}
 W=${REGRESS_W:-/w}   # the mounted folder (rtl_src.tar.gz in, the results out)
 cd "$W" || exit 1
@@ -24,7 +28,7 @@ if ! command -v python3 >/dev/null || ! python3 -m venv --help >/dev/null 2>&1 |
   apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip git >/dev/null \
     || { echo "== apt-get failed: no python / git in the container"; exit 2; }
 fi
-# an existing venv (OTPU_VENV: WSL's ~/otpu_venv of claude_rtl_r8_wsl.cmd) or a new one
+# an existing venv (OTPU_VENV) or a new one
 if [ -n "${OTPU_VENV:-}" ] && [ -x "$OTPU_VENV/bin/python" ]; then V=$OTPU_VENV; else V=$(mktemp -d)/v; python3 -m venv "$V" || V=; fi
 echo "== $(date +%T) pip: numpy, pytest, pytest-xdist in ${V:-(no venv)}"
 [ -n "$V" ] && "$V/bin/pip" install -q numpy pytest pytest-xdist \
