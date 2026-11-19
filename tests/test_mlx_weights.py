@@ -4,7 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from safetensors.numpy import save_file
+
+save_file = pytest.importorskip("safetensors.numpy").save_file
 
 from opentpu.llm.mlx_weights import MLXWeights, unpack_u1
 from opentpu.llm.qwen3 import Spec, load_weights, rope_tables

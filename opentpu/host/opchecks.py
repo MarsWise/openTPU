@@ -233,8 +233,11 @@ def op_checks(cfg, gen: bool = False, waitw: bool = False,
             [I.ld(EDGE, TE, 2 * NE), I.vop(f, RES, TE, 0, 2, NE // 2, 1, NE // 2, 0),
              I.st(OUT, RES, 2), I.halt()])
     # ---- the table functions (CAPS2 bit3, Config.TFN): each on a tile and on the edge values
+    # (atan only with its table, Config.TATAN / CAPS2 bit12: r5 has TFN without it)
     if getattr(cfg, "TFN", False):
         for f in sorted(I.TFN_FUNCS):
+            if f == I.V_ATAN and not getattr(cfg, "TATAN", False):
+                continue
             add("vpu-tfn", f"VOP {I.VFUNCS[f].upper()}", _vop(f))
             add("vpu-tfn", f"VOP {I.VFUNCS[f].upper()} edge values", _edge(f))
     if gen:

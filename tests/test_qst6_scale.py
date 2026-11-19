@@ -44,12 +44,15 @@ def test_qscale_int6_and_legacy_with_stalls(tmp_path):
     tb.write_text(f'''`timescale 1ns/1ps
 module tb;
   reg clk=0,rst=1,en=1,iv=0; reg [1:0] tag=0; reg [31:0] a=0;
-  wire o6,o8,o4; wire [1:0] t6,t8,t4; wire [31:0] s6,i6,s8,i8,s4,i4;
+  wire o6,o8,o4,o6r; wire [1:0] t6,t8,t4,t6r; wire [31:0] s6,i6,s8,i8,s4,i4,s6r,i6r;
   reg [223:0] v[0:{len(patterns)-1}]; integer sent=0,recv=0,cycle=0;
   always #5 clk=~clk;
-  otpu_qscale #(.Q6(1)) a6(clk,rst,en,1'b0,iv,tag,a,o6,t6,s6,i6);
-  otpu_qscale a8(clk,rst,en,1'b0,iv,tag,a,o8,t8,s8,i8);
-  otpu_qscale a4(clk,rst,en,1'b1,iv,tag,a,o4,t4,s4,i4);
+  // ports: clk, rst, en, q4, q6, iv, itag, amax, ov, otag, sc, inv. a6: the experimental Q6
+  // parameter; a6r: QST Q6 (the q6 input, production since 8f56da69); a8: QST int8; a4: QST Q4
+  otpu_qscale #(.Q6(1)) a6(clk,rst,en,1'b0,1'b0,iv,tag,a,o6,t6,s6,i6);
+  otpu_qscale a6r(clk,rst,en,1'b0,1'b1,iv,tag,a,o6r,t6r,s6r,i6r);
+  otpu_qscale a8(clk,rst,en,1'b0,1'b0,iv,tag,a,o8,t8,s8,i8);
+  otpu_qscale a4(clk,rst,en,1'b1,1'b0,iv,tag,a,o4,t4,s4,i4);
   initial begin #1000000; $fatal(1,"timeout"); end
   initial begin
     $readmemh("{vec.as_posix()}",v);
@@ -60,7 +63,8 @@ module tb;
       if(iv) begin a=v[sent][223:192]; tag=sent%4; end
       #1;
       if(en && o6) begin
-        if(!o8 || !o4 || t6!==recv%4 || t8!==t6 || t4!==t6 ||
+        if(!o8 || !o4 || !o6r || t6!==recv%4 || t8!==t6 || t4!==t6 || t6r!==t6 ||
+          s6r!==s6 || i6r!==i6 ||
            s6!==v[recv][191:160] || i6!==v[recv][159:128] ||
            s8!==v[recv][127:96] || i8!==v[recv][95:64] ||
            s4!==v[recv][63:32] || i4!==v[recv][31:0])

@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 import pytest
-import yaml
+
+yaml = pytest.importorskip("yaml")
 
 from tools.tourney import accept as A
 from tools.tourney import agents as AG

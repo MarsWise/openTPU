@@ -30,8 +30,8 @@ if ! command -v python3 >/dev/null || ! python3 -m venv --help >/dev/null 2>&1 |
 fi
 # an existing venv (OTPU_VENV) or a new one
 if [ -n "${OTPU_VENV:-}" ] && [ -x "$OTPU_VENV/bin/python" ]; then V=$OTPU_VENV; else V=$(mktemp -d)/v; python3 -m venv "$V" || V=; fi
-echo "== $(date +%T) pip: numpy, pytest, pytest-xdist in ${V:-(no venv)}"
-[ -n "$V" ] && "$V/bin/pip" install -q numpy pytest pytest-xdist \
+echo "== $(date +%T) pip: numpy, pytest, pytest-xdist, pyyaml, safetensors, pillow in ${V:-(no venv)}"
+[ -n "$V" ] && "$V/bin/pip" install -q numpy pytest pytest-xdist pyyaml safetensors pillow \
   || { echo "== pip install failed (no internet, or Ubuntu without python3-venv: sudo apt install python3-venv)"; exit 2; }
 echo "== $(date +%T) unpacking the tree"
 # the tree: git archive of the commit under test (rtl_src.tar.gz; the commit id is in the tar)

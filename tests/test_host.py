@@ -891,7 +891,7 @@ def test_chat_loads_the_tokenizer_on_a_thread(monkeypatch):
     tokenizer and raises what the load raised."""
     import threading
 
-    import transformers
+    transformers = pytest.importorskip("transformers")
     from opentpu.host import chat as C
     gate = threading.Event()
 

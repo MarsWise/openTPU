@@ -31,7 +31,8 @@ def test_r5_on_the_board_model(have_verilator):
                               TQUAD=True)
     img = diag_image(cfg)
     checks = [(n, p) for g, n, p in op_checks(cfg) if g == "vpu-tfn"]
-    assert len(checks) == 2 * len(I.TFN_FUNCS)
+    assert len(checks) == 2 * (len(I.TFN_FUNCS) - 1)    # all but atan (TATAN, r8: not in r5)
+    assert not any("ATAN" in n for n, _ in checks)
     bad = []
     for name, prog in checks:
         ok, msg, _ = run_demo(b, cfg, prog, img)
