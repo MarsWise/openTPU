@@ -21,8 +21,15 @@ if not exist "%R%\.git" (
   git clone -q --no-checkout "%R8%" "%R%" || goto :err
 )
 git -C "%R%" fetch -q "%~dp0r5x.bundle" +exp/r5x:refs/heads/exp/r5x || goto :err
-git -C "%R%" status --porcelain --untracked-files=no | findstr . >nul && (echo %R% has local changes: not updated & goto :err)
-git -C "%R%" checkout -q exp/r5x || goto :err
+rem a clone made with --no-checkout has an empty index (every file reads as deleted): no local work
+set "FRESH=1"
+for /f %%f in ('git -C "%R%" ls-files') do set "FRESH="
+if defined FRESH (
+  git -C "%R%" checkout -q -f exp/r5x || goto :err
+) else (
+  git -C "%R%" status --porcelain --untracked-files=no | findstr . >nul && (echo %R% has local changes: not updated & goto :err)
+  git -C "%R%" checkout -q exp/r5x || goto :err
+)
 for /f %%h in ('git -C "%R%" rev-parse HEAD') do if not "%%h"=="%SHA%" (echo %R% is at %%h, not %SHA% & goto :err)
 findstr /c:"OREG" "%R%\rtl\tech\generic\otpu_tech_ram.sv" >nul && (echo the checkout has the FIFO output register: not r5x & goto :err)
 findstr /c:"WREG" "%R%\rtl\shell\otpu_mem_ch.sv" >nul || (echo otpu_mem_ch has no WREG: not r5x & goto :err)
