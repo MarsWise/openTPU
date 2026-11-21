@@ -1,5 +1,22 @@
 # Model compatibility and end-to-end evidence
 
+## r5x status per model (2026-11-21)
+
+The current firmware is r5x c42beb65 (PROGRESS.md). "PHYS r5x" rows ran on it with ECC 0 / 0 in
+that run (2026-11-19, VERIFIED_RESULTS.csv); acceptance still needs the long soak.
+
+| Model | Level on r5x | Change against the r8 table below |
+|---|---|---|
+| Every r8 instruction (no BIN / BIN GSC), KV int8 / kv6 / k6v6 | PHYS r5x, == ISA | BIN / BIN GSC refused (not built) |
+| BitNet 2B4T, vLLM 4 slots | PHYS r5x: 16.9 tok/s sampled, 17.0 greedy, logprobs max 8e-7 | ECC clean |
+| Bonsai 2 4B | PHYS r5x: GRQ / GRQ QUAD logits bit-identical, 8.5 tok/s (GRQ QUAD) / 3.4 (GRQ) | - |
+| Bonsai 1-bit (MLX) | NOT SUPPORTED on r5x (needs TMM BIN) | - |
+| Qwen3-0.6B / Qwen3.5-0.8B / 2B / LFM2.5 | PHYS r5x: 25.6 / 20.1 / 8.4 / 66.9 tok/s; fp4 layers 37.5 / 28.0 / - / 96.7 | Qwen3.5-2B: 1 run of 3 had ch1 SEC |
+| YOLOX-Nano | PHYS r5x strict FPGA-only: 4 detections | - |
+| Diffusion pusht / SmolVLA base | PHYS r5x: rel L2 0.0015 (100 steps) / 0.0308 | SmolVLA wall fix NOT RUN on the card |
+| Needle, LFM3, MiniCPM5, Granite | PHYS r5x: == ISA / PASS | - |
+| PaddleOCR-VL 1.6 | ISA; card tool `tools/paddleocr_card.py` (NOT RUN) | - |
+
 ## r8 status per model (2026-11-16)
 
 Levels as in the ТЗ (part 21). "PHYS exec" is execution on the card, not acceptance (ECC 0 / 0

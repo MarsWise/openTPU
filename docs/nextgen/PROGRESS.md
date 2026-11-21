@@ -1,5 +1,33 @@
 # Nextgen implementation progress
 
+## r5x update (2026-11-21): the current firmware, DDR3 cause narrowed, full suite
+
+State by evidence class (rows: VERIFIED_RESULTS.csv, c42beb65 / 514b1e0a / ffb35491).
+
+- **Current firmware r5x `c42beb65`** (m8, 133.33 MHz, CFG_HASH 432e34c2, sha256 307FC451...35A2BF):
+  r5 45b1c1d3's MXU / sequencer pipeline plus every r8 instruction but TMM BIN / BIN GSC, r5's
+  memory write path (WREG 0), LiteDRAM rtw 3, trace 16384. Routed WNS +0.002 / WHS +0.036 ns,
+  LUT 208 183. Merged into `feature/r7-fpga` (25eb4e5c): the branch's RTL; the default r8 build
+  (`build_r8_133.ps1`) uses its settings. `firmware_contract.json`: current.
+- **PHYSICAL on r5x:** DDR3 read windows under load >= 4 taps on every lane (as r5; r8 builds 1-3);
+  r8_ddr_check 4 passes + split 3 passes: 5 corrected words, 0 uncorrectable (r8 A: tens a pass);
+  r5 on the same checks: 2 corrected in 2 passes (the board's remainder). Card tests 17 / 0 / 0
+  with ECC 0 throughout: every r8 instruction == ISA, KV int8 / kv6 / k6v6, Diffusion pusht,
+  SmolVLA base (rel L2 0.0308), YOLOX strict FPGA-only, vLLM BitNet, Bonsai 2 4B GRQ / GRQ QUAD,
+  Needle, LFM3, MiniCPM5, Granite. Decode (device tok/s): Qwen3 25.6, Qwen3.5-0.8B 20.1,
+  Qwen3.5-2B 8.4 (two clean runs of three), LFM2.5 66.9, BitNet 17.7, Bonsai GRQ QUAD 8.5.
+- **Cause of r8's DDR3 errors:** its three timing commits (5e6293e6 + 63cbadcd in the MXU,
+  800ae9d0 in the sequencer) or the placement they bring, not the instructions. The bisect build
+  `exp/r5x-oreg` (bb5af80d: r5x + the MXU pair) is prepared (`r8_build_oreg.cmd`, NOT RUN): it
+  should add timing slack, and its read windows say which half narrows them.
+- **Full suite on r5x's RTL (WSL, 32 CPUs):** 2 202 passed, 160 skipped, 1 xfailed; the 7
+  failures and 2 collection errors were stale tests (fixed, ffb35491); every Verilator test passed.
+- **Open:** timing slack (+0.002 ns), the hours-long soak (`r8_soak_long.cmd`, NOT RUN), BIN /
+  BIN GSC (1-bit Bonsai, CQ1) back or not, VLM on the card (PaddleOCR-VL `tools/paddleocr_card.py`
+  prepared), SmolVLA's wall (wait entries now computed once per distinct program in parallel:
+  NOT RUN on the card), an autonomous graph on the device, MTP / MoE without the host, YOLOX COCO
+  mAP on the card, MusicGen / Kokoro / SD 1.5, FFN pruning, the CDC sign-off.
+
 ## r8 update (2026-11-16): on the card, MXU k0 erratum, rebuild in progress
 
 State by evidence class (rows: VERIFIED_RESULTS.csv; narrative: HANDOFF_2026-11-10.md,

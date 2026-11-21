@@ -104,3 +104,12 @@ Checked for r8's open problems: upstream's MXU takes MM's k0 as `w4[31:24]` (the
 ours alone, from 6df6a665); its otpu_mem_ch change is otpu_sfifo's timing form (HCP column
 groups, registered flags) for 300-450 MHz clocks, not a functional fix; boards/ypcb-00338 changes
 only otpu_clk2x.tcl, the Makefile and create_project.tcl (to read when porting).
+
+## Upstream check 2026-11-21
+
+`git ls-remote https://github.com/FeSens/openTPU.git`: main still `d84db557` (2026-11-11); of the
+192 branches the newest are `fix-labels` (11.11, merged as #11) and `bcu1525-public` (10.11,
+`a22032fc`). Nothing new since the 2026-11-16 review. The merge stays deferred: our RTL is now
+r5x's (the r8 timing commits taken out), so the 60 conflicts of 16.11 are to be redone against
+it. The GitHub API (pull requests, issues) is not reachable from this session; ls-remote and
+shallow fetches are.

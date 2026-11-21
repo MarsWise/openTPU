@@ -159,3 +159,14 @@ MCOLS=4, ACT_ROWS=16, 133.33 MHz, PCIe Gen2, SEQ_WC=1) plus `TPAIR=1 TQUAD=1`; C
 
 The firmware contract (`firmware_contract.json`) moves to r4 (its bitstream SHA-256) only after
 step 4 passes.
+
+## 2026-11-21: r5x on the card
+
+- Windows PC: Vivado 2024.2, JTAG Digilent 210299A88B38 to xc7k480t (volatile loads by
+  `_claude\r8\r8_load.cmd`, default bitstream now r5x
+  `openTPU-r8\build\vivado-r8-m8-133.33-c42beb65\otpu.bit`). WSL Ubuntu-22.04 has Verilator
+  5.046 in /opt/verilator (the full suite runs there: `r8_rtl_regress.cmd`).
+- Linux card host: `nvx@192.168.0.157`, PCIe Gen2, XDMA; `r8_restore_pcie.cmd` after each load.
+- Card: r5x c42beb65 loaded 2026-11-19 (build 0xc42beb65, CFG_HASH 0x432e34c2). DDR3 needs
+  selfcal + loadcal after a load (the card scripts do it); read windows >= 4 taps under ternary:4.
+- Selftest (r5x): host -> card 2.19 GB/s, card -> host 1.76 GB/s.
