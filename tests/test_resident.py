@@ -359,3 +359,45 @@ def test_linear_over_many_rows_is_split_and_identical(monkeypatch):
         assert len(g.ops) == -(-40 // rows)
         out.append(run(g, [(xt, x)], [y])[0])
     assert np.array_equal(out[0].view(np.uint32), out[1].view(np.uint32))
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_run_board_entries_once_per_distinct_program(workers):
+    """run_board computes the wait entries before the run, once per distinct program (a loop's
+    repeated steps share theirs), in a process pool or not: each load gets exactly waits.entries'
+    entries of its program, the programs in order."""
+    from opentpu import isa as I
+    from opentpu import waits as W
+    torch.manual_seed(3)
+    m = torch.nn.Conv1d(64, 64, 3, 1, 1)
+    g = RG.Graph(cfg())
+    xt = g.tensor(16, 64, 2)
+    y = g.conv1d(xt, m.weight.detach().numpy(), m.bias.detach().numpy(), 1, 1)
+    g.conv1d(y, m.weight.detach().numpy(), m.bias.detach().numpy(), 1, 1)
+    progs = g.compile()
+    progs = progs + progs + progs + progs + progs        # five "steps" of the same programs (> 8)
+
+    class FakeBoard:
+        waitc, slices, _info = True, 1, {"D": 128}
+
+        def __init__(self):
+            self.loads = []
+
+        def load_program(self, addr, words, entries):
+            self.loads.append((addr, np.array(words), entries))
+
+        def run(self, timeout=None):
+            return {"cycles": 10, "instructions": [len(self.loads[-1][1]) // 8]}
+
+    W._mem.clear()
+    b = FakeBoard()
+    st = RG.run_board(b, progs, 4096, workers=workers)
+    assert st["runs"] == len(progs) and st["distinct"] == len(progs) // 5
+    for (_, p), (addr, words, e) in zip(progs, b.loads):
+        w = np.asarray(I.assemble(p), np.uint32)
+        assert addr == 4096 and np.array_equal(words, w)
+        assert np.array_equal(e, W.entries(w, 128, 1, prog=p))
+    b2 = FakeBoard()
+    b2.waitc = False
+    RG.run_board(b2, progs, 4096, workers=workers)
+    assert all(e is None for _, _, e in b2.loads)

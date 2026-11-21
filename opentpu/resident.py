@@ -317,15 +317,63 @@ def run_isa(cfg, progs, img: np.ndarray) -> tuple[np.ndarray, int]:
     return img, n
 
 
-def run_board(board, progs, at: int) -> dict:
-    """The programs in order on the card, each loaded at `at` (above the image)."""
+def board_entries(board, words: list, progs: list, workers: int | None = None) -> list:
+    """Every program's wait entries (None each without a wait-entry sequencer), computed before
+    the run: once per distinct program (a denoising loop's steps repeat theirs) and in parallel.
+    waits.entries alone keeps 256 (MEM_N): a SmolVLA base run (5628 prefix and 732 step
+    programs, 10 steps) recomputed every step's entries on the card's critical path (406 s of
+    the run's wall against 9.8 s on the card, 2026-11-19)."""
+    if not board.waitc:
+        return [None] * len(words)
+    import os
+    from . import waits as W
+    D, S = (getattr(board, "_info", None) or board.info())["D"], board.slices
+    keys = [W.entries_key(w, D, S, getattr(p, "run_args", None) or getattr(w, "run_args", None))
+            for w, p in zip(words, progs)]
+    first: dict = {}
+    for i, k in enumerate(keys):
+        first.setdefault(k, i)
+    items = [(words[i], None, progs[i]) for i in first.values()]
+    n = workers if workers is not None else min(os.cpu_count() or 1, 16)
+    pool = None
+    if n > 1 and len(items) > 8:
+        import concurrent.futures as CF
+        pool = CF.ProcessPoolExecutor(max_workers=n)
+    try:
+        got = W.entries_many(items, D, S, pool)
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    by = dict(zip(first.keys(), got))
+    return [by[k] for k in keys]
+
+
+def run_board(board, progs, at: int, workers: int | None = None) -> dict:
+    """The programs in order on the card, each loaded at `at` (above the image): assembled and
+    their wait entries computed first (board_entries), then each loaded and run. The stats
+    split the wall: prepare (assembly and entries), load (program words into the card), run
+    (start to halt, the card's time and the polling)."""
+    import time
+    from . import isa as I
     st = {"cycles": 0, "instructions": 0, "runs": 0}
-    for _, p in progs:
-        board.load(at, p)
+    t0 = time.perf_counter()
+    ps = [p for _, p in progs]
+    words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
+    ents = board_entries(board, words, ps, workers)
+    st["distinct"] = len({w.tobytes() for w in words}) if len(words) < 100000 else None
+    st["prepare_s"] = round(time.perf_counter() - t0, 2)
+    t_load = t_run = 0.0
+    for w, e in zip(words, ents):
+        t1 = time.perf_counter()
+        board.load_program(at, w, e)
+        t2 = time.perf_counter()
         r = board.run(timeout=60.0)
+        t_run += time.perf_counter() - t2
+        t_load += t2 - t1
         st["cycles"] += r["cycles"]
         st["instructions"] += r["instructions"][0]
         st["runs"] += 1
+    st["load_s"], st["run_s"] = round(t_load, 2), round(t_run, 2)
     return st
 
 
