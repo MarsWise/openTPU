@@ -202,11 +202,13 @@ def proj_rows(v, pw, N4: int, R: int):
     VK.row_groups(N4, R, body)
 
 
-def vision_device(cfg, W, patches, gh: int, gw: int, img=None):
-    """Run the tower and projector on the ISA -> [N / 4, 1024] image rows (raster)."""
+def vision_device(cfg, W, patches, gh: int, gw: int, img=None, backend=None):
+    """Run the tower and projector on the ISA (or `backend(cfg, images)`, e.g. the card's
+    BoardBackend) -> [N / 4, 1024] image rows (raster)."""
     from .qwen3 import IsaBackend
     img = img or VisionImage(cfg, W, nmax=gh * gw)
-    be = IsaBackend(cfg, [img.build()], adopt=True)
+    be = (IsaBackend(cfg, [img.build()], adopt=True) if backend is None
+          else backend(cfg, [img.build()]))
     for a, arr in img.inputs(patches, gh, gw):
         be.write(0, a, arr)
     N = gh * gw
@@ -239,10 +241,12 @@ class _NW:
 
 
 def decode_device(cfg, W, tok, rows, gh: int, gw: int, task: str = "OCR:", n: int = 64,
-                  cap: int = 512, R: int = 32) -> str:
-    """The ERNIE decoder on the ISA (qwen3.Engine, int8): the prompt's rows (the image's from
-    `rows`) with their mRoPE cos / sin rows, then greedy decode (positions shifted by the
-    image's mRoPE delta) -> the text."""
+                  cap: int = 512, R: int = 32, backend="isa", ids_out: list | None = None,
+                  on_done=None) -> str:
+    """The ERNIE decoder on the ISA (qwen3.Engine, int8; or `backend`, the Engine's backend
+    argument: the card's): the prompt's rows (the image's from `rows`) with their mRoPE cos /
+    sin rows, then greedy decode (positions shifted by the image's mRoPE delta) -> the text.
+    ids_out: gets the greedy token ids; on_done(engine) runs before a card backend is closed."""
     from . import qwen3 as Q3
     ids = P.prompt_ids(tok, gh, gw, task)
     pos = P.mrope_positions(ids, gh, gw)
@@ -255,7 +259,7 @@ def decode_device(cfg, W, tok, rows, gh: int, gw: int, task: str = "OCR:", n: in
     cosT, sinT = cs[0][:, :64].copy(), cs[1][:, :64].copy()
     cosT[:T], sinT[:T] = cos3[:, :64], sin3[:, :64]
     eng = Q3.Engine(decoder_spec(), _NW(W), cap=cap, cfg=cfg, resident=False, pipeline=False,
-                    rows=R)
+                    rows=R, backend=backend)
     emb, img = eng.embed, np.asarray(rows, np.float32)
     base = 1 << 30
 
@@ -279,4 +283,11 @@ def decode_device(cfg, W, tok, rows, gh: int, gw: int, task: str = "OCR:", n: in
         if t == 2:
             break
         lg = eng.step(t)
+    if ids_out is not None:
+        ids_out.extend(out)
+    if on_done is not None:
+        on_done(eng)
+    close = getattr(eng.backend, "close", None)
+    if close is not None and backend != "isa":
+        close()
     return tok.decode([t for t in out if t != 2])
