@@ -15,22 +15,11 @@ echo "== $(date +%T) $(git log --oneline -1 | cut -c1-90); COCO first $N images"
 [ -d "$CO/val2017" ] && [ -f "$Y/yolox_nano.pth" ] || { echo "== no COCO in $CO or no YOLOX in $Y"; exit 1; }
 export PYTHONPATH=$R OTPU_MM_K0_REPORT=1
 
-# the same calibration as r8_ddr_check / r8_soak_long: selfcal, then loadcal under KIND, then zeros
-# over DRAM (the ECC counters and the sticky DED cleared); the windows printed
+# the calibration: the core's calibration, zeros, loadcal under KIND, again until every lane's
+# window under the load is 4 taps or more (at most 5 tries; opentpu.host.loadcal calibrate_until)
 KIND=${KIND:-ternary:4}
-"$R/.venv/bin/python" -m opentpu.host.memcal selfcal 2>&1 | tail -2
-OTPU_LOAD_KIND="$KIND" "$R/.venv/bin/python" - "$KIND" <<'PY' || { echo "== calibration failed"; exit 1; }
-import sys
-from opentpu.host.board import Board, XdmaTransport
-from opentpu.host import loadcal, memcal
-b = Board(XdmaTransport('/dev/xdma0'), check=False)
-b.scrub(force=True)
-r = loadcal.center(b, log=lambda *a: None)
-for ch, c in r['channels'].items():
-    print('   loadcal', sys.argv[1], 'channel', ch, 'windows', [x.get('taps') for x in c['lanes']])
-b.scrub(force=True)
-print('   after calibration: ECC', memcal.ecc(b.t))
-PY
+OTPU_LOAD_KIND="$KIND" "$R/.venv/bin/python" -m opentpu.host.loadcal --min-window 4 --tries 5
+case $? in 0) ;; 3) echo "   (a lane stays under 4 taps: its words may be wrong; ECC will say)" ;; *) echo "== calibration failed"; exit 1 ;; esac
 ecc() { "$R/.venv/bin/python" -c "
 import sys
 from opentpu.host.board import Board, XdmaTransport

@@ -209,12 +209,18 @@ def vision_device(cfg, W, patches, gh: int, gw: int, img=None, backend=None):
     img = img or VisionImage(cfg, W, nmax=gh * gw)
     be = (IsaBackend(cfg, [img.build()], adopt=True) if backend is None
           else backend(cfg, [img.build()]))
-    for a, arr in img.inputs(patches, gh, gw):
-        be.write(0, a, arr)
-    N = gh * gw
-    for prog in img.programs(N):
-        be.run([prog])
-    raw = be.read(0, img.work["vis"], 4 * (N // 4) * 1024)
+    try:
+        for a, arr in img.inputs(patches, gh, gw):
+            be.write(0, a, arr)
+        N = gh * gw
+        for prog in img.programs(N):
+            be.run([prog])
+        raw = be.read(0, img.work["vis"], 4 * (N // 4) * 1024)
+    except BaseException:
+        close = getattr(be, "close", None)    # a card backend's lock goes with it
+        if close is not None and backend is not None:
+            close()
+        raise
     return raw.view(np.float32).reshape(N // 4, 1024).copy(), be, img
 
 
@@ -275,19 +281,21 @@ def decode_device(cfg, W, tok, rows, gh: int, gw: int, task: str = "OCR:", n: in
     for t in ids:
         keys.append(base + j if t == P.IMAGE_TOKEN else t)
         j += t == P.IMAGE_TOKEN
-    lg = eng.prefill(keys)
     out = []
-    for _ in range(n):
-        t = int(np.argmax(lg))
-        out.append(t)
-        if t == 2:
-            break
-        lg = eng.step(t)
-    if ids_out is not None:
-        ids_out.extend(out)
-    if on_done is not None:
-        on_done(eng)
-    close = getattr(eng.backend, "close", None)
-    if close is not None and backend != "isa":
-        close()
+    try:
+        lg = eng.prefill(keys)
+        for _ in range(n):
+            t = int(np.argmax(lg))
+            out.append(t)
+            if t == 2:
+                break
+            lg = eng.step(t)
+        if ids_out is not None:
+            ids_out.extend(out)
+        if on_done is not None:
+            on_done(eng)
+    finally:                                    # a card backend's lock goes with it, error or not
+        close = getattr(eng.backend, "close", None)
+        if close is not None and backend != "isa":
+            close()
     return tok.decode([t for t in out if t != 2])

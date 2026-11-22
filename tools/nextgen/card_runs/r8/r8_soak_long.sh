@@ -40,8 +40,10 @@ if what == 'after':      # the record the summary reads
           int(bool(i['status'] & (1 << 9))), i.get('temp_c')))
 PY
 }
-"$R/.venv/bin/python" -m opentpu.host.memcal selfcal 2>&1 | tail -3
-OTPU_LOAD_KIND="$KIND" card calib "$KIND" || { echo "== calibration failed"; exit 1; }
+# the core's calibration, zeros, loadcal, again until every lane's window under the load is 4 taps
+# or more (at most 5 tries): a narrower lane reads wrong words (2026-11-22: lane 7 at 1 tap, DED)
+OTPU_LOAD_KIND="$KIND" "$R/.venv/bin/python" -m opentpu.host.loadcal --min-window 4 --tries 5
+case $? in 0) ;; 3) echo "   (a lane stays under 4 taps: its words may be wrong; ECC will say)" ;; *) echo "== calibration failed"; exit 1 ;; esac
 chat() { timeout 3600 "$P" -m opentpu.host.chat --model "$M" --backend board --strict-fpga --cap 2048 --plain \
   --greedy --max-new 128 --prompt "Explain in three sentences how a DDR3 memory controller calibrates its read timing."; }
 END=$(( $(date +%s) + $(awk "BEGIN { print int($HOURS * 3600) }") ))

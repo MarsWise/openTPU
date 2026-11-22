@@ -451,3 +451,54 @@ def center(b, log=print, data: Path | None = None, reps: int = REPS, mib: int = 
     except (OSError, RuntimeError):
         pass                        # the result is also in the log
     return out
+
+
+def calibrate_until(b, min_window: int = 4, tries: int = 5, log=print) -> dict:
+    """The core's calibration again (memcal.selfcal_again), zeros over DRAM, center() under the
+    load, repeated until every lane's window under the load is min_window taps or more, at most
+    `tries` times; the last try's taps stay. Each calibration picks a lane's eye afresh, and the
+    narrow ones read wrong words (r5x c42beb65, 2026-11-22: channel 1 lane 7 at 1 tap after one
+    calibration, an uncorrectable word in PaddleOCR-VL's first image; at 3 taps the 4 h soak's
+    Qwen3.5 runs read corrected words, at 4 or more the other models none). Ends with zeros over
+    DRAM (the ECC counters cleared). Returns center()'s result with "tries" and "min_window"."""
+    from . import memcal
+    out: dict = {}
+    for i in range(1, tries + 1):
+        memcal.selfcal_again(b.t, log=lambda *a, **k: None)
+        b.scrub(force=True)
+        out = center(b, log=lambda *a, **k: None)
+        w = [[x["taps"] for x in out["channels"][ch]["lanes"]] for ch in (0, 1)]
+        m = min(min(x) for x in w)
+        out["tries"], out["min_window"] = i, m
+        log(f"   loadcal try {i}: windows ch0 {w[0]} ch1 {w[1]}, narrowest {m}"
+            + ("" if m >= min_window else f" (< {min_window}: again)" if i < tries
+               else f" (< {min_window}: kept, the narrowest lanes may read wrong words)"))
+        if m >= min_window:
+            break
+    b.scrub(force=True)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m opentpu.host.loadcal [--min-window 4] [--tries 5] [--dev /dev/xdma0]:
+    calibrate_until on the card (OTPU_LOAD_KIND chooses the load). Exit 0 when the narrowest
+    window reached --min-window, 3 when not (the taps stay), 1 on an error."""
+    import argparse
+    from . import memcal
+    from .board import Board, XdmaTransport
+    ap = argparse.ArgumentParser(description=main.__doc__.split("\n")[0])
+    ap.add_argument("--min-window", type=int, default=4)
+    ap.add_argument("--tries", type=int, default=5)
+    ap.add_argument("--dev", default="/dev/xdma0")
+    a = ap.parse_args(argv)
+    b = Board(XdmaTransport(a.dev), check=False)
+    try:
+        r = calibrate_until(b, a.min_window, a.tries)
+        print(f"   load {r['load']}; after calibration: ECC {memcal.ecc(b.t)}")
+        return 0 if r["min_window"] >= a.min_window else 3
+    finally:
+        b.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
