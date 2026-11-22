@@ -8,7 +8,7 @@ rem   (otpu_vpu RAND_W 1: RAND one column a cycle, the same numbers). CFG_HASH a
 rem   Output build\vivado-r8-m8-133.33-<rev>-lean. A full build, several hours; otpu.bit only if
 rem   setup / hold pass (r5x closed at WNS +0.002: a rebuild may not). Nothing is loaded.
 rem   "r8_build_lean.cmd plan" first: no Vivado, prints the hash.
-rem   r8_build_lean.cmd [parallel | plan]
+rem   r8_build_lean.cmd [parallel | plan | impl]  (impl: implementation only, reusing the finished synthesis of the same checkout, after a crash past synthesis)
 setlocal
 set "R=C:\myOpenTPU\openTPU-r8"
 set OTPU_INCR_DCP=
@@ -49,7 +49,7 @@ findstr /c:"OTPU_DSP_PROHIBIT_COLS" "%R%\boards\ypcb-00338\constraints\otpu_mxu_
 git -C "%R%" log --oneline -1
 echo === expected: hash=add73610 (r8 less TBIN TBGSC TD5 TATAN)
 echo === r5x lean: less BIN / BIN GSC / T5 / atan, TFN ROM a lane pair, one RAND generator
-if /i "%~1"=="plan" (call "%R%\tools\nextgen\windows\r8_build.cmd" Plan) else (call "%R%\tools\nextgen\windows\r8_build.cmd")
+if /i "%~1"=="plan" (call "%R%\tools\nextgen\windows\r8_build.cmd" Plan) else if /i "%~1"=="impl" (call "%R%\tools\nextgen\windows\r8_build.cmd" Impl) else (call "%R%\tools\nextgen\windows\r8_build.cmd")
 exit /b %errorlevel%
 :err
 echo failed
