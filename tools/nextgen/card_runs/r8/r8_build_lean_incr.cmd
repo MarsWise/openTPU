@@ -34,9 +34,12 @@ set OTPU_MXU_WRAM_COL=
 set OTPU_DSP_PROHIBIT_COLS=
 set OTPU_BUILD_TAG=lean-i
 if /i "%~1"=="parallel" (set OTPU_ALLOW_PARALLEL=1) else (tasklist /fi "imagename eq vivado.exe" | find /i "vivado.exe" >nul && (echo A Vivado process is running: wait for it, or run "r8_build_lean_incr.cmd parallel". & pause & exit /b 1))
+rem impl reuses this checkout's synthesis: the checkout stays at its commit (no update)
+if /i "%~1"=="impl" goto :checks
 git -C "%R%" fetch origin feature/r7-fpga || goto :err
 git -C "%R%" status --porcelain --untracked-files=no | findstr . >nul && (echo %R% has local changes: not updated & goto :err)
 git -C "%R%" checkout -q feature/r7-fpga && git -C "%R%" merge -q --ff-only origin/feature/r7-fpga || goto :err
+:checks
 findstr /c:"OTPU_UC2_MARGIN" "%R%\tools\build_r5_timing.ps1" >nul || (echo build_r5_timing.ps1 does not pass OTPU_UC2_MARGIN: wrong checkout & goto :err)
 findstr /c:"lw_we_q" "%R%\rtl\mxu\otpu_mxu.sv" >nul || (echo the MXU has no replicated LUT write registers: wrong checkout & goto :err)
 findstr /c:"cmd_gq4" "%R%\rtl\mxu\otpu_mxu.sv" >nul || (echo the MXU has no GRQ QUAD: wrong checkout & goto :err)
