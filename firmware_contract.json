@@ -145,6 +145,18 @@
         "LANES": 8
       },
       "status": "current"
+    },
+    {
+      "name": "r8 r5x less atan (r8_build_noatan.cmd, feature/r7-fpga with the HAS_ATAN gate): r5x's build with TATAN off -- otpu_se_comp HAS_ATAN 0, the TFN ROM tables 0-7 (2048 entries a lane), CAPS2 bit12 clear, VOP atan refused by the host",
+      "build_id": "pending",
+      "cfg_hash": "0x852be9dc",
+      "bitstream_sha256": "pending",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      },
+      "status": "candidate: not built yet"
     }
   ]
 }

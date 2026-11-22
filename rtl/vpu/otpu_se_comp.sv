@@ -55,7 +55,9 @@ module otpu_se_comp
   parameter int MW    = 64,       // the core's opaque chunk meta (out_meta = in_meta)
   parameter int NS    = 3,        // stages per lane
   parameter int HA    = 2,        // `hold` leads the S0 cycle it protects by HA cycles
-  parameter bit EXT   = 1'b1      // the stage units are outside (st_*); 0: generic ones inside
+  parameter bit EXT   = 1'b1,     // the stage units are outside (st_*); 0: generic ones inside
+  parameter bit HAS_ATAN = 1'b1   // TFN atan's table (table 8; the board's TATAN, CAPS2 bit12): 0
+                                  //   keeps tables 0-7, a 2048-entry ROM a lane (VOP atan refused)
 ) (
   input  logic             clk,
   input  logic             rst,
@@ -652,9 +654,16 @@ module otpu_se_comp
           end
           if (t2) t.k2 = fneg(tfn_trb(q1.v));
           q2 <= t;
-          rom_q <= TFN_COEF[{rom_desc.tbl, q1.ii[7:0]}];
           rom_t <= t2 && q1.ii[8];
           rom_h <= q1.ii[0];
+        end
+        // the segment's coefficients: the ROM's synchronous read (a block RAM), beside q2
+        if (HAS_ATAN) begin : g_rom9
+          always_ff @(posedge clk) if (en_l[l]) rom_q <= TFN_COEF[{rom_desc.tbl, q1.ii[7:0]}];
+        end else begin : g_rom8
+          logic [95:0] rom8 [8 * 256];           // tables 0-7 only (no atan)
+          initial for (int i = 0; i < 8 * 256; i++) rom8[i] = TFN_COEF[i];
+          always_ff @(posedge clk) if (en_l[l]) rom_q <= rom8[{rom_desc.tbl[2:0], q1.ii[7:0]}];
         end
         // the coefficients enter the state with q2 (TFN pass 0 only; a tail: {0, 0, the tail})
         logic t3;

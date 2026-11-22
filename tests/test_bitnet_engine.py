@@ -93,6 +93,7 @@ def test_engine_matches_numpy_reference(ckpt):
 def test_engine_matches_transformers(ckpt):
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
+    pytest.importorskip("accelerate")          # transformers loads a BitNet checkpoint with it
     from transformers import AutoModelForCausalLM
     spec, W = load_spec(ckpt), Weights(ckpt)
     m = AutoModelForCausalLM.from_pretrained(ckpt, torch_dtype=torch.float32).eval()

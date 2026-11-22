@@ -91,7 +91,7 @@ def _program(rng, n_instr, lanes, fixed=None):
     return chunks
 
 
-def run_comp(chunks, tmp_path, lanes=8, ns=3, ext=0, ha=2, ipct=100, epct=0, seed=1):
+def run_comp(chunks, tmp_path, lanes=8, ns=3, ext=0, ha=2, ipct=100, epct=0, seed=1, atan=1):
     lines = [f"{len(chunks):x} {ipct:x} {epct:x} {seed:x}"]
     for f, x, y in chunks:
         lines.append(" ".join([f"{f:x}"] + [f"{int(w):08x}" for w in F.bits(x)] +
@@ -103,7 +103,7 @@ def run_comp(chunks, tmp_path, lanes=8, ns=3, ext=0, ha=2, ipct=100, epct=0, see
                                       R / "top/otpu_pkg.sv", R / "vpu/otpu_tfn_rom.sv",
                                       R / "vpu/otpu_se_comp.sv",
                                       rtlsim.TB / "tb_se_comp.sv"],
-                       {"LANES": lanes, "NS": ns, "EXT": ext, "HA": ha})
+                       {"LANES": lanes, "NS": ns, "EXT": ext, "HA": ha, "ATAN": atan})
     r = rtlsim.run_sim([exe, f"+in={fin}", f"+out={fout}"], timeout=600)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
     got, cyc = {}, None
@@ -304,3 +304,31 @@ def test_se_comp_tfn_throughput(tmp_path):
     got, cyc = run_comp(chunks, tmp_path)
     check(chunks, got)
     assert abs(n * 8 / cyc - 4.0) < 0.2, n * 8 / cyc
+
+
+def test_se_comp_tfn_without_atan(tmp_path):
+    """HAS_ATAN 0 (the board's TATAN off): the ROM keeps tables 0-7 (2048 entries a lane), and
+    every table function but atan stays bit for bit, interleaved with the other composites."""
+    rng = np.random.default_rng(77)
+    atan = T.V_TFN0 + [d.name for d in T.FUNCS].index("atan")
+    chunks = []
+    for f in TFNS:
+        if f != atan:
+            chunks += _chunks_of(f, rng.choice(_tfn_values(rng, f - T.V_TFN0, 48), 32))
+    chunks += _program(rng, 4, 8)
+    order = rng.permutation(len(chunks))
+    chunks = [chunks[i] for i in order]
+    got, _ = run_comp(chunks, tmp_path, ipct=80, epct=20, seed=7, atan=0)
+    check(chunks, got)
+
+
+def test_se_comp_atan_gate_in_rtl():
+    """The gate's wiring: the board's TATAN reaches otpu_se_comp HAS_ATAN through the slice and
+    the VPU, and the ROM without atan is tables 0-7 only."""
+    from pathlib import Path
+    R = Path(__file__).resolve().parents[1] / "rtl"
+    comp = (R / "vpu/otpu_se_comp.sv").read_text()
+    assert "logic [95:0] rom8 [8 * 256];" in comp and "rom8[{rom_desc.tbl[2:0], q1.ii[7:0]}]" in comp
+    assert ".HAS_ATAN(HAS_ATAN)) u_comp" in (R / "vpu/otpu_vpu.sv").read_text()
+    assert ".HAS_ATAN(HAS_TATAN)) u_vpu" in (R / "top/otpu_slice.sv").read_text()
+    assert (R / "shell/otpu_board.sv").read_text().count(".HAS_TATAN(TATAN)) u_slice") == 2

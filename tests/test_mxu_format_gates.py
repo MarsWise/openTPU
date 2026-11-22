@@ -11,7 +11,7 @@ from opentpu import isa as I
 from opentpu.isasim import Config, Machine
 
 ROOT = Path(__file__).resolve().parents[1]
-OFF = {"HAS_TBIN": 0, "HAS_TCQ": 0, "HAS_TD5": 0}
+OFF = {"HAS_TBIN": 0, "HAS_TCQ": 0, "HAS_TD5": 0, "HAS_TATAN": 0}
 
 
 def test_the_formats_are_parameters_down_to_the_mxu():
@@ -27,11 +27,11 @@ def test_the_formats_are_parameters_down_to_the_mxu():
     slice_ = (ROOT / "rtl/top/otpu_slice.sv").read_text()
     assert ".HAS_BIN(HAS_TBIN), .HAS_CQ(HAS_TCQ), .HAS_T5(HAS_TD5)) u_mxu" in slice_
     board = (ROOT / "rtl/shell/otpu_board.sv").read_text()
-    assert board.count(".HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5)) u_slice") == 2
+    assert board.count(".HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5), .HAS_TATAN(TATAN)) u_slice") == 2
     top = (ROOT / "rtl/top/otpu_top.sv").read_text()
-    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5))" in top
+    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN))" in top
     tb = (ROOT / "sim/verilator/tb_top.sv").read_text()
-    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5)) dut" in tb
+    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN)) dut" in tb
 
 
 def _mm_program(cfg):
@@ -222,3 +222,36 @@ def test_t5_without_bin_is_not_refused_as_bin():
     got = m.area_refusals(a, m.R8X_LEFT_OUT)
     assert [w for _, w, _ in got] == ["the area build refuses TMM BIN",
                                       "the area build refuses TMM BIN GSC"] and all(o for o, _, _ in got)
+
+
+def test_r8_card_check_refuses_atan_without_tatan():
+    """r5x less atan (CFG_HASH 852be9dc): the host refuses VOP atan on a board whose CAPS2 has no
+    TATAN, as BIN / BIN GSC; a board with TATAN loads it (the refusal check then fails)."""
+    import importlib.util
+    from opentpu.host.board import Board
+    from opentpu.host.fake import FakeTransport
+    spec = importlib.util.spec_from_file_location("r8cc", ROOT / "tools/r8_card_check.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.LEFT_OUT[m.R8N_HASH] == ("tbin", "tbgsc", "tatan")
+    n = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
+                            tcq=True, td5=True))
+    got = m.area_refusals(n, m.R8N_LEFT_OUT)
+    assert [w for _, w, _ in got] == ["the area build refuses TMM BIN",
+                                      "the area build refuses TMM BIN GSC",
+                                      "the area build refuses VOP atan"] and all(o for o, _, _ in got)
+    x = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
+                            tcq=True, td5=True, tatan=True))
+    assert [o for o, _, _ in m.area_refusals(x, m.R8N_LEFT_OUT)] == [True, True, False]
+
+
+def test_no_atan_build_hash():
+    """r8_build_noatan.cmd's hash: r8 less TBIN TBGSC TATAN is 852be9dc (as r8_card_check)."""
+    import dataclasses
+    from tools.bonsai2_validate import configuration
+    from opentpu.target import arch_hash
+    caps = {k: k not in ("TBIN", "TBGSC", "TATAN") for k in
+            "TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4".split()}
+    assert arch_hash(dataclasses.replace(configuration(), **caps)) == 0x852be9dc
+    s = (ROOT / "tools/nextgen/card_runs/r8/r8_build_noatan.cmd").read_text()
+    assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TATAN"' in s and "852be9dc" in s

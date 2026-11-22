@@ -324,7 +324,7 @@ module otpu_board #(
                .SEQ_WC(SEQ_WC), .HAS_DSTEP(DSTEP), .TMEM_IMPL(TMEM_IMPL), .TMEM_RQ(TMEM_RQ),
                .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH), .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP),
                .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-               .HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5)) u_slice (
+               .HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5), .HAS_TATAN(TATAN)) u_slice (
     .clk, .clk_f, .sys_rst(x_srst[0]), .rst(x_rst[0]), .rinit(x_arg[0]), .ld_start(x_ld_start[0]),
     .ld_addr(x_ld_addr[0]), .ld_n(x_ld_n[0]),
     .ld_busy(q_ld_busy[0]), .a_rdy, .b_rdy, .sw_rdy, .wr_idle(m_wr_idle),
@@ -407,7 +407,7 @@ module otpu_board #(
                  .TMEM_IMPL(TMEM_IMPL), .TMEM_RQ(TMEM_RQ),
                  .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH), .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP),
                  .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-               .HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5)) u_slice (
+               .HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5), .HAS_TATAN(TATAN)) u_slice (
       .clk, .clk_f, .sys_rst(x_srst[s]), .rst(x_rst[s]), .rinit(x_arg[s]), .ld_start(x_ld_start[s]),
       .ld_addr(x_ld_addr[s]), .ld_n(x_ld_n[s]),
       .ld_busy(q_ld_busy[s]), .a_rdy, .b_rdy, .sw_rdy, .wr_idle(m_wr_idle),

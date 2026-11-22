@@ -93,7 +93,8 @@ module otpu_vpu
   // the VPU's writes (the board's: every read port has its own TMEM copy). 0: everything
   // advances on the grant itself.
   parameter bit WBUF  = 0,
-  parameter bit HAS_SE = 1'b0                         // the stream engine (LANES = 8)
+  parameter bit HAS_SE = 1'b0,                        // the stream engine (LANES = 8)
+  parameter bit HAS_ATAN = 1'b1                       // TFN atan's table (otpu_se_comp HAS_ATAN)
 ) (
   input  logic                    clk,
   input  logic                    rst,
@@ -1048,7 +1049,8 @@ module otpu_vpu
     assign sy[0] = c_s0y;
     assign sy[1] = c_uy;
     assign sy[2] = c_qy;
-    otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1)) u_comp (
+    otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1),
+                   .HAS_ATAN(HAS_ATAN)) u_comp (
       .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_tf(m0.func[3:0]),
       .in_a(c_ia),
       .in_b(c_ib), .in_g(c_ig), .in_h(c_ih), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),

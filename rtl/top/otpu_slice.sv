@@ -83,7 +83,8 @@ module otpu_slice
   parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
   parameter bit HAS_TBIN   = 1'b1,    // the MXU's weight formats (otpu_mxu HAS_BIN / HAS_CQ / HAS_T5):
   parameter bit HAS_TCQ    = 1'b1,    //   0 leaves a format's decode out (the board's TBIN / TCQ /
-  parameter bit HAS_TD5    = 1'b1     //   TD5, which CAPS2 reports)
+  parameter bit HAS_TD5    = 1'b1,    //   TD5, which CAPS2 reports)
+  parameter bit HAS_TATAN  = 1'b1     // the VPU's TFN atan table (the board's TATAN)
 ) (
   input  logic          clk,
   input  logic          clk_f,      // TMEM_PMP 1: 2 x clk, rising with it (the MMCM's); else unused
@@ -549,7 +550,8 @@ module otpu_slice
     .a_req(q_areq), .a_we(q_awe), .a_addr(q_aaddr), .a_wdata(q_awdata), .a_be(q_abe),
     .pf_u(q_u), .pf_frz(q_frz));
 
-  otpu_vpu #(.LANES(LANES), .CL(VPU_CL), .SID(SID), .WBUF(ARB_MASK), .HAS_SE(HAS_SS)) u_vpu (
+  otpu_vpu #(.LANES(LANES), .CL(VPU_CL), .SID(SID), .WBUF(ARB_MASK), .HAS_SE(HAS_SS),
+             .HAS_ATAN(HAS_TATAN)) u_vpu (
     .clk, .rst(rst_vpu), .start(ustart[U_VPU]), .cmd(ucmd[U_VPU]), .rdy(r_vpu), .done(d_vpu),
     .gnt(gnt[G_VPU]), .ren(v_ren), .rhold(tm_lost[P_VA] || tm_lost[P_VB]),
     .ta_en(va_ren), .ta_addr(va_raddr), .ta_data(r_data[P_VA]),

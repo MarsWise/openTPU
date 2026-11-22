@@ -45,6 +45,7 @@ module tb_top;
   parameter bit HAS_TBIN   = 1'b1;    // the MXU's optional weight formats (otpu_slice; 0: left out)
   parameter bit HAS_TCQ    = 1'b1;
   parameter bit HAS_TD5    = 1'b1;
+  parameter bit HAS_TATAN  = 1'b1;    // the VPU's TFN atan table (otpu_slice; 0: left out)
 
   logic clk = 1'b0, clk_f = 1'b0, sys_rst = 1'b1, rst = 1'b1, dump = 1'b0;
   logic ld_start = 1'b0, ld_busy;
@@ -61,7 +62,7 @@ module tb_top;
              .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
              .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST),
              .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM), .SEQ_WC(SEQ_WC),
-             .COLL_GATHER(COLL_GATHER || S > 1), .HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5)) dut (
+             .COLL_GATHER(COLL_GATHER || S > 1), .HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN)) dut (
     .clk, .clk_f, .sys_rst, .rst, .rinit, .ld_start, .ld_addr, .ld_n, .ld_busy, .all_halted, .any_error,
     .icount, .dump);
 

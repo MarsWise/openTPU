@@ -1,5 +1,11 @@
 # Nextgen implementation progress
 
+## TATAN (TFN atan) removable in RTL (2026-11-22)
+
+- `otpu_se_comp` gets `HAS_ATAN`; the board's `TATAN` generic reaches it through `otpu_slice` (`HAS_TATAN`) and `otpu_vpu`. At 0 each lane's TFN ROM holds tables 0-7 (2048 x 96 bit instead of 2304), CAPS2 bit12 is clear and the host refuses VOP atan (no model uses it). RTL SIMULATED (Verilator 5.046): TFN 0-9 less atan bit-exact, format-gate testbench with HAS_TATAN 0.
+- Build: `tools/nextgen/card_runs/r8/r8_build_noatan.cmd` (r5x settings + `OTPU_DROP_FEATURES=TBIN TBGSC TATAN`, tag `noatan`), CFG_HASH 852be9dc; card tooling (r8_card_check, r8_card_tests, r8_restore_pcie) accepts it and checks the atan refusal. firmware_contract: pending entry. The default build stays r5x (432e34c2) until a no-atan bitstream is built and checked.
+- Expected saving: a few RAMB36 (the TFN ROM is about 50 RAMB36 + 5 RAMB18 for 8 lanes; atan is 1/9 of it), LUT about zero. SYNTHESIS NOT RUN.
+
 ## r5x update (2026-11-21): the current firmware, DDR3 cause narrowed, full suite
 
 State by evidence class (rows: VERIFIED_RESULTS.csv, c42beb65 / 514b1e0a / ffb35491).

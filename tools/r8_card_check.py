@@ -48,8 +48,11 @@ R8A_LEFT_OUT = ("tbin", "tbgsc", "td5")
 # experiment A (r8_build_a.cmd): r8 less BIN / BIN GSC (T5 kept), r5's memory write path
 R8X_HASH = 0x432e34c2
 R8X_LEFT_OUT = ("tbin", "tbgsc")
+# r5x less the TFN atan table too (r8_build_noatan.cmd; otpu_se_comp HAS_ATAN 0: no model uses it)
+R8N_HASH = 0x852be9dc
+R8N_LEFT_OUT = ("tbin", "tbgsc", "tatan")
 # the builds with capabilities left out: CFG_HASH -> the CAPS2 bits it must not have
-LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT}
+LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT, R8N_HASH: R8N_LEFT_OUT}
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
@@ -74,7 +77,8 @@ def caps_checks(info: dict, sim: bool = False) -> list:
     known = (R8Q_HASH, *LEFT_OUT) if c2.get("tgq4") else (R8_HASH,)
     out.append((sim or h in known, "CFG_HASH is r8's",
                 f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}, area build "
-                f"{R8A_HASH:#010x}, experiment A {R8X_HASH:#010x}"))
+                f"{R8A_HASH:#010x}, experiment A / r5x {R8X_HASH:#010x}, r5x less atan "
+                f"{R8N_HASH:#010x}"))
     return out
 
 
@@ -91,6 +95,8 @@ def area_refusals(b, gone=R8A_LEFT_OUT) -> list:
                                   binary=True)}
     if "td5" not in gone:
         progs.pop("TMM T5")
+    if "tatan" in gone:
+        progs["VOP atan"] = I.vop(I.V_ATAN, 0x100, 0, 0, 1, 128, 128, 128, 128)
     out = []
     for name, ins in progs.items():
         try:
