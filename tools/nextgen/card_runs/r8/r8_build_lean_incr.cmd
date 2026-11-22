@@ -4,10 +4,11 @@ rem   r5x's routed checkpoint (c42beb65, timing met at WNS +0.002): the MXU's ne
 rem   its placement (the weight FIFO -> weight decode path, -0.124 ns in the plain lean build) is
 rem   reused; the VPU's changes are placed anew. OTPU_INCR_DCP / OTPU_INCR_DIRECTIVE override.
 rem   ---- r8_build_lean.cmd: r5x lean -- r5x's build (r5's pipeline, WREG 0, rtw 3, trace 16384, margins 0.10 /
-rem   0.10 / 0.05, no BIN / BIN GSC; TMM T5 kept) from feature/r7-fpga with three area changes:
+rem   0.10 / 0.05, no BIN / BIN GSC) from feature/r7-fpga with four area changes: TMM T5 off
+rem   (otpu_mxu HAS_TD5 0: its trit decode leaves the weight-decode path; CAPS2 bit15 clear),
 rem   TFN atan off (otpu_se_comp HAS_ATAN 0, CAPS2 bit12 clear, VOP atan refused by the host),
 rem   one TFN coefficient ROM for each two VPU lanes (8 copies -> 4), and one VOP RAND generator
-rem   (otpu_vpu RAND_W 1: RAND one column a cycle, the same numbers). CFG_HASH 852be9dc.
+rem   (otpu_vpu RAND_W 1: RAND one column a cycle, the same numbers). CFG_HASH add73610.
 rem   Output build\vivado-r8-m8-133.33-<rev>-lean. A full build, several hours; otpu.bit only if
 rem   setup / hold pass (r5x closed at WNS +0.002: a rebuild may not). Nothing is loaded.
 rem   "r8_build_lean.cmd plan" first: no Vivado, prints the hash.
@@ -25,7 +26,7 @@ set TRACE_DEPTH=16384
 set OTPU_UC2_MARGIN=0.10
 set OTPU_SYS_MARGIN=0.10
 set OTPU_WR_MARGIN=0.05
-set "OTPU_DROP_FEATURES=TBIN TBGSC TATAN"
+set "OTPU_DROP_FEATURES=TBIN TBGSC TD5 TATAN"
 set OTPU_MEMCH_WREG=0
 set OTPU_MXU_DSP_COLS=
 set OTPU_MXU_BRAM_COLS=
@@ -52,8 +53,8 @@ findstr /c:"OREG" "%R%\rtl\tech\generic\otpu_tech_ram.sv" >nul && (echo the chec
 findstr /c:"OTPU_BUILD_TAG" "%R%\tools\build_r8_133.ps1" >nul || (echo build_r8_133.ps1 takes no OTPU_BUILD_TAG: wrong checkout & goto :err)
 findstr /c:"OTPU_DSP_PROHIBIT_COLS" "%R%\boards\ypcb-00338\constraints\otpu_mxu_place.tcl" >nul || (echo otpu_mxu_place.tcl takes no OTPU_DSP_PROHIBIT_COLS: wrong checkout & goto :err)
 git -C "%R%" log --oneline -1
-echo === expected: hash=852be9dc (r8 less TBIN TBGSC TATAN)
-echo === r5x lean: less BIN / BIN GSC / atan, TFN ROM a lane pair, one RAND generator
+echo === expected: hash=add73610 (r8 less TBIN TBGSC TD5 TATAN)
+echo === r5x lean: less BIN / BIN GSC / T5 / atan, TFN ROM a lane pair, one RAND generator
 if /i "%~1"=="plan" (call "%R%\tools\nextgen\windows\r8_build.cmd" Plan) else (call "%R%\tools\nextgen\windows\r8_build.cmd")
 exit /b %errorlevel%
 :err

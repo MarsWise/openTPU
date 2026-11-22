@@ -48,10 +48,11 @@ R8A_LEFT_OUT = ("tbin", "tbgsc", "td5")
 # experiment A (r8_build_a.cmd): r8 less BIN / BIN GSC (T5 kept), r5's memory write path
 R8X_HASH = 0x432e34c2
 R8X_LEFT_OUT = ("tbin", "tbgsc")
-# r5x lean (r8_build_lean.cmd): r5x less the TFN atan table too (otpu_se_comp HAS_ATAN 0: no model
-# uses it), with the shared TFN ROM and one RAND generator (no capability change)
-R8N_HASH = 0x852be9dc
-R8N_LEFT_OUT = ("tbin", "tbgsc", "tatan")
+# r5x lean (r8_build_lean.cmd): r5x less TMM T5 (no model on the card uses it; GSC only, not with
+# GRQ / QUAD) and the TFN atan table (otpu_se_comp HAS_ATAN 0), with the shared TFN ROM and one RAND
+# generator (no capability change)
+R8N_HASH = 0xadd73610
+R8N_LEFT_OUT = ("tbin", "tbgsc", "td5", "tatan")
 # the builds with capabilities left out: CFG_HASH -> the CAPS2 bits it must not have
 LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT, R8N_HASH: R8N_LEFT_OUT}
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
@@ -78,7 +79,7 @@ def caps_checks(info: dict, sim: bool = False) -> list:
     known = (R8Q_HASH, *LEFT_OUT) if c2.get("tgq4") else (R8_HASH,)
     out.append((sim or h in known, "CFG_HASH is r8's",
                 f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}, area build "
-                f"{R8A_HASH:#010x}, experiment A / r5x {R8X_HASH:#010x}, r5x less atan "
+                f"{R8A_HASH:#010x}, experiment A / r5x {R8X_HASH:#010x}, r5x lean "
                 f"{R8N_HASH:#010x}"))
     return out
 

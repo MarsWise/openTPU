@@ -225,34 +225,35 @@ def test_t5_without_bin_is_not_refused_as_bin():
 
 
 def test_r8_card_check_refuses_atan_without_tatan():
-    """r5x less atan (CFG_HASH 852be9dc): the host refuses VOP atan on a board whose CAPS2 has no
-    TATAN, as BIN / BIN GSC; a board with TATAN loads it (the refusal check then fails)."""
+    """r5x lean (CFG_HASH add73610): the host refuses TMM T5 and VOP atan on a board whose CAPS2 has
+    neither, as BIN / BIN GSC; a board with them loads them (those refusal checks then fail)."""
     import importlib.util
     from opentpu.host.board import Board
     from opentpu.host.fake import FakeTransport
     spec = importlib.util.spec_from_file_location("r8cc", ROOT / "tools/r8_card_check.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    assert m.LEFT_OUT[m.R8N_HASH] == ("tbin", "tbgsc", "tatan")
+    assert m.LEFT_OUT[m.R8N_HASH] == ("tbin", "tbgsc", "td5", "tatan")
     n = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
-                            tcq=True, td5=True))
+                            tcq=True, td5=False))
     got = m.area_refusals(n, m.R8N_LEFT_OUT)
-    assert [w for _, w, _ in got] == ["the area build refuses TMM BIN",
+    assert [w for _, w, _ in got] == ["the area build refuses TMM T5",
+                                      "the area build refuses TMM BIN",
                                       "the area build refuses TMM BIN GSC",
                                       "the area build refuses VOP atan"] and all(o for o, _, _ in got)
     x = Board(FakeTransport(devname=None, regmap=5, ch_bytes=1 << 23, tgsc=True, tgrq=True,
                             tcq=True, td5=True, tatan=True))
-    assert [o for o, _, _ in m.area_refusals(x, m.R8N_LEFT_OUT)] == [True, True, False]
+    assert [o for o, _, _ in m.area_refusals(x, m.R8N_LEFT_OUT)] == [False, True, True, False]
 
 
 def test_no_atan_build_hash():
-    """r8_build_lean.cmd's hash: r8 less TBIN TBGSC TATAN is 852be9dc (as r8_card_check)."""
+    """r8_build_lean.cmd's hash: r8 less TBIN TBGSC TD5 TATAN is add73610 (as r8_card_check)."""
     import dataclasses
     from tools.bonsai2_validate import configuration
     from opentpu.target import arch_hash
-    caps = {k: k not in ("TBIN", "TBGSC", "TATAN") for k in
+    caps = {k: k not in ("TBIN", "TBGSC", "TD5", "TATAN") for k in
             "TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4".split()}
-    assert arch_hash(dataclasses.replace(configuration(), **caps)) == 0x852be9dc
+    assert arch_hash(dataclasses.replace(configuration(), **caps)) == 0xadd73610
     s = (ROOT / "tools/nextgen/card_runs/r8/r8_build_lean.cmd").read_text()
-    assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TATAN"' in s and "852be9dc" in s
+    assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TD5 TATAN"' in s and "add73610" in s
     assert "set OTPU_BUILD_TAG=lean" in s and "RAND_W" in s and "g_rom" in s
