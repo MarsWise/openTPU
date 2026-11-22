@@ -328,7 +328,31 @@ def test_se_comp_atan_gate_in_rtl():
     from pathlib import Path
     R = Path(__file__).resolve().parents[1] / "rtl"
     comp = (R / "vpu/otpu_se_comp.sv").read_text()
-    assert "logic [95:0] rom8 [8 * 256];" in comp and "rom8[{rom_desc.tbl[2:0], q1.ii[7:0]}]" in comp
+    assert "localparam int ROM_N = HAS_ATAN ? 9 * 256 : 8 * 256;" in comp
+    assert "{1'b0, rom_desc.tbl[2:0], q1.ii[7:0]}" in comp
     assert ".HAS_ATAN(HAS_ATAN)) u_comp" in (R / "vpu/otpu_vpu.sv").read_text()
     assert ".HAS_ATAN(HAS_TATAN)) u_vpu" in (R / "top/otpu_slice.sv").read_text()
     assert (R / "shell/otpu_board.sv").read_text().count(".HAS_TATAN(TATAN)) u_slice") == 2
+
+
+def test_se_comp_tfn_rom_shared_by_lane_pairs():
+    """One TFN ROM for each two lanes (port A lane 2p, port B lane 2p + 1): LANES / 2 copies, not
+    LANES (each a block RAM, rom_style block)."""
+    from pathlib import Path
+    comp = (Path(__file__).resolve().parents[1] / "rtl/vpu/otpu_se_comp.sv").read_text()
+    assert "for (genvar p = 0; p < (LANES + 1) / 2; p++) begin : g_rom" in comp
+    assert '(* rom_style = "block" *) logic [95:0] rom [ROM_N];' in comp
+    assert "TFN_COEF[{" not in comp                 # no lane reads the package's table itself
+
+
+@pytest.mark.parametrize("lanes", [3, 4])
+def test_se_comp_tfn_rom_pairs_odd_and_even_lanes(lanes, tmp_path):
+    """The pairs' ports at other lane counts (an odd count: the last ROM has port A only), every
+    table function bit for bit with enable stalls."""
+    rng = np.random.default_rng(90 + lanes)
+    chunks = []
+    for f in TFNS:
+        v = rng.choice(_tfn_values(rng, f - T.V_TFN0, 24), 3 * lanes).astype(np.float32)
+        chunks += [(f, v[k:k + lanes], np.zeros(lanes, np.float32)) for k in range(0, len(v), lanes)]
+    got, _ = run_comp(chunks, tmp_path, lanes=lanes, ipct=80, epct=25, seed=lanes)
+    check(chunks, got)

@@ -328,7 +328,8 @@ Threefry-2x32 is Random123's, 13 rounds (additions, rotations and xors; the know
 vectors are in `tests/test_vrand.py`). The result is an exact fp32 in `[0, 1 - 2^-24]`, a
 function of `(x, k)` only, so draws do not depend on the order or split of runs. RAND reads
 neither B nor the immediate as fp32; it has ADD's latency (one slot: `rtl/vpu/otpu_rand.sv`,
-seven stages beside slot 0) and issues `LANES` columns a cycle. The sampled decode loop draws
+seven stages beside slot 0) and issues `RAND_W` columns a cycle (`otpu_vpu` parameter, default 1:
+one generator; `LANES` gives every lane one, a chunk a cycle; the numbers are the same). The sampled decode loop draws
 position q's uniform as `uniform(bits(float(q)), seed)` with the seed in state word 7
 (`generate.Sampler.uniform`); `opentpu.kernels.randn` builds normals (Box-Muller with VPU
 operations only).

@@ -123,3 +123,13 @@ def test_rand_capability():
     board = Board(FakeTransport(devname=None, regmap=5, vrand=True))
     assert device_config(board.info()).VRAND
     board.load_program(0x1000, code)
+
+
+def test_rand_has_one_generator_by_default():
+    """otpu_vpu RAND_W (default 1): RAND's chunks are RAND_W columns and only lanes < RAND_W have
+    a generator (otpu_rand); the RTL tests above run with it and match the ISA bit for bit."""
+    from pathlib import Path
+    v = (Path(__file__).resolve().parents[1] / "rtl/vpu/otpu_vpu.sv").read_text()
+    assert "parameter int RAND_W = 1" in v
+    assert "(func == V_RAND) ? 16'(RW)" in v
+    assert v.count("if (l < RW) begin : g_rand") == 2

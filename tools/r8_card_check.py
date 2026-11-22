@@ -48,7 +48,8 @@ R8A_LEFT_OUT = ("tbin", "tbgsc", "td5")
 # experiment A (r8_build_a.cmd): r8 less BIN / BIN GSC (T5 kept), r5's memory write path
 R8X_HASH = 0x432e34c2
 R8X_LEFT_OUT = ("tbin", "tbgsc")
-# r5x less the TFN atan table too (r8_build_noatan.cmd; otpu_se_comp HAS_ATAN 0: no model uses it)
+# r5x lean (r8_build_lean.cmd): r5x less the TFN atan table too (otpu_se_comp HAS_ATAN 0: no model
+# uses it), with the shared TFN ROM and one RAND generator (no capability change)
 R8N_HASH = 0x852be9dc
 R8N_LEFT_OUT = ("tbin", "tbgsc", "tatan")
 # the builds with capabilities left out: CFG_HASH -> the CAPS2 bits it must not have

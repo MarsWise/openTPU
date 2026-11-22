@@ -7,6 +7,8 @@ rem   Output build\vivado-r8-m8-133.33-<rev>-noatan. A full build, several hours
 rem   if setup / hold pass (r5x closed at WNS +0.002: a rebuild may not). Nothing is loaded.
 rem   "r8_build_noatan.cmd plan" first: no Vivado, prints the hash.
 rem   r8_build_noatan.cmd [parallel | plan]
+echo r8_build_noatan.cmd is superseded by r8_build_lean.cmd (the same settings plus the shared TFN ROM and one RAND generator)
+exit /b 1
 setlocal
 set "R=C:\myOpenTPU\openTPU-r8"
 set OTPU_INCR_DCP=

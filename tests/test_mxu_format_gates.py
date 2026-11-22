@@ -246,12 +246,13 @@ def test_r8_card_check_refuses_atan_without_tatan():
 
 
 def test_no_atan_build_hash():
-    """r8_build_noatan.cmd's hash: r8 less TBIN TBGSC TATAN is 852be9dc (as r8_card_check)."""
+    """r8_build_lean.cmd's hash: r8 less TBIN TBGSC TATAN is 852be9dc (as r8_card_check)."""
     import dataclasses
     from tools.bonsai2_validate import configuration
     from opentpu.target import arch_hash
     caps = {k: k not in ("TBIN", "TBGSC", "TATAN") for k in
             "TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4".split()}
     assert arch_hash(dataclasses.replace(configuration(), **caps)) == 0x852be9dc
-    s = (ROOT / "tools/nextgen/card_runs/r8/r8_build_noatan.cmd").read_text()
+    s = (ROOT / "tools/nextgen/card_runs/r8/r8_build_lean.cmd").read_text()
     assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TATAN"' in s and "852be9dc" in s
+    assert "set OTPU_BUILD_TAG=lean" in s and "RAND_W" in s and "g_rom" in s

@@ -536,6 +536,22 @@ module otpu_se_comp
   // inline tfn_desc(...).field expressions into undriven controls and operand latches.
   tfn_d_t in_desc;
   assign in_desc = tfn_desc(in_tf);
+  // TFN's coefficient ROM: one copy for each two lanes, lane 2p on its port A, lane 2p + 1 on
+  // its port B (a dual-port block RAM read twice, each port with its lane's enable); tables 0-8,
+  // or 0-7 without atan (HAS_ATAN 0)
+  localparam int ROM_N = HAS_ATAN ? 9 * 256 : 8 * 256;
+  logic [11:0] rom_a [LANES];
+  logic [95:0] rom_d [LANES];
+  for (genvar p = 0; p < (LANES + 1) / 2; p++) begin : g_rom
+    (* rom_style = "block" *) logic [95:0] rom [ROM_N];
+    initial for (int i = 0; i < ROM_N; i++) rom[i] = TFN_COEF[i];
+    always_ff @(posedge clk) if (en_l[2 * p]) rom_d[2 * p] <= rom[rom_a[2 * p][$clog2(ROM_N)-1:0]];
+    if (2 * p + 1 < LANES) begin : g_b
+      always_ff @(posedge clk) if (en_l[2 * p + 1])
+        rom_d[2 * p + 1] <= rom[rom_a[2 * p + 1][$clog2(ROM_N)-1:0]];
+    end
+  end
+
   for (genvar l = 0; l < LANES; l++) begin : g_lane
     cst_t sti [NS], sto [NS], stp [NS];    // state at each stage's input, output, after it
     assign sti[0] = ret ? lp_st[l] : setup(in_c, in_a[l], in_tf, in_b[l], in_g[l], in_h[l]);
@@ -657,14 +673,10 @@ module otpu_se_comp
           rom_t <= t2 && q1.ii[8];
           rom_h <= q1.ii[0];
         end
-        // the segment's coefficients: the ROM's synchronous read (a block RAM), beside q2
-        if (HAS_ATAN) begin : g_rom9
-          always_ff @(posedge clk) if (en_l[l]) rom_q <= TFN_COEF[{rom_desc.tbl, q1.ii[7:0]}];
-        end else begin : g_rom8
-          logic [95:0] rom8 [8 * 256];           // tables 0-7 only (no atan)
-          initial for (int i = 0; i < 8 * 256; i++) rom8[i] = TFN_COEF[i];
-          always_ff @(posedge clk) if (en_l[l]) rom_q <= rom8[{rom_desc.tbl[2:0], q1.ii[7:0]}];
-        end
+        // the segment's coefficients: the ROM's synchronous read (a block RAM, g_rom: one ROM
+        // for two lanes, a port each), beside q2
+        assign rom_a[l] = HAS_ATAN ? {rom_desc.tbl, q1.ii[7:0]} : {1'b0, rom_desc.tbl[2:0], q1.ii[7:0]};
+        assign rom_q = rom_d[l];
         // the coefficients enter the state with q2 (TFN pass 0 only; a tail: {0, 0, the tail})
         logic t3;
         always_ff @(posedge clk) if (en_l[l]) t3 <= t2;

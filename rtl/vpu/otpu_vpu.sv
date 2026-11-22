@@ -94,7 +94,11 @@ module otpu_vpu
   // advances on the grant itself.
   parameter bit WBUF  = 0,
   parameter bit HAS_SE = 1'b0,                        // the stream engine (LANES = 8)
-  parameter bit HAS_ATAN = 1'b1                       // TFN atan's table (otpu_se_comp HAS_ATAN)
+  parameter bit HAS_ATAN = 1'b1,                      // TFN atan's table (otpu_se_comp HAS_ATAN)
+  // RAND's generators: RAND_W lanes have one (otpu_rand), and a RAND chunk is RAND_W columns
+  // (lanes RAND_W.. masked), the composites' narrow issue. The same numbers (a function of each
+  // column's counter word), RAND_W columns a cycle. LANES: every lane, a chunk a cycle.
+  parameter int RAND_W = 1
 ) (
   input  logic                    clk,
   input  logic                    rst,
@@ -262,7 +266,8 @@ module otpu_vpu
 `else
   assign cwid = 16'(NCL);
 `endif
-  wire [15:0] iwid = comp_f(func) ? cwid : 16'(LANES);   // columns issued per cycle
+  localparam int RW = (RAND_W < 1) ? 1 : (RAND_W > LANES) ? LANES : RAND_W;
+  wire [15:0] iwid = comp_f(func) ? cwid : (func == V_RAND) ? 16'(RW) : 16'(LANES);   // columns a cycle
 
   // C8: otpu_se_comp, whose stages are slot 0 (s = 0) and the tail's U (1) and Q (2). A
   // composite chunk is not issued while comp says slot 0 is taken when it would get there
@@ -965,8 +970,13 @@ module otpu_vpu
     // the flag rides beside it, so it is set exactly when that entry is at tap T_EW
     f32_t ru;
     logic rf;
-    otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
-    otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
+    if (l < RW) begin : g_rand
+      otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
+      otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
+    end else begin : g_norand                  // RAND's chunks mask this lane
+      assign ru = F_ZERO;
+      assign rf = 1'b0;
+    end
     assign lres[l] = hit[T_EX] ? ex_r : hit[T_RC] ? rc_r :
                      hit[T_RS] ? ((mtap[T_RS].cls == C_LOG) ? lg_r : rs_r) :
                      hit[0] ? st[0].v : rf ? ru : st[T_EW].v;
@@ -1033,8 +1043,13 @@ module otpu_vpu
     // RAND: its generator beside slot 0 (see g_lane)
     f32_t ru;
     logic rf;
-    otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
-    otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
+    if (l < RW) begin : g_rand
+      otpu_rand #(.NST(SL)) u_rand (.clk, .en(en_l[l]), .x(x), .k(m0.imm), .u(ru));
+      otpu_delay #(.W(1), .N(SL)) u_rf (.clk, .en(en_l[l]), .d(m0d.fh[V_RAND]), .q(rf));
+    end else begin : g_norand                  // RAND's chunks mask this lane
+      assign ru = F_ZERO;
+      assign rf = 1'b0;
+    end
     assign lres[l] = (C8 && c_ov) ? c_od[l] : hit[0] ? st[0] : rf ? ru : st[1];
     assign lmm[l] = !(C8 && c_ov) && hit[0] && (m0d.fh[V_MAX] || m0d.fh[V_MIN] || m0d.fh[V_CSWP]);
     assign lmv[l] = m0d.fh[V_CSWP] ? fp_mm(x, bf_p[l], !cs_mx[l]) : fp_mm(x, y, m0d.fh[V_MIN]);
@@ -1663,9 +1678,11 @@ module otpu_vpu
 `endif
           c16 = hc.w4[31:16];
 `ifndef SYNTHESIS
-          nchunks = comp_f(hf) ? (c16 + cwid - 1) / cwid : (c16 + 16'(LANES) - 1) >> LW;
+          nchunks = comp_f(hf) ? (c16 + cwid - 1) / cwid :
+                    (hf == V_RAND) ? (c16 + 16'(RW) - 1) / 16'(RW) : (c16 + 16'(LANES) - 1) >> LW;
 `else
-          nchunks = comp_f(hf) ? (c16 + 16'(NCL) - 1) >> CLW : (c16 + 16'(LANES) - 1) >> LW;
+          nchunks = comp_f(hf) ? (c16 + 16'(NCL) - 1) >> CLW :
+                    (hf == V_RAND) ? (c16 + 16'(RW) - 1) / 16'(RW) : (c16 + 16'(LANES) - 1) >> LW;
 `endif
           if (hf == V_RSUM || hf == V_RSSQ || hf == V_RDOT)
             nchunks = ((nchunks + 16'(RL) - 1) / 16'(RL)) * 16'(RL);

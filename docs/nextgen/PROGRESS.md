@@ -1,5 +1,11 @@
 # Nextgen implementation progress
 
+## r5x lean: shared TFN ROM, one RAND generator (2026-11-22)
+
+- `otpu_se_comp`: one TFN coefficient ROM for each two lanes (dual-port block RAM, a port a lane): 4 copies instead of 8. `otpu_vpu` `RAND_W` (default 1): one VOP RAND generator, a RAND chunk one column a cycle through the composites' narrow-issue path; the numbers are the same (a function of each column's counter). RTL SIMULATED: test_se_comp 39, test_vrand 18, VPU / board / stream / TFN / atan / format gates 119, all passed.
+- Build: `tools/nextgen/card_runs/r8/r8_build_lean.cmd` (r5x settings, `OTPU_DROP_FEATURES=TBIN TBGSC TATAN`, TMM T5 kept), CFG_HASH 852be9dc, tag `lean`; `r8_build_noatan.cmd` retired into it. Expected: about -24 RAMB36 (ROM) and -5k LUT / -4k FF (RAND), ESTIMATE, SYNTHESIS NOT RUN.
+- Memory-channel FIFOs to BRAM: not done. Of the 7.8k LUTRAM only the two 64-deep 512-bit buffers per channel (`mem_ch` u_ar, `native_dram` port A, about 2.7k LUTRAM in all) fit BRAM sensibly (+32 RAMB36); the rest are 16-32 deep. They sit on the DDR3 data path while its ECC qualification is open, so they wait until the soak is clean.
+
 ## TATAN (TFN atan) removable in RTL (2026-11-22)
 
 - `otpu_se_comp` gets `HAS_ATAN`; the board's `TATAN` generic reaches it through `otpu_slice` (`HAS_TATAN`) and `otpu_vpu`. At 0 each lane's TFN ROM holds tables 0-7 (2048 x 96 bit instead of 2304), CAPS2 bit12 is clear and the host refuses VOP atan (no model uses it). RTL SIMULATED (Verilator 5.046): TFN 0-9 less atan bit-exact, format-gate testbench with HAS_TATAN 0.
