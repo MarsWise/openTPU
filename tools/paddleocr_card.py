@@ -83,7 +83,14 @@ def main(argv=None) -> int:
         db = vb
 
         def ecc():
-            return _info()[1]
+            """Zeros over DRAM first (Board.scrub: the counters and the sticky DED cleared, so
+            each image's counts are its own), then the counts."""
+            b = Board(XdmaTransport(a.dev), check=False)
+            try:
+                b.scrub(force=True)
+                return memcal.ecc(b.t)
+            finally:
+                b.close()
 
     print("placement: host = image decode, resize, patch rows, position-table interpolation, "
           "mRoPE positions, the image rows' move between the two images; device = the tower "
@@ -99,6 +106,23 @@ def main(argv=None) -> int:
         print(f"   reference (fp32, host CPU): {ref_text!r} ({len(ref_ids)} ids, "
               f"{time.time() - t0:.1f} s); grid {gh} x {gw}", flush=True)
         e_before = ecc()
+        try:
+            fails += not _device(a, cfg, W, PD, tok, vb, db, memcal, patches, gh, gw,
+                                 ref_rows, ref_ids, ref_text, e_before)
+        except RuntimeError as e:          # an uncorrectable ECC error stops that image, not the rest
+            if "ECC_DED" not in str(e):
+                raise
+            print(f"   ECC_DED during this image: NOT TRUSTED, stopped ({str(e).split(':')[0]})",
+                  flush=True)
+            fails += 1
+    print(f"\nRESULT: {'PASS' if not fails else 'FAIL'} ({fails} of {len(inputs)} failed)", flush=True)
+    return 1 if fails else 0
+
+
+def _device(a, cfg, W, PD, tok, vb, db, memcal, patches, gh, gw, ref_rows, ref_ids, ref_text,
+            e_before) -> bool:
+    """One image on the device against the reference: True when it passes."""
+    if True:
         t0 = time.time()
         rows, be, _ = PD.vision_device(cfg, W, patches, gh, gw, backend=vb)
         e_vis = None
@@ -125,11 +149,9 @@ def main(argv=None) -> int:
         print(f"   text and ids {'== reference' if ok_text else '!= reference'}"
               + ("" if ok_text else f": device ids {ids}, reference {ref_ids}"), flush=True)
         if e_after is not None:
-            print(f"   ECC before {e_before}; after the tower {e_vis}, after the decoder {e_after} "
+            print(f"   ECC after the scrub {e_before}; after the tower {e_vis}, after the decoder {e_after} "
                   f"{'ok' if ok_ecc else '(NOT TRUSTED)'}", flush=True)
-        fails += not (ok_rows and ok_text and ok_ecc)
-    print(f"\nRESULT: {'PASS' if not fails else 'FAIL'} ({fails} of {len(inputs)} failed)", flush=True)
-    return 1 if fails else 0
+        return bool(ok_rows and ok_text and ok_ecc)
 
 
 if __name__ == "__main__":
