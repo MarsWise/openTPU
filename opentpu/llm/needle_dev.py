@@ -26,11 +26,11 @@ import numpy as np
 from .. import fp32 as F
 from .. import language as ol
 from .. import quant as Q
-from ..compiler import Affine, KVDesc, QTensor, Tensor, k_scale_bytes, trace_fit
+from ..compiler import Affine, KVDesc, QTensor, Tensor, arg_words, k_scale_bytes, trace_fit
 from ..kernels.lib import rmsnorm
 from . import needle as N
 from . import qwen3 as Q3
-from .qwen3 import ATTN_BLOCK, _attention, _attention_rows
+from .qwen3 import ATTN_BLOCK, RunPos, _attention, _attention_rows
 
 SPEC = Q3.Spec(hidden=N.D, layers=N.DEC_LAYERS, n_q=N.NH, n_kv=N.NK, head_dim=N.HD,
                ffn=N.D, vocab=8192, eps=N.EPS, theta=N.THETA, tied=True, bos=2, eos=(1,),
@@ -166,6 +166,12 @@ class Image:
         ang = np.arange(cap)[:, None] * inv
         self.cos, self.sin = table(np.cos(ang)), table(np.sin(ang))
         self.one_c, self.one_s = table(np.ones_like(ang)), table(np.zeros_like(ang))
+        # the decoder's mask rows at a run-time position (qwen3.RunPos, attention.Bucket):
+        # dec_cap entries +inf, then a block of -inf
+        z = np.concatenate([np.full(dec_cap, np.inf, np.float32),
+                            np.full(ATTN_BLOCK, -np.inf, np.float32)])
+        self.zmask = b.alloc(z.nbytes)
+        self.puts.append((self.zmask, z))
         self.logits = Tensor(Affine(b.alloc(4 * V)), (1, V), (V, 1))
         # the greedy pick of a step (needle_step pick=True): fp32 [max logit, its token id]
         self.pick = Tensor(Affine(b.alloc(8)), (1, 2), (2, 1))
@@ -231,11 +237,18 @@ def needle_encode(m, ids: tuple, block: int = ATTN_BLOCK):
 
 
 @ol.jit
-def needle_step(m, pos: int, tok: int, T: int, block: int = ATTN_BLOCK, pick: bool = False):
+def needle_step(m, pos, tok: int = 0, T: int = 1, block: int = ATTN_BLOCK, pick: bool = False):
     """Decoder token `tok` at position `pos` over T encoder tokens -> m.logits; pick: the
-    greedy token too (ARGMAX over the logits' row: the first maximum, as numpy's) -> m.pick."""
-    x = ol.load(m.embed[tok:tok + 1, :])
-    c, s_ = ol.load(m.cos[pos, :]), ol.load(m.sin[pos, :])
+    greedy token too (ARGMAX over the logits' row: the first maximum, as numpy's) -> m.pick.
+    pos a RunPos (Engine): the token and the position are the run's arguments (one program
+    for every token of a bucket; `tok` unused), else compile-time values."""
+    if isinstance(pos, RunPos):
+        x = ol.load(m.embed[pos.tok:pos.tok + 1, :])
+        ol.release(pos.tok)                 # its argument register serves addresses from here
+        c, s_ = ol.load(m.cos[pos.pos, :]), ol.load(m.sin[pos.pos, :])
+    else:
+        x = ol.load(m.embed[tok:tok + 1, :])
+        c, s_ = ol.load(m.cos[pos, :]), ol.load(m.sin[pos, :])
     ic, is_ = ol.load(m.one_c[0, :]), ol.load(m.one_s[0, :])
     for it in ol.range(N.DEC_LAYERS):
         s, cr = m.dec_layer(it)
@@ -253,13 +266,19 @@ class Engine:
     step(tok) per decoder token -> logits [V]."""
 
     def __init__(self, W: dict, cfg, enc_cap: int = 128, dec_cap: int = 128, backend=None,
-                 cq: dict | None = None):
+                 cq: dict | None = None, run_args: bool | None = None):
+        """run_args (default: the backend takes them): the decoder step is one program for
+        every token of an attention bucket, the token and the position its run's arguments
+        (compiled once a prompt; the board loads it into IMEM once), not a program a token."""
         self.img = Image(cfg, W, enc_cap, dec_cap, cq=cq)
         self.cfg = cfg
         if callable(backend):                   # a factory, as qwen3.Engine's: (cfg, images)
             backend = backend(cfg, [self.img.build()])
         self.backend = backend or Q3.IsaBackend(cfg, [self.img.build()], adopt=True)
+        self.run_args = bool(getattr(self.backend, "args", False)) if run_args is None \
+            else run_args
         self.T, self.pos = 0, 0
+        self._steps = {}                        # (T, bucket, pick) -> (programs, run_args)
 
     def _run(self, kernel, **kw):
         prog = trace_fit(kernel, self.cfg, 0, lambda: {"m": self.img, **kw}).finish()
@@ -271,11 +290,37 @@ class Engine:
         self._run(needle_encode, ids=tuple(int(t) for t in ids))
         self.T, self.pos = len(ids), 0
 
-    def step(self, tok: int) -> np.ndarray:
+    def _step_program(self, pick: bool):
+        """The step program of the position's bucket, the token and position run arguments:
+        (programs, run_args), compiled once for the prompt's T (the cross attention's)."""
+        blocks = self.pos // ATTN_BLOCK + 1
+        key = (self.T, blocks, pick)
+        if key not in self._steps:
+            rp = RunPos(blocks, ATTN_BLOCK, (blocks - 1) * ATTN_BLOCK, self.img.zmask,
+                        self.img.dec_cap)
+            b = trace_fit(needle_step, self.cfg, 0,
+                          lambda: {"m": self.img, "pos": rp, "T": self.T, "pick": pick})
+            self._steps[key] = ([b.finish()], list(b.run_args))
+        return self._steps[key]
+
+    def _step(self, tok: int, pick: bool) -> None:
         if self.pos >= self.img.dec_cap:
             raise RuntimeError("decoder KV full")
-        self._run(needle_step, pos=self.pos, tok=int(tok), T=self.T)
+        if not self.run_args:
+            self._run(needle_step, pos=self.pos, tok=int(tok), T=self.T, pick=pick)
+        else:
+            progs, ra = self._step_program(pick)
+            args = arg_words(ra, RunPos.values(int(tok), self.pos))
+            start = getattr(self.backend, "start", None)
+            if start is None:
+                self.backend.run(progs, args=args)
+            else:                               # (the board: the same programs object loads
+                start(progs, args=args)         # nothing again)
+                self.backend.wait()
         self.pos += 1
+
+    def step(self, tok: int) -> np.ndarray:
+        self._step(tok, False)
         a = self.img.logits.base.const
         raw = self.backend.read(0, int(a), 4 * self.img.V)
         return raw.view(np.float32).copy()
@@ -283,10 +328,7 @@ class Engine:
     def step_pick(self, tok: int) -> int:
         """step(tok) with the next token picked on the device: the host reads the id (8
         bytes), not the logits, and computes nothing."""
-        if self.pos >= self.img.dec_cap:
-            raise RuntimeError("decoder KV full")
-        self._run(needle_step, pos=self.pos, tok=int(tok), T=self.T, pick=True)
-        self.pos += 1
+        self._step(tok, True)
         raw = self.backend.read(0, int(self.img.pick.base.const), 8).view(np.float32)
         return int(raw[1])
 

@@ -53,6 +53,43 @@ def test_needle_device_isa_readme_tool_call():
     assert ND.Engine(W, cfg).generate_picked(ids) == out
 
 
+@pytest.mark.parametrize("cq", [False, True], ids=["int8", "cq4"])
+def test_needle_step_run_args_bit_exact(cq):
+    """The decoder step at run-time arguments (the token and the position: one program a
+    prompt, needle_dev.Engine run_args) against a program a token (compile-time values): the
+    logits and every DRAM byte bit for bit, the README's tool call, and one program compiled
+    for the whole decode (its pick variant one more)."""
+    if not os.path.exists(os.path.join(DIR, "model.safetensors")):
+        pytest.skip(f"no Needle checkpoint in {DIR}")
+    import numpy as np
+    from opentpu.isasim import board_config
+    from opentpu.llm import needle_dev as ND
+    if cq:
+        tok_, W, mats, ids = _cq_setup()
+        kw = dict(TGSC=True, TCQ=True, VBFLY=True)
+    else:
+        sp = pytest.importorskip("sentencepiece")
+        tok_ = sp.SentencePieceProcessor(model_file=os.path.join(DIR, "tokenizer.model"))
+        W, mats = N.load(DIR), None
+        ids = N.encoder_ids(tok_, "What's the weather in San Francisco?",
+                            '[{"name":"get_weather","parameters":{"location":"string"}}]')
+        kw = {}
+    cfg = board_config(DRAM_BYTES=256 << 20, MCOLS=8, TMEM_WORDS=131072, **kw)
+    a = ND.Engine(W, cfg, cq=mats, run_args=False)
+    b = ND.Engine(W, cfg, cq=mats, run_args=True)
+    a.encode(ids)
+    b.encode(ids)
+    for t in (N.EOS, N.TOOL_CALL, 356, 294):
+        assert np.array_equal(a.step(t).view(np.uint32), b.step(t).view(np.uint32))
+    n = a.img.nbytes
+    assert np.array_equal(a.backend.machine.slices[0].dram[:n],
+                          b.backend.machine.slices[0].dram[:n])
+    out = b.generate_picked(ids)
+    assert tok_.decode(out[:-1]) == \
+        '[{"name":"get_weather","arguments":{"location":"San Francisco"}}]'
+    assert sorted(k[2] for k in b._steps) == [False, True]     # one step program, one pick
+
+
 def test_needle_decoder_step_rtl(monkeypatch, have_verilator):
     """A decoder step (8 layers of self + cross attention, the tied head) on the Verilator RTL
     from the ISA's DRAM after the encoder: logits and every DRAM byte bit for bit (r8 card

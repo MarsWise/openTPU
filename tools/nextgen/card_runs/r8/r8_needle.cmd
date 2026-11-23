@@ -1,11 +1,12 @@
 @echo off
 rem Claude: Cactus Needle (26M) on the card: copies the checkpoint (77 MB, once) and the host tree, runs
 rem tools\needle_card.py (int8 and CQ4): card == ISA, the README's tool call, tokens picked on the card, ECC.
-rem About 10 minutes; saves r8_needle.log here. No bitstream load, no rescan. Not during another run on the card.
+rem Takes sync_next.bundle first, if it is there. About 10 minutes; saves r8_needle.log here. No bitstream load, no rescan. Not during another run on the card.
 set KH=C:\Users\user\.copilot\session-state\11d00541-3609-4624-ad4e-77febeaa144f\files\linux-host_known_hosts
 set H=nvx@192.168.0.157
 set O=-o UserKnownHostsFile="%KH%" -o ConnectTimeout=15
 set M=C:\ai-models\cactus\Cactus-Compute--needle
+if exist "%~dp0sync_next.bundle" (copy /y "%~dp0sync_next.bundle" "%~dp0sync.bundle" >nul & del "%~dp0sync_next.bundle")
 if not exist "%M%\model.safetensors" (echo No %M%\model.safetensors & pause & exit /b 1)
 ssh %O% %H% "pgrep -f '[c]laude_exec.sh' >/dev/null" && (echo A measurement run is in progress on the host: wait for it to finish first. & pause & exit /b 1)
 ssh %O% %H% "mkdir -p ~/needle; test -f ~/needle/model.safetensors" || scp %O% "%M%\model.safetensors" "%M%\needle-cq4.zip" %H%:needle/ || goto fail

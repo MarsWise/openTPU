@@ -20,8 +20,11 @@ the FPGA; the card's DRAM is written (the model's image), as any run's.
   4 the same decode with every token picked on the device (needle_step pick: ARGMAX over the
     logits' row; the host reads the 8-byte [max, id] and feeds the id back, computing nothing)
 
-Host work in 4: the tokenizer, and one program launch a token (the id is a compile-time immediate
-of the step's program: an autonomous loop on the card is the open item)."""
+Host work in 4: the tokenizer, and one run a token. The step is one program for every token
+(the token and the position are the run's arguments, needle_dev.Engine run_args): compiled once
+a prompt and loaded into IMEM once, so a token costs the host a start, a poll and an 8-byte read
+(before: a compile and the sequencer's wait entries a token, ~50 ms). --compile-each: the old
+program-a-token path, for comparison. An autonomous loop on the card is the open item."""
 from __future__ import annotations
 
 import argparse
@@ -49,6 +52,8 @@ def main() -> int:
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--isa", action="store_true", help="the device side on the ISA simulator")
     ap.add_argument("--cq", action="store_true", help="the CACT CQ4 export (DIR/cq4) as TMM CQ4")
+    ap.add_argument("--compile-each", action="store_true",
+                    help="a program a token (the token and position compile-time values)")
     a = ap.parse_args()
 
     from opentpu.llm import needle as N
@@ -91,7 +96,8 @@ def main() -> int:
     dev = None
     try:
         t0 = time.time()
-        dev = ND.Engine(W, cfg, backend=backend, cq=cq)
+        dev = ND.Engine(W, cfg, backend=backend, cq=cq,
+                        run_args=False if a.compile_each else None)
         print(f"{name}: image {dev.img.nbytes / 2**20:.1f} MiB, loaded in {time.time() - t0:.1f} s",
               flush=True)
         ref.encode(IDS)
