@@ -314,7 +314,12 @@ def main(argv=None):
             P.stack.pop()
     B.Board.write = board_write
 
-    eng = Q.Engine(spec, Q.load_weights(path), cap=a.cap, cfg=cfg, backend=backend, **wkw,
+    if getattr(spec, "subln", False):        # BitNet b1.58: its own weight loader (as otpu-chat)
+        from opentpu.llm.bitnet import Weights as BitNetWeights
+        weights = BitNetWeights(path)
+    else:
+        weights = Q.load_weights(path)
+    eng = Q.Engine(spec, weights, cap=a.cap, cfg=cfg, backend=backend, **wkw,
                    resident=not a.per_position, prompt_runs=a.prompt_runs)
     eng.stream_logits = not a.no_stream
     if a.backend == "fake":         # logits the sampler works on as on real ones (no ties)

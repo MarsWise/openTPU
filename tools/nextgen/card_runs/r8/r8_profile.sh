@@ -2,7 +2,8 @@
 # Claude: where a decode token's cycles go on the loaded firmware (tools/decode_profile.py
 # --device-counters): for each model, the card's counters over the decode of one fixed greedy prompt
 # (64 tokens): running cycles a token, DRAM bytes read / written a token, the MXU's busy and MAC
-# cycles. r8_profile.sh [models...]; default: bonsai bonsai-grq bitnet qwen35 qwen35-2b
+# cycles, and every busy / wait counter of the card (VPU, quantizer, DMA, TMEM denials, DRAM waits,
+# MXU starved). r8_profile.sh [models...]; default: bonsai bonsai-grq bitnet qwen35 qwen35-2b
 # (bonsai-grq: Bonsai 2 4B with OTPU_GQ4=0, plain GRQ).
 # First the DRAM calibration (selfcal + loadcal ternary:4, until every lane's window is 4 taps;
 # opentpu.host.loadcal --min-window 4 --tries 5); before each model: zeros over DRAM (scrub).
@@ -64,6 +65,12 @@ print(f"PROFILE {d.get('model')}: {t} tokens, {cyc / 1e6:.2f} Mcycles a token "
       f"MAC {100 * (c.get('mxu_mac_fraction_of_running') or 0):.0f} % of the running cycles; "
       f"port-B requests {c.get('port_b_requests_per_token') or 0:.0f} a token; "
       f"wall decode {c.get('wall_decode_s') or 0:.1f} s, on the card {c.get('device_run_s') or 0:.1f} s")
+dl = c.get("counter_delta") or {}; run = dl.get("RUNNING") or 0
+if run:     # every busy / wait counter as a share of the running cycles (docs: opentpu/host/regs.py)
+    print("   counters, % of the running cycles: " + ", ".join(
+        f"{k} {100 * dl[k] / run:.1f}" for k in ("MXU_BUSY", "MXU_MAC", "MXU_STARVE", "VPU_BUSY",
+                                                  "QNT_BUSY", "DMA_BUSY", "TMEM_DENY", "DRAM_WAIT")
+        if k in dl) + f"; INSTR {dl.get('INSTR', 0) / max(t, 1):.0f} a token")
 PY
 done
 echo; echo "== $(date +%H:%M:%S) DONE rc $rc (JSON: /tmp/prof_*.json, copied next to the log)"

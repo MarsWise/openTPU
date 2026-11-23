@@ -11,7 +11,7 @@ scp %O% "%~dp0sync.bundle" "%~dp0r8_profile.sh" %H%:/tmp/ || goto fail
 ssh %O% %H% "tr -d '\r' < /tmp/r8_profile.sh > /tmp/r8_profile_exec.sh && bash -o pipefail -c 'bash /tmp/r8_profile_exec.sh %* 2>&1 | tee /tmp/r8_profile.log'"
 set RUNRC=%errorlevel%
 scp %O% %H%:/tmp/r8_profile.log "%~dp0r8_profile.log" || set RUNRC=1
-scp %O% "%H%:/tmp/prof_*.json" "%~dp0" || set RUNRC=1
+scp %O% "%H%:/tmp/prof_*.json" "%~dp0." || set RUNRC=1
 echo.
 echo Log: %~dp0r8_profile.log
 pause
