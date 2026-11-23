@@ -205,8 +205,10 @@ def main(argv=None):
     ap.add_argument("--fake-no-args", action="store_true",
                     help="--backend fake: a bitstream without run arguments (CAPS bit25)")
     ap.add_argument("--json")
-    ap.add_argument("--wformat", default="int8", choices=["int8", "fp4", "int4", "nvfp4", "mix", "ternary_gsc"],
-                    help="weight format of the layers (docs/quant.md)")
+    ap.add_argument("--wformat", default="auto",
+                    choices=["auto", "int8", "fp4", "int4", "nvfp4", "mix", "ternary_gsc"],
+                    help="weight format of the layers (docs/quant.md); auto: otpu-chat's (BitNet's "
+                         "own formats, Bonsai's ternary_gsc, a model's mix, else int8)")
     ap.add_argument("--head-format", default=None, choices=["int8", "fp4", "int4", "nvfp4", "ternary_gsc"],
                     help="weight format of the LM head (default: --wformat)")
     ap.add_argument("--card-loop", action="store_true",
@@ -232,6 +234,14 @@ def main(argv=None):
     tok = AutoTokenizer.from_pretrained(path)
     spec = load_spec(path)
     P = Profiler()
+    from opentpu.llm import formats as FM
+    if getattr(spec, "subln", False):        # BitNet b1.58: its own image formats (as otpu-chat)
+        from opentpu.llm.bitnet import IMAGE
+        if a.wformat not in (FM.AUTO, IMAGE["wformat"]):
+            ap.error(f"{path.name} is BitNet b1.58: its weights are {IMAGE['wformat']}")
+        a.wformat, a.head_format = IMAGE["wformat"], a.head_format or IMAGE["head_format"]
+    else:
+        a.wformat = FM.auto(spec, a.wformat)
     wkw = dict(wformat=a.wformat, head_format=a.head_format)
     profile_info = ecc_preflight = None
     if a.backend == "board":
