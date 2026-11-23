@@ -46,7 +46,8 @@ module otpu_top
   parameter bit HAS_TBIN   = 1'b1,    // the MXU's optional weight formats (otpu_slice)
   parameter bit HAS_TCQ    = 1'b1,
   parameter bit HAS_TD5    = 1'b1,
-  parameter bit HAS_TATAN  = 1'b1     // the VPU's TFN atan table (otpu_slice)
+  parameter bit HAS_TATAN  = 1'b1,    // the VPU's TFN atan table (otpu_slice)
+  parameter bit GSC_PIPE   = 1'b1     // otpu_tmm_gsc PIPE (otpu_slice)
                                       // (otpu_coll_bar), as the card builds it (otpu_board)
 ) (
   input  logic          clk,
@@ -143,7 +144,8 @@ module otpu_top
                  .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
                  .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST),
                  .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM), .SEQ_WC(SEQ_WC),
-                 .HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN))
+                 .HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN),
+                 .GSC_PIPE(GSC_PIPE))
     u_slice (
       .clk, .clk_f, .sys_rst, .rst, .rinit, .ld_start, .ld_addr, .ld_n, .ld_busy(ldb[s]),
       .a_rdy, .b_rdy, .sw_rdy, .wr_idle, .rd_idle,

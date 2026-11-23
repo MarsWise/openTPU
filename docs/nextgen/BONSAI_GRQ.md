@@ -79,3 +79,27 @@ drains column `q` to `out + 4i + q` with Sw word `q`. The compiler emits it for 
 Evidence and the estimate: `VERIFIED_RESULTS.csv` (TMM GRQ QUAD). Build: `r8_build_c2.cmd`
 (CFG_HASH `a905c3db`); the build needs its own timing closure (the MXU's result row is 96 bits
 wider; the epilogue lanes select their Sw).
+
+## GSC groups pipelined (2026-11-23, otpu_tmm_gsc PIPE)
+
+Measured on the card (r5x lean 46a18fc1, `r8_profile.cmd`, PHYSICAL FPGA VERIFIED): Bonsai 2 4B
+with GRQ QUAD decodes at 15.79 Mcycles a token with DRAM at 67 % of the port; the MXU is busy 99 %
+of the cycles but multiplies 52 %, starved of weights 25 % (BitNet 0.1 %, Qwen3.5-0.8B 1.4 %),
+DRAM waits 0.3 %. The adapter handed a K block's subcommand to the MXU only after the one before
+had completed (drained), so every block paid the DRAM latency and the FIFO's fill again.
+
+`PIPE` (default 1; `GSC_PIPE` on otpu_slice / otpu_top / tb_top) hands block k+1's subcommand to
+the MXU as soon as block k is released: the MXU's two-command queue streams its chunks under block
+k's drain. The MXU still consumes a command only after the one before has drained (`c_drained`:
+its read-modify-writes written), so ACC's K order and the results are the serial adapter's.
+
+RTL SIMULATED (Verilator 5.046, `tools/gq4_bench.py`, native memory model, read latency 60, M 1,
+MCOLS 8; RTL == ISA bit for bit):
+
+| GRQ QUAD | PIPE 0 | PIPE 1 |
+|---|---|---|
+| N 2560, KB 20 (12,800 chunks) | 17,459 cycles (233 extra a K block) | 14,884 (104 extra) |
+| N 256, KB 20 (1,280 chunks) | 4,013 (137 extra) | 2,422 (57 extra) |
+
+The rest of a block's extra cycles is the drain the next block waits for (not overlapped: that
+needs a read-after-write check in the drain). The card's gain is NOT RUN (needs a bitstream).

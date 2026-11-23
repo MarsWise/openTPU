@@ -4,7 +4,8 @@ rem   0.10 / 0.05, no BIN / BIN GSC) from feature/r7-fpga with four area changes
 rem   (otpu_mxu HAS_TD5 0: its trit decode leaves the weight-decode path; CAPS2 bit15 clear),
 rem   TFN atan off (otpu_se_comp HAS_ATAN 0, CAPS2 bit12 clear, VOP atan refused by the host),
 rem   one TFN coefficient ROM for each two VPU lanes (8 copies -> 4), and one VOP RAND generator
-rem   (otpu_vpu RAND_W 1: RAND one column a cycle, the same numbers). CFG_HASH add73610.
+rem   (otpu_vpu RAND_W 1: RAND one column a cycle, the same numbers), and GSC groups pipelined
+rem   (otpu_tmm_gsc PIPE: a K block's subcommand streams under the one before). CFG_HASH add73610.
 rem   Output build\vivado-r8-m8-133.33-<rev>-lean. A full build, several hours; otpu.bit only if
 rem   setup / hold pass (r5x closed at WNS +0.002: a rebuild may not). Nothing is loaded.
 rem   "r8_build_lean.cmd plan" first: no Vivado, prints the hash.
@@ -45,6 +46,7 @@ findstr /c:"WREG" "%R%\rtl\shell\otpu_mem_ch.sv" >nul || (echo otpu_mem_ch has n
 findstr /c:"HAS_ATAN" "%R%\rtl\vpu\otpu_se_comp.sv" >nul || (echo otpu_se_comp has no HAS_ATAN gate: wrong checkout & goto :err)
 findstr /c:"begin : g_rom" "%R%\rtl\vpu\otpu_se_comp.sv" >nul || (echo otpu_se_comp has no shared TFN ROM: wrong checkout & goto :err)
 findstr /c:"parameter int RAND_W = 1" "%R%\rtl\vpu\otpu_vpu.sv" >nul || (echo otpu_vpu has no RAND_W: wrong checkout & goto :err)
+findstr /c:"parameter bit PIPE = 1'b1" "%R%\rtl\mxu\otpu_mxu.sv" >nul || (echo otpu_tmm_gsc has no PIPE: wrong checkout & goto :err)
 findstr /c:".HAS_TATAN(TATAN)) u_slice" "%R%\rtl\shell\otpu_board.sv" >nul || (echo the board does not pass TATAN to the slices: wrong checkout & goto :err)
 findstr /c:"OREG" "%R%\rtl\tech\generic\otpu_tech_ram.sv" >nul && (echo the checkout has the FIFO output register: not r5x's pipeline & goto :err)
 findstr /c:"OTPU_BUILD_TAG" "%R%\tools\build_r8_133.ps1" >nul || (echo build_r8_133.ps1 takes no OTPU_BUILD_TAG: wrong checkout & goto :err)

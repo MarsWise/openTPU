@@ -59,7 +59,13 @@
 // drains, holds one external dependency entry until its last group, and forwards RMAX last.
 module otpu_tmm_gsc
   import otpu_pkg::*;
-#(parameter int D = 128) (
+#(parameter int D = 128,
+  // PIPE: a group's subcommand is handed to the MXU (start, release) while the one before still
+  // streams and drains: the MXU's two-command queue streams its chunks (DRAM latency, the FIFO's
+  // fill) under the older one's drain. The MXU consumes its head only once the older command has
+  // drained (c_drained: the read-modify-writes written), so ACC's K order is the serial one's
+  // and the results are bit for bit the same. 0: a group starts after the one before completed.
+  parameter bit PIPE = 1'b1) (
   input logic clk, rst, start, go,
   input cmd_t cmd,
   output logic rdy, done,
@@ -100,12 +106,15 @@ module otpu_tmm_gsc
   assign lw_a = lw_a_q;
   assign lw_d = lw_d_q;
   cmd_t held;
-  logic [7:0] k;
+  logic [7:0] k;                             // the group the next subcommand is (issue side)
+  logic [7:0] kd;                            // the groups completed (m_done)
   logic [1:0] pending, unreleased;
   logic released;
   logic [31:0] wb, sb;                      // GRQ: plane k's weight and scale bases
   wire gsc = cmd.op == OP_TMM && cmd.flags[5];
   wire last_k = k + 8'd1 == held.w4[23:16];
+  wire last_d = kd + 8'd1 == held.w4[23:16];  // this m_done ends the command's last group
+  wire grp = state == ISSUE || state == RELEASE || state == RUN;   // a GSC command's groups
   wire grq = !held.w4[26] && held.w4[28];
   wire cq = held.w4[27] && !held.w4[30], cq4 = cq && held.w4[29];
   // TMM T5 (word 4 bits 26 and 29, CQ clear: dense trits, five blocks a D-byte chunk): block k
@@ -117,7 +126,7 @@ module otpu_tmm_gsc
     // Unit ready cannot depend on cmd: the sequencer registers cmd after observing ready.
     // Accept GSC into held while a legacy command drains; forward its release/completion.
     rdy = state == IDLE && m_rdy;
-    done = pending != 0 ? m_done : (state == RUN && m_done && last_k) || (state == LUT && lj[3]);
+    done = pending != 0 ? m_done : (grp && m_done && last_d) || (state == LUT && lj[3]);
     m_start = state == IDLE ? start && !gsc : state == ISSUE && m_rdy;
     m_go = state == RELEASE || (go && unreleased != 0) ||
            (state == IDLE && go && !(start && gsc));
@@ -155,6 +164,7 @@ module otpu_tmm_gsc
       released <= 0;
       held <= '0;
       k <= 0;
+      kd <= 0;
       kc <= '0;
       kq <= '0;
       wb <= '0;
@@ -174,10 +184,12 @@ module otpu_tmm_gsc
           default: ;
         endcase
       end
+      if (grp && m_done) kd <= kd + 8'd1;
       case (state)
         IDLE: if (start && gsc) begin
           held <= cmd;
           k <= 0;
+          kd <= 0;
           kc <= '0;
           kq <= '0;
           wb <= cmd.w1;
@@ -195,10 +207,19 @@ module otpu_tmm_gsc
           if (lj[3]) state <= IDLE;
         end
         ISSUE: if (m_rdy) state <= RELEASE;
-        RELEASE: state <= RUN;
+        // PIPE: the next group is issued as soon as this one is released (the MXU takes it when
+        // its queue has room, m_rdy); the command ends with its last group's m_done
+        RELEASE: if (PIPE && !last_k) begin
+          k <= k + 8'd1;
+          kq <= (kq == 3'd4) ? 3'd0 : kq + 3'd1;
+          if (kq == 3'd4) kc <= kc + 8'd1;
+          wb <= wb + held.w5;
+          sb <= sb + held.w7;
+          state <= ISSUE;
+        end else state <= RUN;
         RUN: if (m_done) begin
-          if (last_k) state <= IDLE;
-          else begin
+          if (last_d) state <= IDLE;
+          else if (!PIPE) begin
             k <= k + 8'd1;
             kq <= (kq == 3'd4) ? 3'd0 : kq + 3'd1;
             if (kq == 3'd4) kc <= kc + 8'd1;

@@ -29,9 +29,11 @@ def test_the_formats_are_parameters_down_to_the_mxu():
     board = (ROOT / "rtl/shell/otpu_board.sv").read_text()
     assert board.count(".HAS_TBIN(TBIN), .HAS_TCQ(TCQ), .HAS_TD5(TD5), .HAS_TATAN(TATAN)) u_slice") == 2
     top = (ROOT / "rtl/top/otpu_top.sv").read_text()
-    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN))" in top
+    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN)," in top
+    assert ".GSC_PIPE(GSC_PIPE))" in top
     tb = (ROOT / "sim/verilator/tb_top.sv").read_text()
-    assert ".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN)) dut" in tb
+    assert (".HAS_TBIN(HAS_TBIN), .HAS_TCQ(HAS_TCQ), .HAS_TD5(HAS_TD5), .HAS_TATAN(HAS_TATAN), "
+            ".GSC_PIPE(GSC_PIPE)) dut") in tb
 
 
 def _mm_program(cfg):

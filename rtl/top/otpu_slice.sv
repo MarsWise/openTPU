@@ -84,7 +84,8 @@ module otpu_slice
   parameter bit HAS_TBIN   = 1'b1,    // the MXU's weight formats (otpu_mxu HAS_BIN / HAS_CQ / HAS_T5):
   parameter bit HAS_TCQ    = 1'b1,    //   0 leaves a format's decode out (the board's TBIN / TCQ /
   parameter bit HAS_TD5    = 1'b1,    //   TD5, which CAPS2 reports)
-  parameter bit HAS_TATAN  = 1'b1     // the VPU's TFN atan table (the board's TATAN)
+  parameter bit HAS_TATAN  = 1'b1,    // the VPU's TFN atan table (the board's TATAN)
+  parameter bit GSC_PIPE   = 1'b1     // otpu_tmm_gsc PIPE: a group's subcommand under the one before
 ) (
   input  logic          clk,
   input  logic          clk_f,      // TMEM_PMP 1: 2 x clk, rising with it (the MMCM's); else unused
@@ -515,7 +516,7 @@ module otpu_slice
   logic mx_start, mx_go, mx_rdy, mx_done;
   cmd_t mx_cmd;
   logic cq_we; logic [3:0] cq_a; logic [7:0] cq_d;  // TMM CQ's LUT writes (the adapter's, LUTSET)
-  otpu_tmm_gsc #(.D(D)) u_tmm_gsc (
+  otpu_tmm_gsc #(.D(D), .PIPE(GSC_PIPE)) u_tmm_gsc (
     .clk, .rst(rst_mxu), .start(ustart[U_MXU]), .go(urel), .cmd(ucmd[U_MXU]),
     .rdy(r_mxu), .done(d_mxu), .m_start(mx_start), .m_go(mx_go), .m_cmd(mx_cmd),
     .m_rdy(mx_rdy), .m_done(mx_done), .lw_we(cq_we), .lw_a(cq_a), .lw_d(cq_d));

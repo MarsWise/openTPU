@@ -317,3 +317,26 @@ def test_gq4_firmware_capability_is_required_before_program_load():
     assert device_config(board.info()).TGQ4
     board.load_program(0x1000, prog)
 
+
+
+@pytest.mark.parametrize("n,kb", [(256, 6), (64, 9)])
+def test_gsc_groups_pipelined_rtl(have_verilator, n, kb):
+    """otpu_tmm_gsc PIPE (the default): a K block's subcommand is handed to the MXU while the one
+    before streams and drains. The results are the serial adapter's (PIPE 0) and the ISA's bit for
+    bit (GRQ QUAD, then GRQ and a serial GSC command on the same output with ACC), with AXI stalls,
+    and the command takes fewer cycles."""
+    from opentpu import rtlsim
+    cfg, image, head, grq, quad = gq4_case(kb, True, n, mcols=8)
+    _, _, _, gsc, _, _ = case(kb, 1, True, n, rmax=False, mcols=8)
+    cfg = dataclasses.replace(cfg, TQUAD=True, TPAIR=True, PAIR=True, TGQ4=True, DRAM_BYTES=1 << 20)
+    prog = head + [quad, grq, gsc, I.halt()]
+    ref = Machine(cfg, [prog], [image.copy()]).run().slices[0]
+    cyc = {}
+    for pipe in (0, 1):
+        drams, tmems, st = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=30, seed=n + kb,
+                                      uarch={"GSC_PIPE": pipe})
+        np.testing.assert_array_equal(tmems[0], ref.tmem)
+        np.testing.assert_array_equal(drams[0], ref.dram)
+        c = st["cycles"]
+        cyc[pipe] = c[0] if isinstance(c, list) else c
+    assert cyc[1] < cyc[0], cyc
