@@ -2,12 +2,12 @@
 rem Claude: load the r8 bitstream into the FPGA over JTAG, volatile (no flash). The host's PCIe
 rem link drops while the FPGA reconfigures: stop every card run on 192.168.0.157 first, and run
 rem r8_restore_pcie.cmd right after this. Then r8_card_tests.cmd.
-rem   r8_load.cmd                    the current firmware: r5x c42beb65's otpu.bit (firmware_contract.json)
+rem   r8_load.cmd                    the current firmware: r5x lean 46a18fc1's otpu.bit (firmware_contract.json)
 rem   r8_load.cmd C:\path\otpu.bit   another file
 rem   r8_load.cmd C:\path\otpu.bit parallel   the same while a Vivado build is running
 setlocal
 set "BIT=%~1"
-if "%BIT%"=="" set "BIT=C:\myOpenTPU\openTPU-r8\build\vivado-r8-m8-133.33-c42beb65\otpu.bit"
+if "%BIT%"=="" set "BIT=C:\myOpenTPU\openTPU-r8\build\vivado-r8-m8-133.33-46a18fc1-lean\otpu.bit"
 set "VIV=C:\Xilinx\Vivado\2024.2\bin\vivado.bat"
 if not exist "%BIT%" (echo No bitstream at %BIT%: the build writes otpu.bit only when setup and hold pass. & pause & exit /b 1)
 if not exist "%VIV%" (echo Vivado not found at %VIV% & pause & exit /b 1)

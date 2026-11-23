@@ -24,13 +24,14 @@ if ($tag -and $tag -notmatch '^-[A-Za-z0-9]{1,8}$') { throw "OTPU_BUILD_TAG '$($
 if (-not $OutDir) { $OutDir = Join-Path $root "build\vivado-r8-m8-133.33-$revision$tag" }
 Write-Warning 'Experimental r8: full FPGA-only model coverage and hardware timing are unverified.'
 
-# r5x's settings are the defaults (c42beb65, 2026-11-19: DDR3 on the card as r5 45b1c1d3's, every
-# card test PASS): r5's memory write path, LiteDRAM rtw 3, a 16384-record trace, no TMM BIN /
-# BIN GSC, the memory margins it closed with. A variable the caller set (even to '0') wins;
-# OTPU_DROP_FEATURES=none builds every capability (BIN / BIN GSC back: more area and timing).
+# r5x lean's settings are the defaults (46a18fc1, 2026-11-23: every card test PASS, DDR3 ECC 0/0):
+# r5's memory write path, LiteDRAM rtw 3, a 16384-record trace, no TMM BIN / BIN GSC / T5 and no
+# TFN atan, the memory margins r5x closed with. A variable the caller set (even to '0') wins;
+# OTPU_DROP_FEATURES=none builds every capability (more area and timing; T5 is on the MXU's
+# weight-decode path).
 $r5xDefaults = [ordered]@{
     OTPU_MEMCH_WREG = '0'; OTPU_LITEDRAM_RTW = '3'; TRACE_DEPTH = '16384'
-    OTPU_DROP_FEATURES = 'TBIN TBGSC'
+    OTPU_DROP_FEATURES = 'TBIN TBGSC TD5 TATAN'
     OTPU_UC2_MARGIN = '0.10'; OTPU_SYS_MARGIN = '0.10'; OTPU_WR_MARGIN = '0.05'
 }
 foreach ($k in $r5xDefaults.Keys) {
