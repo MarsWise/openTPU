@@ -148,15 +148,15 @@
     },
     {
       "name": "r8 r5x lean (r8_build_lean.cmd, feature/r7-fpga): r5x's build with TMM T5 off (otpu_mxu HAS_TD5 0, CAPS2 bit15 clear) and TATAN off (otpu_se_comp HAS_ATAN 0, CAPS2 bit12 clear), one TFN ROM for each two VPU lanes, one VOP RAND generator (RAND_W 1); the host refuses T5 / atan programs",
-      "build_id": "pending",
+      "build_id": "0x46a18fc1",
       "cfg_hash": "0xadd73610",
-      "bitstream_sha256": "pending",
+      "bitstream_sha256": "db6d04a4370fc6fe165d11ded74e5fec98e40601f732f9e0d74813c9011b5fdf",
       "version": {
         "D": 128,
         "MCOLS": 8,
         "LANES": 8
       },
-      "status": "candidate: not built yet (7f376a78-lean with T5 kept, 852be9dc, failed timing: WNS -0.124)"
+      "status": "candidate: built (signoff WNS +0.054 / WHS +0.022, core +0.151), not card-tested"
     }
   ]
 }
