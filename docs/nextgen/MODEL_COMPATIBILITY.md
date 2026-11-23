@@ -1,5 +1,33 @@
 # Model compatibility and end-to-end evidence
 
+## r5x lean status per model (2026-11-23)
+
+The current firmware is r5x lean 46a18fc1 (CFG_HASH add73610: no TMM BIN / BIN GSC / T5, no TFN
+atan). "PHYS lean" rows ran on it on 2026-11-23 (r8_card_tests 17/0/0, r8_llm, r8_needle,
+r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
+
+| Model | Level on lean | Decode (tok/s) | Left |
+|---|---|---|---|
+| Every r8 instruction but BIN / BIN GSC / T5 / atan, KV int8 / kv6 / k6v6 (Qwen3 tiny) | PHYS lean, == ISA | - | KV6 on a real model |
+| Qwen3-0.6B | PHYS lean | 25.6 int8, 37.5 fp4 | 4-bit default after a quality gate |
+| Qwen3.5-0.8B / 2B | PHYS lean | 20.1 / 8.4 int8, 28.0 fp4 (0.8B) | 0.8B fp4: one SEC step |
+| LFM2.5-230M | PHYS lean | 66.9 int8, 96.7 fp4 | - |
+| BitNet b1.58 2B4T, vLLM 4 slots (sampled / greedy / logprobs) | PHYS lean | 17.7 | 4-bit head |
+| Bonsai 2 4B (GRQ QUAD) | PHYS lean | 8.5 (plain GRQ 3.4) | MXU 52 % MAC at 67 % DRAM: K-block accumulation in the MXU |
+| Cactus Needle 26M int8 / CQ4 | PHYS lean, == ISA | 19.7 / 16.7 | device token loop |
+| LFM3 text decoder | PHYS lean | 8.3 | SWA / context past 255 |
+| MiniCPM5-2B Q4_K_M | PHYS lean | 6.7 | chat template |
+| Granite 4.2 3B Q4_K_M | PHYS lean | 6.2 | int8 MLP for accuracy |
+| YOLOX-Nano, strict FPGA-only | PHYS lean (frame) | - | COCO-500 0.283 measured on r5x |
+| Diffusion Policy pusht 10 / 100 steps, SmolVLA tiny / base | PHYS lean | - | device loop (12948 launches), program cache (prepare 39.6 s) |
+| PaddleOCR-VL 1.6 | PHYS r5x (text right, ECC) | - | rerun with calibrate_until; preprocessing on the card |
+| Bonsai 2 2B | ISA (T5 off on lean: its layers go TERNARY_GSC) | - | card run |
+| Bonsai 1-bit (MLX) | NOT SUPPORTED on lean (needs TMM BIN) | - | - |
+| Ouro 1.4B, Dory 4B, MiniCPM-V | ISA | - | card runs |
+| Qwen3.5-4B, LFM2-2.6B, LFM2.5-8B-A1B, gemma-4, SmolLM3, Phi-4-mini | SOURCE INTEGRATED | - | first card run |
+| ReasonLite 0.6B, FunctionGemma 270M | IMPLEMENTING | - | whole graph |
+| MusicGen-small, Kokoro 82M, SD 1.5 | PLANNED | - | Kokoro: atan as a VPU polynomial (TATAN off) |
+
 ## r5x status per model (2026-11-21)
 
 The current firmware is r5x c42beb65 (PROGRESS.md). "PHYS r5x" rows ran on it with ECC 0 / 0 in
