@@ -1,5 +1,28 @@
 # Nextgen implementation progress
 
+## Stable Diffusion 1.5 on the device; the MAC estimate (2026-11-25)
+
+- **SD 1.5 text to image** (`opentpu/sd_graph.py`, `tools/sd_card.py`, `tests/test_sd_graph.py`
+  5 passed). On the device: CLIP, the initial latent (VOP RAND), the UNet twice a step, DDIM with
+  CFG 7.5, and the VAE decoder.
+  - The host only does the tokens, the schedule's constants and the seed.
+  - Weights are shared across the evaluations (one 1.1 GiB copy).
+  - One activation arena is reused by every evaluation. It is zero-filled before each one,
+    because borders and pads are read as zeros.
+  - Identical programs compile once.
+  - ISA measurements:
+
+    | Part | Result |
+    |---|---|
+    | CLIP | cos 0.998 |
+    | UNet, one evaluation | cos 0.9992 |
+    | VAE | 43.8 dB |
+    | Whole pipeline, 64 px, 2 steps | image cos 0.93 |
+
+  - Card: `r8_sd.cmd` (256 px, 20 steps).
+- **More MACs a cycle**: `docs/nextgen/MAC_DSE_2026-11-24.md`. There is no RTL change before the
+  card measurements; 4-bit DSP packing is the candidate after them.
+
 ## Kokoro-82M on the device, card test package for 81dc3958 (2026-11-24, night)
 
 - **Kokoro-82M whole graph** (`opentpu/kokoro_graph.py`, `tools/kokoro_card.py`): every model

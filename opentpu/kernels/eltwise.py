@@ -15,6 +15,7 @@ UNARY = {
     "silu": lib.silu, "sigmoid": lib.sigmoid, "tanh": lib.tanh, "gelu": lib.gelu,
     "gelu_tanh": lib.gelu_tanh, "relu": lambda x: ol.maximum(x, 0.0), "mish": lib.mish,
     "sin": lambda x: ol.tfn("sin", x), "cos": lambda x: ol.tfn("cos", x),
+    "quick_gelu": lambda x: x * lib.sigmoid(x * 1.702),     # (CLIP's)
 }
 BINARY = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mul": lambda a, b: a * b,
           "div": lambda a, b: a * ol.recip(b)}

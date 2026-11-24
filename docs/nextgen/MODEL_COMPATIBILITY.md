@@ -28,7 +28,8 @@ r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
 | ReasonLite 0.6B, FunctionGemma 270M | IMPLEMENTING | - | whole graph |
 | Bonsai 2 4B + MTP | PHYS lean ed482f26: replies == plain greedy, slower (verify on plain GRQ) | 4.9-6.6 | GRQ QUAD of 2 rows (TGQ4M, RTL SIMULATED; r8_build_lean.cmd 81dc3958) |
 | Maple-Preview 20B-A1B (TQ2_0 ternary MoE, 256 experts top 8) | ISA (tiny Maple with TQ2_0 structure: tgsc layers and experts, clamped SwiGLU, RoPE kinds, expert streaming bit exact) | - | card: r8_llm.cmd maple (128 slots a layer, context <= 512) |
-| MusicGen-small, SD 1.5 | IMPLEMENTING (SD 1.5 256 px) / PLANNED | - | - |
+| SD 1.5 (txt2img, DDIM + CFG 7.5) | ISA, the whole pipeline on the device (CLIP, VRAND latent, UNet x 2 a step, DDIM, VAE): CLIP cos 0.998, one UNet eval 0.9992 (latent 8x8), VAE 0.99975 / 43.8 dB, 64 px 2 steps image cos 0.93 / 16.6 dB (CFG 7.5 amplifies the UNet difference) | - | card: r8_sd.cmd (256 px, 20 steps) |
+| MusicGen-small | PLANNED | - | - |
 | Kokoro 82M v1.0 (af_heart) | ISA, the whole graph (PL-BERT, durations, text encoder, alignment, F0 / N, decoder, SineGen with VOP RAND noise, STFT, generator, iSTFT) on the device: durations equal, F0 / N cos 0.99999, log-mel cos 0.994; generator alone on the reference inputs: waveform cos 0.997, 22.1 dB | - | card: r8_kokoro.cmd |
 
 ## r5x status per model (2026-11-21)

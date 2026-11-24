@@ -468,12 +468,19 @@ class ChainPlan:
     runs leave the slot area above the image alone) and a start and a poll a segment, so a
     policy run again on new inputs (VLA.inputs) pays its preparation once."""
 
-    def __init__(self, board, progs, at: int, workers: int | None = None):
+    def __init__(self, board, progs, at: int, workers: int | None = None, words=None):
+        """progs: (name, program) pairs; or words: the programs already assembled (a long
+        pipeline compiled in chunks, its Python programs dropped: SD 1.5's ~25k)."""
         import time
+        from types import SimpleNamespace
         from . import isa as I
         t0 = time.perf_counter()
-        ps = [p for _, p in progs]
-        words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
+        if words is None:
+            ps = [p for _, p in progs]
+            words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
+        else:
+            ps = [SimpleNamespace(run_args=None)] * len(words)
+            progs = words
         ents = board_entries(board, words, ps, workers)
         info = getattr(board, "_info", None) or board.info()
         D = info["D"]

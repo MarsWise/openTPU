@@ -14,7 +14,8 @@ rem  11 r8_llm         LFM3 fp4, Ouro-1.4B, Dory 4B, Maple-Preview (ternary MoE)
 rem  12 r8_more_models ReasonLite, LFM2.5 thinking, FunctionGemma, Qwen3.5-4B fp4 (otpu-chat --strict-fpga)
 rem  13 r8_paddleocr   PaddleOCR-VL 1.6
 rem  14 r8_kokoro      Kokoro-82M text to speech, all on the device (two phrases, WAVs)
-rem r8_all_tests.cmd new: steps 1 and 8-14 alone (the models not yet run on the card).
+rem  15 r8_sd          Stable Diffusion 1.5, 256 px, 20 steps, all on the device (PNG)
+rem r8_all_tests.cmd new: steps 1 and 8-15 alone (the models not yet run on the card).
 rem The DDR3 step under the loadcal kind only (KINDS=ternary:4; the no-loadcal phase fails by
 rem design): set KINDS before running for another set. Takes sync_next.bundle first, if it is there.
 rem SKIP_DDR=1: without step 3 (r8_after_build.cmd ran the DDR3 steps already).
@@ -53,6 +54,7 @@ call :step "r8_llm maple" r8_llm_maple.log
 call :step r8_more_models r8_more_models.log
 call :step r8_paddleocr r8_paddleocr.log
 call :step r8_kokoro r8_kokoro.log
+call :step r8_sd r8_sd.log
 echo.
 echo === ALL DONE. Results by step:
 type "%OUT%\steps.txt"
