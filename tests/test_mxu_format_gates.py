@@ -256,6 +256,9 @@ def test_no_atan_build_hash():
     caps = {k: k not in ("TBIN", "TBGSC", "TD5", "TATAN") for k in
             "TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4".split()}
     assert arch_hash(dataclasses.replace(configuration(), **caps)) == 0xadd73610
+    # since 2026-11-24 the lean build also has GRQ QUAD of 2 rows (TGQ4M): 81dc3958
+    assert arch_hash(dataclasses.replace(configuration(), **caps, TGQ4M=True)) == 0x81dc3958
     s = (ROOT / "tools/nextgen/card_runs/r8/r8_build_lean.cmd").read_text()
-    assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TD5 TATAN"' in s and "add73610" in s
+    assert 'set "OTPU_DROP_FEATURES=TBIN TBGSC TD5 TATAN"' in s and "81dc3958" in s
+    assert "GQ4_PIPE" in s and "gq4_run" in s
     assert "set OTPU_BUILD_TAG=lean" in s and "RAND_W" in s and "g_rom" in s

@@ -1297,6 +1297,30 @@ fp4 saves ~0.5. An MTP speedup needs GRQ QUAD for M 2 (rows 0 / 1 on columns 0-3
 MCOLS 8). Estimate: verify ~13.5 + draft ~3.5 = ~17 Mcycles an iteration, ~10 Mcycles a token
 at acceptance 0.7 (~13 tok/s, +30 %). Until then, Bonsai's chat should not take `--mtp`.
 
+### 11.1 GRQ QUAD of 2 rows (TGQ4M, 2026-11-24)
+
+Implemented in the ISA, the ISA simulator, the compiler and the MXU (`rtl/mxu/otpu_mxu.sv`):
+
+- TMM GSC QUAD with GRQ takes M 1 or 2. Column j holds row j % M, quarter j / M; row m's
+  output i, quarter q is written at `out + m * ors + 4 i + q`. M 2 needs MCOLS 8.
+- The firmware says so in CAPS2 bit21 (`TGQ4M`, Config `TGQ4M`, in CFG_HASH only when on). The
+  host refuses an M 2 GRQ QUAD program on a bitstream without it (`ConfigMismatch`, before any
+  write to the card).
+- The drain writes `gq4_run(M, ors)` results a cycle: the largest power of two whose window of
+  addresses is distinct mod LANES. The compiler pads an M 2 output's row stride to
+  `ors % LANES == LANES / 2`, which gives all 8 lanes.
+- In the same build, GRQ QUAD K-block commands of the same M are popped while the previous one
+  drains (`GQ4_PIPE`). Before, every GRQ command waited for the previous drain, which was
+  MXU_STARVE ~10.5 % of a Bonsai decode token.
+- Firmware: `r8_build_lean.cmd` (r5x lean + TGQ4M + GQ4_PIPE), CFG_HASH 81dc3958.
+
+Evidence: ISA SIMULATED (bit for bit against plain GRQ, the refusals, Bonsai MTP greedy ==
+plain with every 2-row verify TMM on GRQ QUAD); RTL SIMULATED (Verilator 5.046, `tests/
+test_tmm_grq.py`: 5 M 2 cases bit for bit the ISA's, the 10 M 1 GRQ QUAD cases and the GSC
+pipelined cases with GQ4_PIPE on). Cycles of one K 512 x N 256 TMM at MCOLS 8, MXU_E 8: M 1
+650, M 2 779 (padded rs), plain GRQ of 2 rows 1646; an unpadded M 2 (ors 256) 2571 (one lane a
+cycle: why the compiler pads). Card: NOT RUN (needs the new build).
+
 ## 12. Open questions
 
 - The MTP dataflow (section 6.1) is **confirmed against mlx_vlm 0.6.8**'s Qwen3.5 drafter:

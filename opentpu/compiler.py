@@ -337,6 +337,11 @@ class QTensor:
         if fmt == Q.TERNARY_GSC:
             w = QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
             return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
+        if fmt == Q.TGSC:                       # GSC rows and scales, no Hadamard signs
+            if grq:
+                return QTensor.ternary_weight(data, scale, n, k, D, rs=n // 4 * D, srs=4 * n,
+                                              gsc=True, grq=True, **kw)
+            return QTensor.ternary_weight(data, scale, n, k, D, srs=4*k//D, gsc=True, **kw)
         if fmt == Q.TERNARY_T5:                 # quant.pack_ternary_t5's rows, GSC's scales
             w = QTensor.dense_weight(data, scale, n, k, D, srs=4*k//D, **kw)
             return replace(w, hsigns=Affine.of(scale) + n * w.srs, hblock=512)
@@ -2309,6 +2314,9 @@ class Builder:
             # distinct TMEM banks, so the MXU writes them back in a single cycle. The spare row
             # after the tile receives the row maxima if the kernel asks for them (RMAX).
             rs = N if (one_d or M == 1 or N % 2) else N + 1
+            if M == 2 and w.grq and not w.cq and st.quad and getattr(self.cfg, "TGQ4M", False):
+                L = self.cfg.LANES          # GRQ QUAD M 2: ors = LANES / 2 mod LANES, its 8
+                rs = N + (L // 2 - N) % L   # columns' drain in distinct banks (docs/isa.md)
             out = self.alloc((N,) if one_d else (M, N), rs, spare=0 if one_d else M)
         else:
             out = acc if acc is not None else out
@@ -2383,8 +2391,9 @@ class Builder:
                     # GRQ QUAD (Config.TGQ4): a GRQ chunk's four quarters an advance, for one
                     # row whose QACT wrote its DUP4 copies (decode: M 1), GRQ's results
                     # (OTPU_GQ4=0: plain GRQ on the same firmware, for an A / B of the two)
-                    gq4 = w.grq and not w.cq and st.quad and mc == 1 and not rowmax and \
-                        getattr(self.cfg, "TGQ4", False) and self.cfg.MCOLS >= 4 and \
+                    gq4 = w.grq and not w.cq and st.quad and not rowmax and \
+                        (mc == 1 or (mc == 2 and getattr(self.cfg, "TGQ4M", False))) and \
+                        getattr(self.cfg, "TGQ4", False) and self.cfg.MCOLS >= 4 * mc and \
                         os.environ.get("OTPU_GQ4", "1") != "0"
                     ins = I.tmm(sa + (k0 * w.rs if w.grq else (k0 // chunk_blocks) * self.cfg.D),
                                 ssa + (k0 * w.srs if w.grq else 4 * k0 if w.gsc else 0),

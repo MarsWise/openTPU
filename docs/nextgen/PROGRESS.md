@@ -1,5 +1,33 @@
 # Nextgen implementation progress
 
+## GRQ QUAD of 2 rows + drain overlap (RTL), Maple-Preview, Qwen3.5 MTP / LFM3 fp4 card scripts (2026-11-24)
+
+- **GRQ QUAD of 2 rows** (`TGQ4M`, CAPS2 bit21; docs/mtp.md 11.1). This was the reason Bonsai MTP
+  was slower on the card (its 2-row verify ran plain GRQ). The ISA, the compiler (it pads rs so
+  that all 8 drain lanes work), the MXU (`gq4_run`) and the host gate are done.
+  - RTL SIMULATED, bit for bit: 5 M 2 cases, the 10 M 1 cases, and the GSC pipelined cases.
+  - Cycles: M 2 779 against plain GRQ 1646.
+- **GRQ QUAD drain overlap** (`GQ4_PIPE`): a GRQ QUAD command of the same M pops while the one
+  before it drains. This was Bonsai decode's MXU_STARVE 10.5 %. Every GRQ QUAD / GSC RTL test
+  still passes bit for bit.
+- **Firmware:** `r8_build_lean.cmd` now builds r5x lean + TGQ4M + GQ4_PIPE, CFG_HASH 81dc3958.
+  `r8_card_check` knows the hash. Card: NOT RUN.
+- **Maple-Preview** (`opentpu/llm/maple.py`, `tests/test_maple.py` 11 passed, ISA). It is the
+  first ternary MoE: 256 experts, top 8, streamed into DRAM slots by the host.
+  - Plain GSC ternary format `tgsc` (TMM GSC without Bonsai's Hadamard signs). TQ2_0 repacks
+    losslessly into it.
+  - Expert slots in ternary GSC.
+  - Clamped SwiGLU (`silu_clamp7`).
+  - RoPE kinds as lfm3 tables, using a head-dimension permutation (Maple's partial rotate_half
+    becomes lfm3's form with theta^2).
+  - Context <= 512 (the sliding window equals full attention there).
+  - Card: `r8_llm.cmd maple` (128 slots a layer, 3.0 GiB image).
+- **Card scripts:**
+  - `r8_mtp.cmd`: Qwen3.5-0.8B / 2B plain vs MTP, int8 and fp4.
+  - `r8_llm.cmd lfm3-fp4`: LFM3 fp4 layers, `test_lfm3` device graph fp4 cos > 0.85.
+  - `r8_inspect_models.cmd`: Maple's GGUF header and Ivonar Nano's checkpoint keys, with no code
+    from the model folders run.
+
 ## Bonsai MTP, atan without TATAN, Kokoro blocks (2026-11-24)
 
 - **Bonsai 2 MTP** (docs/mtp.md 11.8). The MTP layer comes from PrismML's

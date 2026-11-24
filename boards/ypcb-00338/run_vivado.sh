@@ -107,6 +107,8 @@ vcswp="${VCSWP:-${T_VCSWP:-0}}"
 [[ "$vcswp" == true ]] && vcswp=1; [[ "$vcswp" == false ]] && vcswp=0
 tgq4="${TGQ4:-${T_TGQ4:-0}}"
 [[ "$tgq4" == true ]] && tgq4=1; [[ "$tgq4" == false ]] && tgq4=0
+tgq4m="${TGQ4M:-${T_TGQ4M:-0}}"
+[[ "$tgq4m" == true ]] && tgq4m=1; [[ "$tgq4m" == false ]] && tgq4m=0
 if [[ "$tbgsc" == 1 && ( "$tbin" != 1 || "$tgsc" != 1 ) ]]; then
   echo "TBGSC requires both TBIN and TGSC" >&2
   exit 1
@@ -133,7 +135,7 @@ export TMEM_WORDS="${TMEM_WORDS:-${T_TMEM_WORDS:-65536}}"
 # CFG_HASH: the arch hash of what this build is (the knobs applied to the target's arch)
 arch_hash="$(PYTHONPATH="$root" python3 -m opentpu.target hash "$target" MCOLS="$mcols" \
   LANES="$lanes" ACT_ROWS="$act_rows" TMEM_WORDS="$TMEM_WORDS" DSTEP="$dstep" SEQ_WC="$seq_wc" \
-  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" VRAND="$vrand" TCQ="$tcq" TATAN="$tatan" QST4="$qst4" LDX="$ldx" TD5="$td5" VBFLY="$vbfly" VAFF="$vaff" QST6="$qst6" VCSWP="$vcswp" TGQ4="$tgq4" 2>/dev/null || echo 0)"
+  TPAIR="$tpair" TQUAD="$tquad" TFN="$tfn" TGSC="$tgsc" VCMP="$vcmp" TBIN="$tbin" TBGSC="$tbgsc" VU8="$vu8" TGRQ="$tgrq" VRAND="$vrand" TCQ="$tcq" TATAN="$tatan" QST4="$qst4" LDX="$ldx" TD5="$td5" VBFLY="$vbfly" VAFF="$vaff" QST6="$qst6" VCSWP="$vcswp" TGQ4="$tgq4" TGQ4M="$tgq4m" 2>/dev/null || echo 0)"
 # BUILD_ID register: the git commit's first 8 hex digits, taken here (Vivado may run in Docker)
 build_id="${BUILD_ID:-$(git -C "$root" rev-parse HEAD 2>/dev/null | cut -c1-8)}"
 build_id="${build_id:-0}"
@@ -194,6 +196,7 @@ export OTPU_VAFF_GEN="$vaff"
 export OTPU_QST6_GEN="$qst6"
 export OTPU_VCSWP_GEN="$vcswp"
 export OTPU_TGQ4_GEN="$tgq4"
+export OTPU_TGQ4M_GEN="$tgq4m"
 export PCIE_GEN="${PCIE_GEN:-2}"    # read by vivado/bd_native.tcl and userclk1_reroute.tcl
 export TRACE_DEPTH="${TRACE_DEPTH:-${T_TRACE_DEPTH:-16384}}"   # read by vivado/create_project.tcl
 export COLL_GATHER="${COLL_GATHER:-0}"                          # read by vivado/create_project.tcl

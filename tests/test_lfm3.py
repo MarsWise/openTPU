@@ -265,3 +265,18 @@ def test_real_weights_follow_the_reference():
     dev = _decode(_engine(spec, W, cap=256, cfg=board_config(DRAM_BYTES=1 << 31)), ids)
     assert _cos_rows(dev, ref).min() > 0.9995
     assert int(np.argmax(dev[-1])) == int(np.argmax(ref[-1]))
+
+
+def test_device_graph_fp4_layers_follow_the_reference():
+    """4-bit layers (--wformat fp4, the head int8: the r8_llm lfm3-fp4 run): the device graph's
+    logits still follow the fp32 reference, at fp4's error on random Gaussian weights (cos
+    0.79-0.95 here; real checkpoints: Qwen3 / Qwen3.5 / LFM2.5 fp4 on the card), far above an
+    unrelated model's."""
+    spec = _tiny_spec()
+    W = _tiny_weights(spec)
+    toks = list(range(3, 15))
+    dev = _decode(_engine(spec, W, wformat="fp4", head_format="int8"), toks)
+    assert np.isfinite(dev).all()
+    c = _cos_rows(dev, L3.reference_logits(spec, W, toks))
+    other = _cos_rows(dev, L3.reference_logits(spec, _tiny_weights(spec, 5), toks))
+    assert c.mean() > 0.85 and c.min() > 0.75 and other.mean() < 0.3, (c, other)

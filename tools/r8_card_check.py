@@ -53,8 +53,11 @@ R8X_LEFT_OUT = ("tbin", "tbgsc")
 # generator (no capability change)
 R8N_HASH = 0xadd73610
 R8N_LEFT_OUT = ("tbin", "tbgsc", "td5", "tatan")
+# r5x lean with GRQ QUAD of 2 rows (CAPS2 bit21 TGQ4M) and GRQ QUAD drain overlap (GQ4_PIPE)
+R8M_HASH = 0x81dc3958
 # the builds with capabilities left out: CFG_HASH -> the CAPS2 bits it must not have
-LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT, R8N_HASH: R8N_LEFT_OUT}
+LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT, R8N_HASH: R8N_LEFT_OUT,
+            R8M_HASH: R8N_LEFT_OUT}
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
@@ -80,7 +83,7 @@ def caps_checks(info: dict, sim: bool = False) -> list:
     out.append((sim or h in known, "CFG_HASH is r8's",
                 f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}, area build "
                 f"{R8A_HASH:#010x}, experiment A / r5x {R8X_HASH:#010x}, r5x lean "
-                f"{R8N_HASH:#010x}"))
+                f"{R8N_HASH:#010x}, r5x lean + GRQ QUAD 2 rows {R8M_HASH:#010x}"))
     return out
 
 

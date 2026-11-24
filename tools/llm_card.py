@@ -11,6 +11,9 @@ device graph), against the fp32 reference of the same weights:
     python tools/llm_card.py lfm3 DIR          LFM3's text decoder, weights by row range
                                                (lfm3.PartWeights: index.json, *.bin, tokenizer.json)
     python tools/llm_card.py gguf FILE.gguf    a llama-architecture GGUF (MiniCPM5-2B, Granite 4.2)
+    python tools/llm_card.py maple FILE.gguf   Maple-Preview (TQ2_0 ternary MoE, llm/maple.py):
+                                               --wformat tgsc, --experts slots a layer (the host
+                                               streams the others), cap <= 512
         [--wformat int8|mix] [--formats gateup=nvfp4,down=fp4] [--cap 512] [--new 32]
         [--dev /dev/xdma0 | --isa]
 
@@ -60,8 +63,20 @@ def gguf_model(path):
             lambda t: "".join(vocab[i] for i in t).replace("Ġ", " ").replace("Ċ", "\n"))
 
 
+def maple_model(path):
+    from opentpu.llm import maple as M
+    W = M.GGUFWeights(path)
+    spec = M.Spec.from_gguf(W.kv)
+    vocab = W.kv["tokenizer.ggml.tokens"]
+    index = {p: i for i, p in enumerate(vocab)}
+    ids = [index[p] for p in PIECES]            # (add_bos_token false: no BOS)
+    return (spec.device(), M.DeviceWeights(W, spec), ids,
+            lambda: M.reference_logits(spec, W, ids),
+            lambda t: "".join(vocab[i] for i in t).replace("Ġ", " ").replace("Ċ", "\n"))
+
+
 def run(name, spec, W, ids, reference, decode, cfg, backend=None, ecc=None, cap=512, new=32,
-        wformat="int8", cos_min=0.995, out=print) -> int:
+        wformat="int8", cos_min=0.995, out=print, experts=None, head_format=None) -> int:
     """The checks of this file's head on one engine; the number that failed."""
     from opentpu.llm.qwen3 import Engine
     fails = 0
@@ -73,6 +88,10 @@ def run(name, spec, W, ids, reference, decode, cfg, backend=None, ecc=None, cap=
 
     e0 = ecc(None) if ecc else None
     kw = dict(cap=cap, rows=1, cfg=cfg, wformat=wformat)
+    if experts is not None:
+        kw["experts"] = experts
+    if head_format is not None:
+        kw["head_format"] = head_format
     if backend is not None:
         kw["backend"] = backend
     t0 = time.time()
@@ -123,7 +142,7 @@ def run(name, spec, W, ids, reference, decode, cfg, backend=None, ecc=None, cap=
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("kind", choices=["lfm3", "gguf"])
+    ap.add_argument("kind", choices=["lfm3", "gguf", "maple"])
     ap.add_argument("path")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--isa", action="store_true")
@@ -132,10 +151,13 @@ def main() -> int:
     ap.add_argument("--cap", type=int, default=512)
     ap.add_argument("--new", type=int, default=32)
     ap.add_argument("--cos", type=float, default=0.995)
+    ap.add_argument("--experts", type=int, help="a MoE's expert slots a layer (default: all)")
+    ap.add_argument("--head-format", help="the LM head's format (default the image's)")
     a = ap.parse_args()
     if a.formats:
         os.environ["OTPU_FORMATS"] = a.formats
-    spec, W, ids, reference, decode = (lfm3_model if a.kind == "lfm3" else gguf_model)(a.path)
+    spec, W, ids, reference, decode = {"lfm3": lfm3_model, "gguf": gguf_model,
+                                       "maple": maple_model}[a.kind](a.path)
     name = f"{a.kind} {Path(a.path).name}"
     if a.isa:
         from opentpu.isasim import board_config
@@ -156,7 +178,8 @@ def main() -> int:
             return e0 if eng is None else memcal.ecc(eng.backend.board.t)
 
     fails = run(name, spec, W, ids, reference, decode, cfg, backend, ecc, a.cap, a.new,
-                a.wformat, a.cos, out=lambda s: print(s, flush=True))
+                a.wformat, a.cos, out=lambda s: print(s, flush=True), experts=a.experts,
+                head_format=a.head_format)
     print(f"RESULT: {'PASS' if not fails else 'FAIL'} ({fails} failed)", flush=True)
     return 1 if fails else 0
 

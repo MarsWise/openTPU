@@ -269,6 +269,8 @@ NVG = 8                        # nvfp4: E4M3 groups per K-block
 MXU_FORMATS = ("int8", "int4", "fp4", "nvfp4")
 TERNARY = "ternary"          # TMM's packed rows (2 bits a weight) with one fp32 scale a row (RSC)
 TERNARY_GSC = "ternary_gsc"  # exact ternary values, fp32 scales per group of D=128
+TGSC = "tgsc"                # TERNARY_GSC's rows and scales without Bonsai's Hadamard signs (the
+#                              weights themselves ternary per group: Maple's TQ2_0, llm/maple.py)
 TERNARY_T5 = "ternary_t5"    # TERNARY_GSC in TMM T5 rows (Config.TD5): five trits a byte, the
                              # same group scales (Bonsai 2 PTQ1_0's own coding, opentpu/trits.py)
 FOUR = ("int4", "fp4", "nvfp4")
@@ -437,7 +439,7 @@ def ternary_matmul(activations: np.ndarray, packed_weights: np.ndarray) -> np.nd
 def row_bytes(K: int, fmt: str, D: int = 128) -> int:
     """DRAM bytes of one streamed row of K elements (4-bit rows padded to whole D-byte chunks;
     ternary: four K-blocks a D-byte chunk, TMM's)."""
-    if fmt in (TERNARY, TERNARY_GSC):
+    if fmt in (TERNARY, TERNARY_GSC, TGSC):
         return -(-K // (4 * D)) * D
     if fmt == TERNARY_T5:
         return -(-K // (5 * D)) * D
@@ -452,7 +454,7 @@ def scale_bytes(K: int, fmt: str, D: int = 128, rsc: bool = False) -> int:
     if K % D:
         raise ValueError(f"inner dimension {K} is not a multiple of D={D}")
     KB = K // D
-    if fmt in (TERNARY_GSC, TERNARY_T5):
+    if fmt in (TERNARY_GSC, TERNARY_T5, TGSC):
         return 4 * KB
     if rsc or fmt == TERNARY:
         return 4
@@ -672,7 +674,7 @@ def quantize_mxu(W: np.ndarray, fmt: str, D: int = 128) -> tuple[np.ndarray, np.
     applied): the row's s (its largest |w|) is its RSC scale, the signs TMM's packed rows."""
     if fmt == TERNARY:
         return quantize_ternary(W, D)
-    if fmt == TERNARY_GSC:
+    if fmt in (TERNARY_GSC, TGSC):
         return pack_ternary_gsc(W, D)
     if fmt == TERNARY_T5:
         return pack_ternary_t5(W, D)
@@ -745,6 +747,8 @@ def part_scales(srows: np.ndarray, fmt: str, k0: int, kb: int) -> np.ndarray:
     their own (a column part, compiler.QTensor parts): the rows' Sw and those blocks'
     offsets."""
     srows = np.asarray(srows, np.uint8)
+    if fmt in (TERNARY_GSC, TGSC):              # an fp32 scale a block, no Sw
+        return np.ascontiguousarray(srows[:, 4 * k0:4 * (k0 + kb)])
     out = np.zeros((srows.shape[0], scale_bytes(kb, fmt, 1)), np.uint8)
     out[:, :4] = srows[:, :4]
     if fmt == "int8":
@@ -762,7 +766,7 @@ def part_rows(rows: np.ndarray, fmt: str, c0: int, c1: int, D: int = 128) -> np.
     rows = np.asarray(rows, np.uint8)
     if fmt == "int8":
         return np.ascontiguousarray(rows[:, c0:c1])
-    if fmt == TERNARY:                          # four K-blocks a D-byte chunk
+    if fmt in (TERNARY, TERNARY_GSC, TGSC):     # four K-blocks a D-byte chunk
         if c0 % (4 * D):
             raise ValueError(f"a ternary column part starts on a whole chunk ({c0})")
         out = np.zeros((rows.shape[0], row_bytes(c1 - c0, fmt, D)), np.uint8)

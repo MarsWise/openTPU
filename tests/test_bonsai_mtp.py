@@ -343,3 +343,26 @@ def test_image_cache_identity_of_a_gguf(tmp_path):
     base = {n: g[n] for n in g if not n.startswith("mtp.")}
     w = B.BonsaiMTPWeights(base, g)
     assert w.mtp_from == f and w.model_dir is None
+
+
+def test_bonsai_mtp_verify_uses_grq_quad_of_two_rows(tiny, plain):
+    """MCOLS 8 with GRQ QUAD (TGQ4) and its 2-row form (TGQ4M): the verify's ternary projections
+    are GRQ QUAD TMMs of M 2 (a quarter of plain GRQ's advances, docs/isa.md), and the greedy
+    tokens are still plain greedy decode's."""
+    from opentpu import isa as I
+    spec, w, _ = tiny
+    cfg = replace(CFG, MCOLS=8, TGQ4=True, TGQ4M=True)
+    kw = dict(KW, cfg=cfg)
+    want = Engine(spec, w, resident=True, **kw).generate(PROMPT, max_new=N)
+    eng = mtp_engine(spec, w, **kw)
+    prog = eng.image.compile_rows([(0, 6), (0, 7)], [0, 1], tokens=[4, 5], fork=True,
+                                  hidden=True)
+    words = np.asarray(I.assemble(prog[0]) if not isinstance(prog[0], np.ndarray) else prog[0],
+                       "<u4")
+    op, dims, w6 = words[0::8], words[4::8], words[6::8]
+    tmm = ((op & 0xff) == I.TMM) & ((dims & I.TMM_GRQ) != 0)
+    quad2 = tmm & (((op >> 24) & I.F_QUAD) != 0) & (((w6 >> 16) & 0xff) == 2)
+    assert quad2.sum() > 0 and quad2.sum() == (tmm & (((w6 >> 16) & 0xff) == 2)).sum()
+    st = MTPDecoder(eng).generate(PROMPT, max_new=N, drafts=lambda q, out: (
+        want[q - len(PROMPT)] if q - len(PROMPT) < len(want) else 0))
+    assert st.tokens == want

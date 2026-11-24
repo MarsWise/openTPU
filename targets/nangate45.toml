@@ -43,6 +43,7 @@ VAFF = false                      # VOP AFF, the fused row/column affine (CAPS2 
 QST6 = false                      # QST Q6, 6-bit ROW rows as nibble and 2-bit planes (CAPS2 bit18)
 VCSWP = false                     # VOP CSWP, the bitonic compare-exchange stage (CAPS2 bit19)
 TGQ4 = false                      # TMM GRQ QUAD: a GRQ chunk's four quarters an advance (CAPS2 bit20)
+TGQ4M = false                     # GRQ QUAD for M 2: MTP's 2-row verify (CAPS2 bit21)
 DSTEP = true
 STREAM = true
 SEQ_WC = true                   # the sequencer's wait entries (WAITC v2, docs/seq_vpu.md; the

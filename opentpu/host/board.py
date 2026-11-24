@@ -576,7 +576,7 @@ class SimTransport:
             TMEM_WORDS=p["TMEM_WORDS"], DSTEP=p.get("DSTEP", 1), SEQ_WC=p.get("SEQ_WC", 0),
             TPAIR=p.get("TPAIR", 0), TQUAD=p.get("TQUAD", 0), TFN=p.get("TFN", 0),
             TGSC=p.get("TGSC", 0), VCMP=p.get("VCMP", 0), TBIN=p.get("TBIN", 0), TBGSC=p.get("TBGSC", 0), VU8=p.get("VU8", 0),
-            TGRQ=p.get("TGRQ", 0), VRAND=p.get("VRAND", 0), TCQ=p.get("TCQ", 0), TATAN=p.get("TATAN", 0), QST4=p.get("QST4", 0), LDX=p.get("LDX", 0), TD5=p.get("TD5", 0), VBFLY=p.get("VBFLY", 0), VAFF=p.get("VAFF", 0), QST6=p.get("QST6", 0), VCSWP=p.get("VCSWP", 0), TGQ4=p.get("TGQ4", 0))))
+            TGRQ=p.get("TGRQ", 0), VRAND=p.get("VRAND", 0), TCQ=p.get("TCQ", 0), TATAN=p.get("TATAN", 0), QST4=p.get("QST4", 0), LDX=p.get("LDX", 0), TD5=p.get("TD5", 0), VBFLY=p.get("VBFLY", 0), VAFF=p.get("VAFF", 0), QST6=p.get("QST6", 0), VCSWP=p.get("VCSWP", 0), TGQ4=p.get("TGQ4", 0), TGQ4M=p.get("TGQ4M", 0))))
         exe = rtlsim.build("tb_board", srcs, p)
         with simtmp.tempdir("otpu_board_") as d:
             for c in range(len(self.ch)):
@@ -1126,6 +1126,13 @@ class Board:
                       ((opflags >> 24) & I.F_QUAD != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tgq4", False):
                     raise ConfigMismatch("TMM GRQ QUAD requires firmware with CAPS2 bit20 (TGQ4)")
+                ms = (words_[6:len(words_) // 8 * 8:8] >> 16) & 0xff     # (w6[23:16]: M)
+                if np.any(((opflags & 0xff) == I.TMM) & ((dims & I.TMM_GRQ) != 0) &
+                          ((dims & I.TMM_BIN) == 0) & ((opflags >> 24) & I.F_GSC != 0) &
+                          ((opflags >> 24) & I.F_QUAD != 0) & (ms > 1)) and \
+                        not (self._info or self.info()).get("caps2", {}).get("tgq4m", False):
+                    raise ConfigMismatch("TMM GRQ QUAD of 2 rows requires firmware with CAPS2 "
+                                         "bit21 (TGQ4M)")
             if np.any(((opflags & 0xff) == I.TMM) &
                       ((dims & (I.TMM_CQ | I.TMM_CQ4 | I.TMM_LUT)) != 0)):
                 if not (self._info or self.info()).get("caps2", {}).get("tcq", False):
@@ -1460,6 +1467,7 @@ def device_config(info: dict, **kw):
     qst6 = bool((info.get("caps2") or {}).get("qst6"))
     vcswp = bool((info.get("caps2") or {}).get("vcswp"))
     tgq4 = bool((info.get("caps2") or {}).get("tgq4"))
+    tgq4m = bool((info.get("caps2") or {}).get("tgq4m"))
     for k, have, what in (("PAIR", pair, "column reuse (CAPS bit5)"),
                           ("DSTEP", dstep, "DSTEP (CAPS bit6)"),
                           ("STREAM", stream, "the stream engine (CAPS bit26)"),
@@ -1482,7 +1490,8 @@ def device_config(info: dict, **kw):
                           ("VAFF", vaff, "VOP AFF, the fused row/column affine (CAPS2 bit17)"),
                           ("QST6", qst6, "QST Q6, 6-bit ROW rows as nibble and 2-bit planes (CAPS2 bit18)"),
                           ("VCSWP", vcswp, "VOP CSWP, the bitonic compare-exchange stage (CAPS2 bit19)"),
-                          ("TGQ4", tgq4, "TMM GRQ QUAD (CAPS2 bit20)")):
+                          ("TGQ4", tgq4, "TMM GRQ QUAD (CAPS2 bit20)"),
+                          ("TGQ4M", tgq4m, "GRQ QUAD for M 2 (CAPS2 bit21)")):
         env = os.environ.get(f"OTPU_{k}")
         if env is not None and bool(int(env)) != have:
             raise ConfigMismatch(f"the bitstream {'has' if have else 'lacks'} {what} but "
@@ -1491,7 +1500,7 @@ def device_config(info: dict, **kw):
     rows = info.get("act_rows") or 0              # 0: MCOLS rows (no MM replay)
     dev = {"MCOLS": info["MCOLS"], "LANES": info["LANES"], "PAIR": pair, "TPAIR": tpair,
            "TQUAD": tquad, "TFN": tfn, "TGSC": tgsc, "VCMP": vcmp, "TBIN": tbin, "TBGSC": tbgsc, "VU8": vu8,
-           "TGRQ": tgrq, "VRAND": vrand, "TCQ": tcq, "TATAN": tatan, "QST4": qst4, "LDX": ldx, "TD5": td5, "VBFLY": vbfly, "VAFF": vaff, "QST6": qst6, "VCSWP": vcswp, "TGQ4": tgq4,
+           "TGRQ": tgrq, "VRAND": vrand, "TCQ": tcq, "TATAN": tatan, "QST4": qst4, "LDX": ldx, "TD5": td5, "VBFLY": vbfly, "VAFF": vaff, "QST6": qst6, "VCSWP": vcswp, "TGQ4": tgq4, "TGQ4M": tgq4m,
            "DSTEP": dstep,
            "STREAM": stream, "ACT_ROWS": rows if rows > info["MCOLS"] else 0}
     c = info.get("cfg")
@@ -1582,6 +1591,7 @@ def check_hash(info: dict, cfg=None) -> None:
                            QST6=bool((info.get("caps2") or {}).get("qst6")),
                            VCSWP=bool((info.get("caps2") or {}).get("vcswp")),
                            TGQ4=bool((info.get("caps2") or {}).get("tgq4")),
+                           TGQ4M=bool((info.get("caps2") or {}).get("tgq4m")),
                            STREAM=bool(caps.get("stream")), SEQ_WC=bool(c.get("SEQ_WC")),
                            ACT_ROWS=rows if rows > info["MCOLS"] else 0, **sizes)
     if arch_hash(cfg) != c["hash"]:

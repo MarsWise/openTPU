@@ -248,14 +248,17 @@ def test_grq_weight_write_hazard_with_long_axi_stalls_rtl(have_verilator, waitc)
 
 
 # ---- GRQ QUAD (Config.TGQ4): a GRQ chunk's four quarters in one advance, M 1 (C2)
-def gq4_case(kb, acc, n, mcols=4, seed=0):
-    cfg, image, _, gsc, grq, rest = case(kb, 1, acc, n, rmax=False, seed=seed, mcols=mcols)
-    cfg = dataclasses.replace(cfg, TQUAD=True, TPAIR=True, PAIR=True, TGQ4=True)
-    x, _, _, initial, out, ors, rs, srs = rest
-    head = [I.ld(0, 0, x.size), I.qact(0, 1, 0, kb, kb * cfg.D, dup=True, dup4=True)]
+def gq4_case(kb, acc, n, mcols=4, seed=0, m=1, ors=None):
+    cfg, image, _, gsc, grq, rest = case(kb, m, acc, n, rmax=False, seed=seed, mcols=mcols)
+    cfg = dataclasses.replace(cfg, TQUAD=True, TPAIR=True, PAIR=True, TGQ4=True, TGQ4M=m > 1)
+    x, _, _, initial, out, ors0, rs, srs = rest
+    if ors is not None:                     # (another output row stride: the drain's lanes)
+        ors0 = ors
+        grq = I.tmm(W_GRQ, S_GRQ, out, n, kb, rs, ors, m, 0, srs, gsc=True, grq=True, acc=acc)
+    head = [I.ld(0, 0, x.size), I.qact(0, m, 0, kb, kb * cfg.D, dup=True, dup4=True)]
     if acc:
         head.append(I.ld(INIT, out, initial.size))
-    quad = I.tmm(W_GRQ, S_GRQ, out, n, kb, rs, ors, 1, 0, srs, gsc=True, grq=True, quad=True,
+    quad = I.tmm(W_GRQ, S_GRQ, out, n, kb, rs, ors0, m, 0, srs, gsc=True, grq=True, quad=True,
                  acc=acc)
     return cfg, image, head, grq, quad
 
@@ -273,8 +276,8 @@ def test_gq4_isa_is_grq_bit_for_bit(kb, acc, n):
 
 def test_gq4_refusals():
     cfg, image, head, grq, quad = gq4_case(3, False, 8)
-    with pytest.raises(ValueError, match="GRQ QUAD"):       # M 2
-        I.tmm(W_GRQ, S_GRQ, 8192, 8, 3, 512, 11, 2, 0, 32, gsc=True, grq=True, quad=True)
+    with pytest.raises(ValueError, match="GRQ QUAD"):       # M 3
+        I.tmm(W_GRQ, S_GRQ, 8192, 8, 3, 512, 11, 3, 0, 32, gsc=True, grq=True, quad=True)
     with pytest.raises(ValueError, match="GRQ QUAD"):       # RMAX
         I.tmm(W_GRQ, S_GRQ, 8192, 8, 3, 512, 11, 1, 0, 32, gsc=True, grq=True, quad=True,
               rmax=True)
@@ -304,6 +307,62 @@ def test_gq4_rtl(have_verilator, kb, acc, n, mcols):
     drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=35, seed=kb + n)
     np.testing.assert_array_equal(tmems[0], ref.tmem)
     np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+# ---- GRQ QUAD M 2 (Config.TGQ4M, CAPS2 bit21): column j row j % 2, quarter j // 2
+GQ4M = [(1, False, 4, None), (4, True, 8, 12), (5, False, 20, 23), (7, True, 36, 44),
+        (3, True, 16, 16)]
+
+
+@pytest.mark.parametrize("kb,acc,n,ors", GQ4M)
+def test_gq4m_isa_is_grq_bit_for_bit(kb, acc, n, ors):
+    cfg, image, head, grq, quad = gq4_case(kb, acc, n, mcols=8, m=2, ors=ors)
+    a = Machine(cfg, [head + [grq, I.halt()]], [image.copy()]).run().slices[0]
+    b = Machine(cfg, [head + [quad, I.halt()]], [image.copy()]).run().slices[0]
+    np.testing.assert_array_equal(a.tmem, b.tmem)
+
+
+def test_gq4m_refusals():
+    cfg, image, head, grq, quad = gq4_case(3, False, 8, mcols=8, m=2)
+    with pytest.raises(SimError, match="TGQ4M"):            # M 2's own capability
+        Machine(dataclasses.replace(cfg, TGQ4M=False), [head + [quad, I.halt()]],
+                [image.copy()]).run()
+    cfg4, image4, head4, _, _ = gq4_case(3, False, 8, mcols=4, m=1)
+    quad4 = I.tmm(W_GRQ, S_GRQ, 8192, 8, 3, 512, 11, 2, 0, 32, gsc=True, grq=True, quad=True)
+    head4 = [head4[0], I.qact(0, 2, 0, 3, 3 * cfg4.D)]
+    with pytest.raises(SimError, match="GRQ QUAD"):         # 4 M <= MCOLS
+        Machine(dataclasses.replace(cfg4, TGQ4M=True), [head4 + [quad4, I.halt()]],
+                [image4.copy()]).run()
+
+
+@pytest.mark.parametrize("kb,acc,n,ors", GQ4M)
+def test_gq4m_rtl(have_verilator, kb, acc, n, ors):
+    """RTL == ISA (AXI stalls), MCOLS 8, M 2: GRQ QUAD alone, then between a GRQ and itself;
+    row strides whose drain takes 8, 4, 2 or 1 lanes a cycle (ors % 8: 4, 7 / 3, 0 ...)."""
+    from opentpu import rtlsim
+    cfg, image, head, grq, quad = gq4_case(kb, acc, n, mcols=8, m=2, ors=ors)
+    prog = head + [quad, grq, quad, I.halt()]
+    ref = Machine(cfg, [prog], [image.copy()]).run().slices[0]
+    drams, tmems, _ = rtlsim.run(cfg, [prog], [image.copy()], axi=True, stall=35, seed=kb + n)
+    np.testing.assert_array_equal(tmems[0], ref.tmem)
+    np.testing.assert_array_equal(drams[0], ref.dram)
+
+
+def test_gq4m_drain_lanes_and_cycles_rtl(have_verilator):
+    """M 2 at ors = 4 mod 8 drains 8 columns a cycle (MXU_E 8, the m8 card's): its GRQ QUAD
+    takes about the cycles of M 1's (and far fewer than plain GRQ's four replay groups)."""
+    from opentpu import rtlsim
+    cyc = {}
+    for name, m, ors in (("m1", 1, None), ("m2", 2, 260), ("grq2", 2, 260)):
+        cfg, image, head, grq, quad = gq4_case(4, True, 256, mcols=8, m=m, ors=ors)
+        prog = head + [grq if name == "grq2" else quad, I.halt()]
+        ref = Machine(cfg, [prog], [image.copy()]).run().slices[0]
+        drams, tmems, st = rtlsim.run(cfg, [prog], [image.copy()], uarch={"MXU_E": 8})
+        np.testing.assert_array_equal(tmems[0], ref.tmem)
+        c = st["cycles"]
+        cyc[name] = c[0] if isinstance(c, (list, tuple)) else c
+    assert cyc["m2"] < 1.25 * cyc["m1"], cyc
+    assert cyc["m2"] < 0.6 * cyc["grq2"], cyc
 
 
 def test_gq4_firmware_capability_is_required_before_program_load():
@@ -340,3 +399,22 @@ def test_gsc_groups_pipelined_rtl(have_verilator, n, kb):
         c = st["cycles"]
         cyc[pipe] = c[0] if isinstance(c, list) else c
     assert cyc[1] < cyc[0], cyc
+
+
+def test_gq4m_firmware_capability_is_required_before_program_load():
+    """A program with a 2-row GRQ QUAD loads only on firmware with CAPS2 bit21 (TGQ4M); the
+    device's Config then has TGQ4M (and its CFG_HASH the bit)."""
+    from opentpu.host.board import Board, ConfigMismatch, device_config
+    from opentpu.host.fake import FakeTransport
+    prog = I.assemble([I.tmm(0, 0, 0, 8, 4, 256, 12, 2, 0, 32, gsc=True, grq=True, quad=True),
+                       I.halt()])
+    one = I.assemble([I.tmm(0, 0, 0, 8, 4, 256, 12, 1, 0, 32, gsc=True, grq=True, quad=True),
+                      I.halt()])
+    old = Board(FakeTransport(regmap=5, devname=None, tgsc=True, tgrq=True, tgq4=True))
+    old.load_program(0x1000, one)                       # (M 1 runs on TGQ4 alone)
+    with pytest.raises(ConfigMismatch, match="TGQ4M"):
+        old.load_program(0x1000, prog)
+    board = Board(FakeTransport(regmap=5, devname=None, tgsc=True, tgrq=True, tgq4=True,
+                                tgq4m=True))
+    assert device_config(board.info()).TGQ4M
+    board.load_program(0x1000, prog)

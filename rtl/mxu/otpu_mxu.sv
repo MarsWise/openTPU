@@ -241,7 +241,8 @@ module otpu_tmm_gsc
         (!cmd.w4[27] || cmd.w4[26] || cmd.w4[28]) || cmd.w4[27] && cmd.w4[28] && (cmd.w4[29] || cmd.w4[26])))
       $fatal(1, "TMM CQ: CQ4 needs CQ without BIN; GRQ only with 2-bit CQ (T5: BIN + CQ4 alone)");
     if (start && gsc && !cmd.w4[30] && (cmd.flags[7:6] != 0 || cmd.flags[3] || cmd.flags[0] ||
-        (cmd.flags[4] && (!cmd.w4[28] || cmd.w4[27] || cmd.w6[23:16] != 8'd1 || cmd.flags[2])) ||
+        (cmd.flags[4] && (!cmd.w4[28] || cmd.w4[27] || (cmd.w6[23:16] != 8'd1 && cmd.w6[23:16] != 8'd2) ||
+                          cmd.flags[2])) ||
         cmd.w4[31:30] != 0 || cmd.w4[25:24] != 0 || cmd.w4[23:16] == 0 ||
         cmd.w4[15:0] == 0 ||
         (cmd.w4[28] ? (cmd.w4[26] || cmd.w4[1:0] != 0 || cmd.w2[3:0] != 0 || cmd.w7[3:0] != 0 ||
@@ -277,7 +278,15 @@ module otpu_mxu
   // through the FIFO, but every use after it is gated, so synthesis removes the logic.
   parameter bit HAS_BIN = 1'b1,  // TMM BIN, packed binary weights (CAPS2 TBIN)
   parameter bit HAS_CQ  = 1'b1,  // TMM CQ / CQ4, codebook LUT weights (CAPS2 TCQ): the D LUT RAMs
-  parameter bit HAS_T5  = 1'b1   // TMM T5, dense trits (CAPS2 TD5): the D trit tables
+  parameter bit HAS_T5  = 1'b1,  // TMM T5, dense trits (CAPS2 TD5): the D trit tables
+  // GQ4_PIPE: GRQ QUAD subcommands (a GSC TMM's K blocks, one a subcommand, ACC after the first)
+  // overlap like other commands: the next one's chunks pop behind the head's last instead of
+  // after its drain (the pop head moves to it, pn). Its results still drain after the head's
+  // (the drain head changes only once the head has drained, its read-modify-writes written), so
+  // ACC reads the head's sums: the K order and the results are the serial ones'. Plain GRQ's
+  // four replay groups keep the wait. Bonsai 2's decode: the per-K-block drain wait was the
+  // MXU's starve (10.5 % of the cycles on ed482f26)
+  parameter bit GQ4_PIPE = 1'b1
 ) (
   input  logic                  clk,
   input  logic                  rst,
@@ -368,6 +377,26 @@ module otpu_mxu
       if (ors[t]) d = LANES >> t;
     return MW'((d < NL) ? d : NL);
   endfunction
+  // GRQ QUAD's lanes a cycle: column j's address is out + (j % M) ors + j / M (and 4 a weight
+  // row), so a window of r columns writes distinct banks (address mod LANES) when its M rows'
+  // quarters do: M 1, every window (out + j); M 2, the largest power of two r <= NL whose window
+  // {(a % 2) ors + a / 2 : a < r} is distinct mod LANES (r 8: ors = LANES / 2 mod LANES; the
+  // compiler pads M 2 outputs to that row stride). A function of ors's low bits.
+  function automatic logic [MW-1:0] gq4_run(input logic [7:0] m, input logic [15:0] ors);
+    int best;
+    if (m != 8'd2) return drain_run(16'd1);
+    best = 1;
+    for (int r = 2; r <= NL; r = r * 2) begin
+      logic ok;
+      ok = 1'b1;
+      for (int a = 0; a < r; a++)
+        for (int b = a + 1; b < r; b++)
+          if (BW'(32'(a % 2) * 32'(ors) + 32'(a / 2)) == BW'(32'(b % 2) * 32'(ors) + 32'(b / 2)))
+            ok = 1'b0;
+      if (ok && best * 2 == r) best = r;
+    end
+    return MW'(best);
+  endfunction
   localparam logic [1:0] WF_W8 = 2'd0, WF_NV = 2'd3;
   wire cmd_ternary = cmd.op == OP_TMM;
   // TMM T5 (the GSC adapter's subcommands: word 4 bits 26 and 29, 27 clear; the trit in 28,
@@ -380,11 +409,13 @@ module otpu_mxu
   // TMM GRQ: the adapter's block-major subcommand (four output rows a chunk, one per group)
   wire cmd_grq = cmd_ternary && !cmd_binary && !cmd_t5 && cmd.w4[28];
   wire cmd_quad = cmd_ternary && cmd.flags[4] && !cmd_grq;
-  // GRQ QUAD (a GRQ subcommand with flag bit 4; M 1, ternary codes): the chunk's four quarters
-  // in one advance instead of four replay groups. Column q takes quarter q against the same ACT
-  // block (the row's copies in ACT rows 0..3: QACT DUP4, as TMM QUAD's), nothing is added across
-  // the columns: column q's integer is output 4i + q's, scaled by Sw word q (the result row
-  // carries the line's four Sw) and drained to out + 4i + q. The fp32 math per output is GRQ's.
+  // GRQ QUAD (a GRQ subcommand with flag bit 4; M 1 or 2, ternary codes): the chunk's four
+  // quarters in one advance instead of four replay groups. Column j takes quarter q = j / M of
+  // row m = j % M against the same ACT block (ACT row j, QACT DUP4's copy of row m, as TMM
+  // QUAD's), nothing is added across the columns: column j's integer is output (m, 4i + q)'s,
+  // scaled by Sw word q (the result row carries the line's four Sw) and drained to
+  // out + m ors + 4i + q. The fp32 math per output is GRQ's. M 2 (4 M <= MCOLS, CAPS2 TGQ4M):
+  // MTP's 2-row verify and 2-slot batches at M 1's advances.
   wire cmd_gq4 = cmd_grq && cmd.flags[4];
   wire cmd_aq = cmd_quad || cmd_gq4;       // the array takes four quarters an advance
   // TMM CQ (the adapter's subcommands: word 4 bit 31; bit 29 CQ4): codes through the LUT
@@ -417,8 +448,9 @@ module otpu_mxu
                     cmd_pair || cmd_quad || int'(cmd.w6[23:16]) > MCOLS || cmd.w7 != 32'd16 ||
                     cmd.w2[3:0] != 0))
       $fatal(1, "otpu_mxu: TMM GRQ needs RSC, KB 1, M <= MCOLS and 16-byte scale rows");
-    if (cmd_gq4 && (cmd.w6[23:16] != 8'd1 || MCOLS < 4 || cmd_cq || cmd.flags[2] || cmd.flags[3]))
-      $fatal(1, "otpu_mxu: TMM GRQ QUAD needs M 1, MCOLS >= 4, ternary codes, no RMAX / ASCALE");
+    if (cmd_gq4 && ((cmd.w6[23:16] != 8'd1 && cmd.w6[23:16] != 8'd2) ||
+                    4 * int'(cmd.w6[23:16]) > MCOLS || cmd_cq || cmd.flags[2] || cmd.flags[3]))
+      $fatal(1, "otpu_mxu: TMM GRQ QUAD needs M 1 or 2, 4 M <= MCOLS, ternary codes, no RMAX / ASCALE");
     if (int'(cmd.w6[23:16]) > ROWS) $fatal(1, "otpu_mxu: M %0d > ROWS %0d", cmd.w6[23:16], ROWS);
     if (int'(cmd.w6[23:16]) > MCOLS &&
         (cmd_binary ? (int'(cmd.w4[23:16]) + 7) / 8 :
@@ -539,7 +571,8 @@ module otpu_mxu
     end
     cmd_e.mxo   = cmd.w3 + 32'(cmd.w6[23:16]) * 32'(cmd.w6[15:0]);
     cmd_e.M     = cmd.w6[23:16];
-    cmd_e.run   = drain_run(cmd_gq4 ? 16'd1 : cmd.w6[15:0]);   // (GRQ QUAD: out + 4i + q)
+    cmd_e.run   = cmd_gq4 ? gq4_run(cmd.w6[23:16], cmd.w6[15:0])   // (out + m ors + 4i + q)
+                          : drain_run(cmd.w6[15:0]);
     cmd_e.ab    = cmd.w6[31:24];
     cmd_e.unit  = cmd.flags[0];
     cmd_e.rsc   = cmd.flags[7] && !cmd.flags[0];
@@ -549,7 +582,9 @@ module otpu_mxu
     cmd_e.asc   = cmd.flags[3];
     cmd_e.go    = 1'b0;
     cmd_e.asa   = cmd.w2;
-    for (int j = 0; j < MCOLS; j++) cmd_e.jo[j] = cmd_gq4 ? 32'(j) : 32'(j) * 32'(cmd.w6[15:0]);
+    for (int j = 0; j < MCOLS; j++)              // (GRQ QUAD: (j % M) ors + j / M, M 1 or 2)
+      cmd_e.jo[j] = !cmd_gq4 ? 32'(j) * 32'(cmd.w6[15:0]) :
+                    cmd.w6[17] ? (j % 2 == 1 ? 32'(cmd.w6[15:0]) : 32'd0) + 32'(j / 2) : 32'(j);
     g = (int'(cmd.w6[23:16]) + MCOLS - 1) / MCOLS;
     if (g < 1) g = 1;
     if (cmd_grq) g = cmd_gq4 ? 1 : 4;
@@ -558,9 +593,10 @@ module otpu_mxu
     cmd_e.gq4   = cmd_gq4;
     cmd_e.aq    = cmd_aq;
     cmd_e.rstep = cmd_grq ? 3'd4 : 3'd1;
-    cmd_e.Ml    = cmd_gq4 ? MW'(4) : cmd_grq ? MW'(cmd.w6[23:16]) :
+    cmd_e.Ml    = cmd_gq4 ? MW'(4 * int'(cmd.w6[23:16])) : cmd_grq ? MW'(cmd.w6[23:16]) :
                   MW'(int'(cmd.w6[23:16]) - (g - 1) * MCOLS);
-    cmd_e.Mg    = cmd_gq4 ? MW'(4) : cmd_grq ? MW'(cmd.w6[23:16]) : MW'(MCOLS);
+    cmd_e.Mg    = cmd_gq4 ? MW'(4 * int'(cmd.w6[23:16])) : cmd_grq ? MW'(cmd.w6[23:16]) :
+                  MW'(MCOLS);
     cmd_e.gs    = cmd_grq ? 32'd1 : 32'(MCOLS) * 32'(cmd.w6[15:0]);
     cmd_e.g1    = (g == 1);
     cmd_e.dnl   = (cmd_e.run < cmd_e.Ml) ? cmd_e.run : cmd_e.Ml;
@@ -1489,7 +1525,9 @@ module otpu_mxu
   always @(posedge clk)
     if (a_req && i_pair && !i_sws && !i_rsc && scale_addr[2])
       $fatal(1, "otpu_mxu: PAIR scales must be 8-byte aligned");
-  // the lane count is what a greedy pick that stops at the first bank conflict would take
+  // the lane count is what a greedy pick that stops at the first bank conflict would take (GRQ
+  // QUAD of 2 rows: at most that -- gq4_run is a power of two whose window is conflict-free at every
+  // even dj, where a greedy pick from an odd dj may take one more lane)
   always @(posedge clk) if (drain_go) begin
     logic [LANES-1:0] used;
     int n;
@@ -1499,7 +1537,8 @@ module otpu_mxu
       used[dad[MW'(dj) + MW'(k)][BW-1:0]] = 1'b1;
       n++;
     end
-    if (n != 32'(ncnt)) $fatal(1, "otpu_mxu: drain lanes %0d, greedy pick %0d", ncnt, n);
+    if ((h.gq4 && h.M == 8'd2) ? (n < 32'(ncnt)) : (n != 32'(ncnt)))
+      $fatal(1, "otpu_mxu: drain lanes %0d, greedy pick %0d", ncnt, n);
   end
 `endif
   wire drain_row_done = drain_go && d_fin;   // dj + ncnt == c_Mn
@@ -1546,7 +1585,9 @@ module otpu_mxu
   always_ff @(posedge clk)
     if (ea) begin
       p1_x <= dx_l; p1_sa <= dsa_l;
-      for (int k = 0; k < NL; k++) p1_sw[k] <= h.gq4 ? rfh_sw4[2'(dj) + 2'(k)] : rfh_sw;
+      for (int k = 0; k < NL; k++)            // (GRQ QUAD: column dj + k's quarter, / M)
+        p1_sw[k] <= !h.gq4 ? rfh_sw : h.M[1] ? rfh_sw4[2'((32'(dj) + 32'(k)) >> 1)]
+                                             : rfh_sw4[2'(dj) + 2'(k)];
     end
   for (genvar k = 0; k < NL; k++) begin : g_lane
     otpu_mx_lane #(.LM(LM)) u_l (.clk, .en(ea), .x(p1_x[k]), .sw(p1_sw[k]), .sa(p1_sa[k]),
@@ -2211,7 +2252,7 @@ module otpu_mxu
       // read late)
       if (!pn && !cl_ld && c_lz && q_n == 2'd2 && n.go && !c_done &&
           n.pair == h.pair && n.quad == h.quad && (!(h.pair || h.quad) || n.M == h.M) &&
-          !n.grq && !h.grq) begin
+          ((!n.grq && !h.grq) || (GQ4_PIPE && n.gq4 && h.gq4 && n.M == h.M))) begin
         pnx = 1'b1;
         c_left <= n.total;
         c_lz <= n.tz;

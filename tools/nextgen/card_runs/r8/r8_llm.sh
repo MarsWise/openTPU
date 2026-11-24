@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude: a real LLM that ran on the ISA simulator only, on the card: tools/llm_card.py
-# (r8_llm.sh lfm3 | minicpm5 | granite). The prompt's logits against the fp32 reference (host CPU,
+# (r8_llm.sh lfm3 | lfm3-fp4 | minicpm5 | granite | maple). The prompt's logits against the fp32 reference (host CPU,
 # a check), greedy tokens, tok/s, ECC before / after. Zeros over DRAM first (scrub). The weights
 # come with the .cmd (~/llm_card/<model>). No bitstream load, no rescan, no calibration change.
 set -u
@@ -20,9 +20,13 @@ b = Board(XdmaTransport('/dev/xdma0'), check=False); b.scrub(force=True); i = b.
 print('   scrubbed; build', hex(i.get('build_id') or 0), 'ECC', memcal.ecc(b.t), 'temp', i.get('temp_c'))"
 case "$m" in
   lfm3)     set -- lfm3 "$W" ;;
+  lfm3-fp4) W=$HOME/llm_card/lfm3; set -- lfm3 "$W" --wformat fp4 --cos 0.9 ;;   # (4-bit layers)
   minicpm5) set -- gguf "$W/MiniCPM5-2B-Q4_K_M.gguf" --cos 0.998 ;;
+  maple)    W=$HOME/openTPU_BitNET/models/maple-preview   # (r8_fetch_models: the TQ2_0 GGUF)
+            set -- maple "$W/maple-preview-TQ2_0-head-F16.gguf" --wformat tgsc --head-format int8 \
+                   --experts ${EXPERTS:-128} --new ${NEW:-16} --cos 0.95 ;;   # ternary MoE, experts streamed
   granite)  set -- gguf "$W/granite-4.2-3b-Q4_K_M.gguf" --wformat mix --formats gateup=nvfp4,down=fp4 --cos 0.85 ;;
-  *) echo "model: lfm3 | minicpm5 | granite"; exit 2 ;;
+  *) echo "model: lfm3 | lfm3-fp4 | minicpm5 | granite | maple"; exit 2 ;;
 esac
 echo "== $(date +%H:%M:%S) $m: tools/llm_card.py $*"
 timeout 7200 "$P" tools/llm_card.py "$@"; rc=$?

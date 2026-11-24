@@ -246,7 +246,7 @@ def arch_hash(cfg) -> int:
     QUAD) and TFN (the table functions) likewise: in it only when on, so the bitstreams built
     before them keep their hashes."""
     d = dict(dataclasses.asdict(cfg), NUMERICS=NUMERICS)
-    for k in ("SEQ_WC", "TPAIR", "TQUAD", "TFN", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ", "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4"):
+    for k in ("SEQ_WC", "TPAIR", "TQUAD", "TFN", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ", "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4", "TGQ4M"):
         if not d.get(k):
             d.pop(k, None)
     s = json.dumps({k: (int(v) if isinstance(v, bool) else v) for k, v in sorted(d.items())},
@@ -306,6 +306,7 @@ def rtl_params(t: Target | str | None = None) -> dict:
         "VAFF": int(a.get("VAFF", False)),
         "QST6": int(a.get("QST6", False)),
         "VCSWP": int(a.get("VCSWP", False)), "TGQ4": int(a.get("TGQ4", False)),
+        "TGQ4M": int(a.get("TGQ4M", False)),
         "DDR_MTS": int(p.get("mem_mts", 0)),
         "NCH": p["channels_per_slice"],
         "CH_LOG2": (p["channel_bytes"] - 1).bit_length(),
@@ -382,6 +383,8 @@ def build_config(t: Target | str | None = None, **knobs):
         a["VCSWP"] = bool(int(knobs["VCSWP"]))
     if knobs.get("TGQ4") is not None:
         a["TGQ4"] = bool(int(knobs["TGQ4"]))
+    if knobs.get("TGQ4M") is not None:
+        a["TGQ4M"] = bool(int(knobs["TGQ4M"]))
     if not a["DSTEP"]:
         a["TFN"] = False                       # TFN runs on the stream engine
     return config(t, **a)

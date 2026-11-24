@@ -507,9 +507,10 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     4i..4i+3's block k (row 4i+q in quarter q); block k's scales a plane at ssa + k*srs of N fp32
     words (row n at + 4n). N % 4 == 0, M <= MCOLS, ssa and srs multiples of 16, srs >= 4N,
     rs >= N/4 * D. The same per-block fp32 math in K order as GSC, every chunk read once.
-    `quad` with `grq` (GRQ QUAD, Config.TGQ4; M 1, the row also in ACT rows 1..3: QACT DUP4;
-    not RMAX): the MXU takes a chunk's four quarters in one advance (column q the quarter, its
-    output 4i + q) instead of four; GRQ's results bit for bit, a quarter of its advances.
+    `quad` with `grq` (GRQ QUAD, Config.TGQ4; M 1, or 2 with Config.TGQ4M; the rows also in
+    ACT rows M..4M-1: QACT DUP4; not RMAX): the MXU takes a chunk's four quarters in one advance
+    (column j: row j % M, quarter j // M, its output (j % M, 4i + j // M)) instead of four; GRQ's
+    results bit for bit, a quarter of its advances.
     """
     _check(0 < n < 65536 and 0 < kb < 256 and 0 < m < 256 and 0 <= ab < 256
            and 0 <= ors < 65536,
@@ -520,8 +521,8 @@ def tmm(sa, ssa, out, n, kb, rs, ors, m, ab, srs, unit=False, acc=False, rmax=Fa
     if gsc:
         _check(not (unit or rsc or pair or ascale is not None),
                "TMM GSC: UNIT, RSC, PAIR and ASCALE are not supported")
-        _check(not quad or (grq and m == 1 and not rmax and not binary),
-               "TMM GSC QUAD: with GRQ alone (GRQ QUAD: M 1, no RMAX)")
+        _check(not quad or (grq and m in (1, 2) and not rmax and not binary),
+               "TMM GSC QUAD: with GRQ alone (GRQ QUAD: M 1 or 2, no RMAX)")
         if grq:
             _check(not binary and n % 4 == 0 and srs % 16 == 0 and srs >= 4 * n and ssa % 16 == 0,
                    "TMM GRQ: ternary, N % 4 == 0, 16-byte scale planes of N words")

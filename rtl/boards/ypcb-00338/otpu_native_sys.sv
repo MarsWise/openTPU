@@ -63,6 +63,7 @@ module otpu_native_sys #(
   parameter bit QST6 = 1'b0,
   parameter bit VCSWP = 1'b0,
   parameter bit TGQ4 = 1'b0,                // TMM GRQ QUAD (CAPS2 bit20)
+  parameter bit TGQ4M = 1'b0,               // GRQ QUAD M 2 (CAPS2 bit21)
   parameter bit MEMCH_WREG = 1'b1           // otpu_mem_ch WREG: the write data's register (0: r5's)
 ) (
   // core clock and reset (synchronous, high), XDMA's clock and reset
@@ -220,7 +221,7 @@ module otpu_native_sys #(
                .CORE_KHZ(CORE_KHZ), .BUILD_ID(BUILD_ID), .DDR_MTS(DDR_MTS), .DSTEP(DSTEP),
                .HOSTCAL(HOSTCAL), .SEQ_WC(SEQ_WC), .PLATFORM(PLATFORM), .ARCH_HASH(ARCH_HASH),
                .TRACE_DEPTH(TRACE_DEPTH), .COLL_GATHER(COLL_GATHER),
-               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .VAFF(VAFF), .QST6(QST6), .VCSWP(VCSWP), .TGQ4(TGQ4)) u_board (
+               .TPAIR(TPAIR), .TQUAD(TQUAD), .TFN(TFN), .TGSC(TGSC), .VCMP(VCMP), .TBIN(TBIN), .TBGSC(TBGSC), .VU8(VU8), .TGRQ(TGRQ), .VRAND(VRAND), .TCQ(TCQ), .TATAN(TATAN), .QST4(QST4), .LDX(LDX), .TD5(TD5), .VBFLY(VBFLY), .VAFF(VAFF), .QST6(QST6), .VCSWP(VCSWP), .TGQ4(TGQ4), .TGQ4M(TGQ4M)) u_board (
     .clk, .clk_f, .rst, .ctl_mrst, .calib, .ded, .temp, .led, .i2c_lo, .i2c_pin,
     .s_ctl_awaddr, .s_ctl_awvalid, .s_ctl_awready, .s_ctl_wdata, .s_ctl_wstrb, .s_ctl_wvalid,
     .s_ctl_wready, .s_ctl_bresp, .s_ctl_bvalid, .s_ctl_bready, .s_ctl_araddr, .s_ctl_arvalid,

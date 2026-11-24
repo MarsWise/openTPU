@@ -64,7 +64,7 @@ def swiglu_down(xs, w_gate, w_up, w_down, chunk=None, act=silu, loop=False, each
             nxt = gate_up(starts[i + 1])                # MXU streams ahead while the VPU works
         if each is not None:
             each(i)
-        a = ol.all_gather(act(g) * u)                   # [M, S*C]: chunk c of every slice
+        a = ol.all_gather(_glu(act, g, u))                   # [M, S*C]: chunk c of every slice
         for t in ol.static_range(S):
             cols = w_down[:, t * f_loc + c0:t * f_loc + c0 + C]
             at = a[:, t * C:(t + 1) * C]
@@ -73,6 +73,13 @@ def swiglu_down(xs, w_gate, w_up, w_down, chunk=None, act=silu, loop=False, each
             else:
                 ol.dot(at, cols, acc=y)                 # y += a_t . W_down[:, chunk of slice t]
     return y
+
+
+def _glu(act, g, u):
+    """act(g) * u, or act.glu(g, u) where the activation also shapes u (moe.ACTS'
+    "silu_clamp7": Maple's SwiGLU, gate clamped above, up both sides)."""
+    glu = getattr(act, "glu", None)
+    return glu(g, u) if glu is not None else act(g) * u
 
 
 def _down_cols(w_down, j, C: int):
@@ -107,7 +114,7 @@ def _swiglu_down_loop(xs, w_gate, w_up, w_down, C: int, act=silu):
         ol.dot(xs, w_up[c0:c0 + C, :], out=buf[1])
 
     def down(k, buf, y):
-        a = ol.all_gather(act(buf[0]) * buf[1])         # [M, S*C]: chunk k of every slice
+        a = ol.all_gather(_glu(act, buf[0], buf[1]))         # [M, S*C]: chunk k of every slice
         for t in ol.static_range(S):
             at = a[:, t * C:(t + 1) * C]
             if y is None:

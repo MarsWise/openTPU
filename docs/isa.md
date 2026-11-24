@@ -297,12 +297,15 @@ scale-line reads instead of the row-major layout's N of each. With `N % 4 == 0` 
 `KB % 4 == 0` the planes take exactly the row-major matrix's bytes
 (`quant.pack_ternary_gsc_grq`), so the native Bonsai image keeps its addresses.
 
-`GRQ QUAD` (GRQ with the QUAD flag, CAPS2 bit 20, `Config.TGQ4`; M 1, ternary codes, no RMAX):
-the MXU takes a chunk's four quarters in one advance instead of four replay groups. Column `q`
-reads quarter `q` against the row's ACT block (the row's copies in ACT rows 0..3: QACT DUP4, as
-TMM QUAD's), nothing is added across the columns, and column `q`'s integer is output `4i+q`'s:
-scaled by Sw word `q` (the result row carries the line's four Sw words) and drained to
-`out + 4i + q`. GRQ's results bit for bit, a block in N/4 advances instead of N (a decode
+`GRQ QUAD` (GRQ with the QUAD flag, CAPS2 bit 20, `Config.TGQ4`; M 1, or M 2 with CAPS2 bit 21
+`Config.TGQ4M` and `4M <= MCOLS`; ternary codes, no RMAX): the MXU takes a chunk's four
+quarters in one advance instead of four replay groups. Column `j` reads quarter `q = j / M` of
+row `m = j % M` against its ACT block (ACT row `j`, QACT DUP4's copy of row `m`, as TMM QUAD's),
+nothing is added across the columns, and column `j`'s integer is output `(m, 4i+q)`'s: scaled by
+Sw word `q` (the result row carries the line's four Sw words) and drained to
+`out + m*ors + 4i + q`. M 2's drain writes its 8 columns a cycle when `ors % LANES == LANES/2`
+(distinct banks; otherwise fewer lanes a cycle, the same results): the compiler pads such an
+output's row stride. M 2 is MTP's 2-row verify and 2-slot batches. GRQ's results bit for bit, a block in N/4 advances instead of N (a decode
 step's projections: one row). The compiler emits it for a one-row GRQ `dot` whose operand's QACT
 wrote the copies (`Stationary.quad`).
 

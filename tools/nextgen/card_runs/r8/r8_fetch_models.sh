@@ -30,7 +30,13 @@ else:
     print("missing 0")
 PY
 )
-    if [ "$oid" = missing ]; then echo "  $f: not in $repo"; rc=1; continue; fi
+    if [ "$oid" = missing ]; then
+      case " ${OPTIONAL:-generation_config.json attribution_bundle.md SHA256SUMS.txt} " in
+        *" $f "*) echo "  $f: not in $repo (optional, skipped)" ;;
+        *) echo "  $f: not in $repo"; rc=1 ;;
+      esac
+      continue
+    fi
     log "$repo/$f ($size bytes)"
     if [ -f "$dir/$f" ] && [ "$(stat -c %s "$dir/$f")" = "$size" ] && { [ "$oid" = - ] || echo "$oid  $dir/$f" | sha256sum -c --status; }; then
       echo "  already here"

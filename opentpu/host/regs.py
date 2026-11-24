@@ -95,13 +95,14 @@ CAP2_VAFF = 131072   # VOP AFF, the fused row/column affine
 CAP2_QST6 = 262144   # QST Q6, 6-bit ROW rows as nibble and 2-bit planes
 CAP2_VCSWP = 524288   # VOP CSWP, the bitonic compare-exchange stage
 CAP2_TGQ4 = 1048576   # TMM GRQ QUAD: a GRQ chunk's four quarters an advance (M 1)
+CAP2_TGQ4M = 2097152  # GRQ QUAD for M 2 (4 M <= MCOLS): MTP's 2-row verify, 2-slot batches
 
 
 def caps2(v: int | None) -> dict:
     """CAPS2's value -> its capabilities; None (a register map before 5): all present."""
     if v is None:
         return {"gather": True, "tpair": False, "tquad": False, "tfn": False, "tgsc": False,
-                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False, "td5": False, "vbfly": False, "vaff": False, "qst6": False, "vcswp": False, "tgq4": False}
+                "vcmp": False, "tbin": False, "tbgsc": False, "vu8": False, "tgrq": False, "vrand": False, "tcq": False, "tatan": False, "qst4": False, "ldx": False, "td5": False, "vbfly": False, "vaff": False, "qst6": False, "vcswp": False, "tgq4": False, "tgq4m": False}
     return {"gather": bool(v & CAP2_GATHER), "tpair": bool(v & CAP2_TPAIR),
             "tquad": bool(v & CAP2_TQUAD), "tfn": bool(v & CAP2_TFN),
             "tgsc": bool(v & CAP2_TGSC), "vcmp": bool(v & CAP2_VCMP),
@@ -116,7 +117,8 @@ def caps2(v: int | None) -> dict:
             "vbfly": bool(v & CAP2_VBFLY),
             "vaff": bool(v & CAP2_VAFF),
             "qst6": bool(v & CAP2_QST6),
-            "vcswp": bool(v & CAP2_VCSWP), "tgq4": bool(v & CAP2_TGQ4)}
+            "vcswp": bool(v & CAP2_VCSWP), "tgq4": bool(v & CAP2_TGQ4),
+            "tgq4m": bool(v & CAP2_TGQ4M)}
 
 
 # ---- version 4: the configuration (otpu_ctrl CFG_*; docs/targets.md)

@@ -80,7 +80,16 @@ from ..kernels.lib import gelu_tanh, rmsnorm, sigmoid, silu
 from ..kernels.mlp import _chunk, swiglu_down
 
 NEG = -3.0e38                       # knocked out (below every score)
-ACTS = {"silu": silu, "gelu_tanh": gelu_tanh}
+def _silu_clamp(lim: float):
+    """Maple's experts (modeling_maple.MapleMLP, GGUF swiglu_clamp_exp 7): silu(min(g, lim)) *
+    clip(u, -lim, lim); kernels.mlp's swiglu_down calls .glu(g, u)."""
+    def act(g):
+        return silu(ol.minimum(g, lim))
+    act.glu = lambda g, u: silu(ol.minimum(g, lim)) * ol.minimum(ol.maximum(u, -lim), lim)
+    return act
+
+
+ACTS = {"silu": silu, "gelu_tanh": gelu_tanh, "silu_clamp7": _silu_clamp(7.0)}
 
 
 @dataclass(frozen=True)
@@ -117,7 +126,8 @@ class ExpertFormat:
 
     def __init__(self, H: int, F: int, D: int, wformat: str):
         rb = lambda k: Q.row_bytes(k, wformat, D)                       # noqa: E731
-        q = D if wformat == "int8" else 2 * D
+        q = D if wformat == "int8" else 4 * D if wformat in (Q.TERNARY, Q.TERNARY_GSC, Q.TGSC) \
+            else 2 * D                       # (ternary: four K-blocks a D-byte chunk)
         self.F0, F = F, -(-F // q) * q       # the expert's own width, the slot's
         self.H, self.F, self.D, self.wformat = H, F, D, wformat
         self.C = _chunk(F, D, q)

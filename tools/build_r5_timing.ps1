@@ -71,6 +71,7 @@ $buildEnv = @{
     OTPU_QST6_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_VCSWP_GEN = $(if ($R8) { '1' } else { '0' })
     OTPU_TGQ4_GEN = $(if ($R8) { '1' } else { '0' })
+    OTPU_TGQ4M_GEN = $(if ($R8) { '1' } else { '0' })
     TRACE_DEPTH = $(if ($env:TRACE_DEPTH) { $env:TRACE_DEPTH } else { '16384' }); COLL_GATHER = '0'; TMEM_WORDS = '131072'; PCIE_GEN = '2'
     OTPU_FAST = '0'; OTPU_SETUP_MARGIN = '0.15'
     # the memory margins (margins.tcl) from the caller's environment: none unless set (r8_build_ddr.cmd)
@@ -160,7 +161,7 @@ if ($TernaryGroupScales -or $VectorCompare -or $BinaryWeights -or $BinaryGroupSc
     $rb8 = [int][bool]$R8         # (not $r8: PowerShell names are case-blind, $r8 IS the switch)
     # CFG_HASH from the capabilities the build gets ($buildEnv: the switches less OTPU_DROP_FEATURES)
     $capList = @()
-    foreach ($c in 'TGSC','VCMP','TBIN','TBGSC','VU8','TGRQ','VRAND','TCQ','TATAN','QST4','LDX','TD5','VBFLY','VAFF','QST6','VCSWP','TGQ4') {
+    foreach ($c in 'TGSC','VCMP','TBIN','TBGSC','VU8','TGRQ','VRAND','TCQ','TATAN','QST4','LDX','TD5','VBFLY','VAFF','QST6','VCSWP','TGQ4','TGQ4M') {
         $capList += ('{0}=bool({1})' -f $c, [int]($buildEnv["OTPU_${c}_GEN"] -eq '1'))
     }
     $caps = $capList -join ', '
