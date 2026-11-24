@@ -429,6 +429,36 @@ def test_chained_run_isa_identical():
     assert nb == na + 2 * (len(progs) - 1)
 
 
+class _ChainCard:
+    """A card model for run_board_chained: write / load_program / run, the run on the ISA
+    simulator (it follows HALT CHAIN through the slots' words)."""
+    slices = 1
+
+    def __init__(self, c, waitc):
+        self.c, self.waitc = c, waitc
+        self._info = {"D": c.D, "cfg": {"IMEM_WORDS": c.IMEM_WORDS,
+                                        "DRAM_BYTES": c.DRAM_BYTES}}
+        self.dram = np.zeros(c.DRAM_BYTES, np.uint8)
+        self.loads, self.runs = [], 0
+
+    def write(self, addr, data):
+        data = np.asarray(data).view(np.uint8)
+        self.dram[addr:addr + len(data)] = data
+
+    def load_program(self, addr, words, entries=None):
+        self.loads.append((addr, np.asarray(words, np.uint32), entries))
+
+    def run(self, timeout=None):
+        from opentpu import isa as I
+        from opentpu.isasim import Machine
+        self.runs += 1
+        _, w, _ = self.loads[-1]
+        prog = [I.Instr.decode(w[8 * k:8 * k + 8]) for k in range(len(w) // 8)]
+        m = Machine(self.c, [prog], [self.dram]).run(max_steps=1 << 40)
+        self.dram = m.slices[0].dram
+        return {"cycles": 1, "instructions": [m.slices[0].icount]}
+
+
 @pytest.mark.parametrize("waitc", [False, True])
 def test_run_board_chained_one_launch(waitc):
     """run_board_chained: the slots written at once (each its program with the chain tail and,
@@ -443,33 +473,8 @@ def test_run_board_chained_one_launch(waitc):
     ref, _ = RG.run_isa(g.cfg, progs, img.copy())
     c = dataclasses.replace(g.cfg, DRAM_BYTES=1 << 22)
 
-    class Card:
-        slices = 1
-
-        def __init__(self):
-            self.waitc = waitc
-            self._info = {"D": c.D, "cfg": {"IMEM_WORDS": c.IMEM_WORDS,
-                                            "DRAM_BYTES": c.DRAM_BYTES}}
-            self.dram = np.zeros(c.DRAM_BYTES, np.uint8)
-            self.loads, self.runs = [], 0
-
-        def write(self, addr, data):
-            data = np.asarray(data).view(np.uint8)
-            self.dram[addr:addr + len(data)] = data
-
-        def load_program(self, addr, words, entries=None):
-            self.loads.append((addr, np.asarray(words, np.uint32), entries))
-
-        def run(self, timeout=None):
-            self.runs += 1
-            _, w, _ = self.loads[-1]
-            prog = [I.Instr.decode(w[8 * k:8 * k + 8]) for k in range(len(w) // 8)]
-            m = Machine(c, [prog], [self.dram]).run(max_steps=1 << 40)
-            self.dram = m.slices[0].dram
-            return {"cycles": 1, "instructions": [m.slices[0].icount]}
-
     W._mem.clear()
-    card = Card()
+    card = _ChainCard(c, waitc)
     card.write(0, img)
     at = -(-(len(img) + (1 << 16)) // 4096) * 4096
     st = RG.run_board_chained(card, progs, at, workers=1)
@@ -518,3 +523,34 @@ def test_chained_run_rtl(have_verilator, seq_wc):
     drams, _, _ = rtlsim.run(c, [first], [im], axi=True, stall=30, seed=1, uarch=ua,
                              boot=True)
     np.testing.assert_array_equal(drams[0][:len(img)], ref)
+
+
+@pytest.mark.parametrize("waitc", [False, True])
+def test_run_board_chained_segments(waitc):
+    """Slots that do not fit between `at` and the DRAM's end: consecutive segments that do
+    (chain_segments), one launch each over the same slot area; the image still the sequential
+    runs'. A program larger than the room: refused before anything is written."""
+    import dataclasses
+    from opentpu import isa as I
+    from opentpu import waits as W
+    g, progs, img = _chain_graph()
+    ref, _ = RG.run_isa(g.cfg, progs, img.copy())
+    at = -(-(len(img) + (1 << 16)) // 4096) * 4096
+    words = [np.asarray(I.assemble(p), np.uint32) for _, p in progs]
+    big = max(len(w) for w in words) // 8 + 2
+    one = -(-32 * big // 128) * 128 + (8 * big if waitc else 0)
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=at + 2 * one + 4096)     # about two slots
+    W._mem.clear()
+    card = _ChainCard(c, waitc)
+    card.write(0, img)
+    st = RG.run_board_chained(card, progs, at, workers=1)
+    segs = RG.chain_segments(words, waitc, c.DRAM_BYTES - at, c.D)
+    assert st["runs"] == len(segs) == card.runs == len(card.loads) > 2
+    assert [a for a, _, _ in card.loads] == [at] * len(segs)
+    assert segs[0][0] == 0 and segs[-1][1] == len(words) and \
+        all(a[1] == b[0] for a, b in zip(segs, segs[1:]))
+    assert np.array_equal(card.dram[:len(img)], ref)
+    small = _ChainCard(dataclasses.replace(g.cfg, DRAM_BYTES=at + one // 2), waitc)
+    with pytest.raises(ValueError, match="larger than the room"):
+        RG.run_board_chained(small, progs, at, workers=1)
+    assert small.loads == [] and small.runs == 0

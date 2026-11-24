@@ -437,16 +437,38 @@ def run_isa_chained(cfg, progs, img: np.ndarray, at: int) -> tuple[np.ndarray, i
     return s.dram[:len(img)].copy(), s.icount
 
 
+def chain_segments(words: list, waitc: bool, room: int, D: int) -> list[tuple[int, int]]:
+    """[lo, hi) runs of consecutive programs whose chain slots (chain_slots' sizes, a tail on
+    each) fit in `room` bytes: one chained run each, the slot area reused. A single program
+    larger than the room: ValueError."""
+    segs, lo, used = [], 0, 0
+    for i, w in enumerate(words):
+        k = len(w) // 8 + 2
+        b = -(-(-(-32 * k // D) * D + (8 * k if waitc else 0)) // D) * D
+        if b > room:
+            raise ValueError(f"program {i}'s chain slot ({b} bytes) is larger than the room "
+                             f"for the slots ({room} bytes)")
+        if used + b > room:
+            segs.append((lo, i))
+            lo, used = i, 0
+        used += b
+    segs.append((lo, len(words)))
+    return segs
+
+
 def run_board_chained(board, progs, at: int, workers: int | None = None,
                       timeout: float = 600.0) -> dict:
-    """run_board's programs as one run on the card: every program written into its chain slot
-    (chain_slots) at once, the first loaded and started; the card chains through the rest
-    (HALT CHAIN: the program loader's DRAM read each) and the host polls one halt. The wait
-    entries once per distinct program, as run_board. The stats split the wall: prepare
-    (assembly, entries, slots), load (the slots' write and the first load), run."""
+    """run_board's programs as chained runs on the card: every program written into its chain
+    slot (chain_slots), the first loaded and started; the card chains through the rest
+    (HALT CHAIN: the program loader's DRAM read each) and the host polls one halt. Where the
+    slots do not fit between `at` and the DRAM's end, consecutive segments that do
+    (chain_segments), one run each over the same slot area (a SmolVLA base: its 3.9 GiB image
+    leaves ~130 MiB for ~400 MiB of slots: 4 runs, not 12,948). The wait entries once per
+    distinct program, as run_board. The stats split the wall: prepare (assembly, entries),
+    load (the slots' writes and the first loads), run."""
     import time
     from . import isa as I
-    st = {"runs": 1, "programs": len(progs)}
+    st = {"programs": len(progs), "cycles": 0, "instructions": 0}
     t0 = time.perf_counter()
     ps = [p for _, p in progs]
     words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
@@ -455,21 +477,27 @@ def run_board_chained(board, progs, at: int, workers: int | None = None,
     D = info["D"]
     imem = (info.get("cfg") or {}).get("IMEM_WORDS") or getattr(getattr(board, "cfg", None),
                                                                 "IMEM_WORDS", 1 << 15)
-    blob, slots, loaded = chain_slots(words, ents, at, D, imem)
     room = (info.get("cfg") or {}).get("DRAM_BYTES")
-    if room and at + 4 * len(blob) > room:
-        raise ValueError(f"the chain slots end at {at + 4 * len(blob):#x}, past the DRAM "
-                         f"({room:#x})")
+    waitc = bool(ents) and ents[0] is not None
+    segs = chain_segments(words, waitc, room - at, D) if room else [(0, len(words))]
+    st["runs"] = len(segs)
     st["distinct"] = len({w.tobytes() for w in words}) if len(words) < 100000 else None
-    st["slots_mib"] = round(4 * len(blob) / 2**20, 1)
     st["prepare_s"] = round(time.perf_counter() - t0, 2)
-    t1 = time.perf_counter()
-    board.write(at, blob.view(np.uint8))
-    board.load_program(at, loaded[0][0], loaded[0][1])
-    t2 = time.perf_counter()
-    r = board.run(timeout=timeout)
-    st["load_s"], st["run_s"] = round(t2 - t1, 2), round(time.perf_counter() - t2, 2)
-    st["cycles"], st["instructions"] = r["cycles"], r["instructions"][0]
+    load = run = 0.0
+    mib = 0.0
+    for lo, hi in segs:
+        blob, slots, loaded = chain_slots(words[lo:hi], ents[lo:hi], at, D, imem)
+        mib = max(mib, 4 * len(blob) / 2**20)
+        t1 = time.perf_counter()
+        board.write(at, blob.view(np.uint8))
+        board.load_program(at, loaded[0][0], loaded[0][1])
+        t2 = time.perf_counter()
+        r = board.run(timeout=timeout)
+        load, run = load + t2 - t1, run + time.perf_counter() - t2
+        st["cycles"] += r["cycles"]
+        st["instructions"] += r["instructions"][0]
+    st["slots_mib"] = round(mib, 1)
+    st["load_s"], st["run_s"] = round(load, 2), round(run, 2)
     return st
 
 # ---------------------------------------------------------------- 2-D (NHWC) tensors
