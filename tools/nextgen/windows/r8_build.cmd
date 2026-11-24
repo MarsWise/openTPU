@@ -39,10 +39,15 @@ python -c "import sys, numpy; print(sys.executable, sys.version.split()[0], 'num
 if errorlevel 1 goto nopy
 python -c "import sys,dataclasses; sys.path.insert(0,'.'); from tools.bonsai2_validate import configuration; from opentpu.target import arch_hash; import os; d=os.environ.get('OTPU_DROP_FEATURES') or 'TBIN TBGSC TD5 TATAN'; d='' if d.lower()=='none' else d; off=set(d.upper().replace(',',' ').split()); caps={k: k not in off for k in 'TGSC VCMP TBIN TBGSC VU8 TGRQ VRAND TCQ TATAN QST4 LDX TD5 VBFLY VAFF QST6 VCSWP TGQ4'.split()}; print('CFG_HASH check', format(arch_hash(dataclasses.replace(configuration(), **caps)), '08x'), '(less ' + ' '.join(sorted(off)) + ')' if off else '')"
 if errorlevel 1 goto nohash
+rem the build's start (UTC ticks): an otpu.bit written after it with setup and hold met is a built bitstream
+for /f %%t in ('powershell -NoProfile -Command "[DateTime]::UtcNow.Ticks"') do set "T0=%%t"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; try { & '.\tools\build_r8_133.ps1' -Mode '%MODE%' %PLAN% *>&1 | Tee-Object -FilePath $env:OTPU_R8_LOG -Append; if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 0 } catch { Write-Error $_; exit 1 }"
 set RC=%errorlevel%
 echo === exit %RC%
 set OUTD=build\vivado-r8-m8-133.33-%TREV%
+rem Vivado prints "ERROR: Failed runs(s): impl_1" when impl_1's post-route phys_opt does not finish;
+rem build.tcl goes on from the routed checkpoint and writes otpu.bit only if setup and hold pass
+if not "%RC%"=="0" if not defined PLAN if exist "%OUTD%\otpu.bit" powershell -NoProfile -Command "if ((Get-Item '%OUTD%\otpu.bit').LastWriteTimeUtc.Ticks -gt %T0% -and (Select-String -Path '%OUTD%\reports\SUMMARY.txt' -Pattern '^WNS \d[\d.]* ns   WHS \d[\d.]* ns' -Quiet)) { exit 0 } else { exit 1 }" && (echo === impl_1 reported a failure ^(its post-route phys_opt did not finish^); build.tcl went on from the routed checkpoint and wrote otpu.bit with setup and hold met: the build is good & set RC=0)
 if not defined PLAN if exist "%OUTD%\reports\SUMMARY.txt" type "%OUTD%\reports\SUMMARY.txt"
 if not defined PLAN for /r "%OUTD%" %%f in (*.bit) do certutil -hashfile "%%f" SHA256
 echo (nothing was loaded into the FPGA)
