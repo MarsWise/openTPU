@@ -48,7 +48,8 @@ import sys, re, pathlib
 d = pathlib.Path(sys.argv[1]); bad = 0
 def reply(p):
     lines = p.read_text(errors="replace").splitlines()
-    i = max(k for k, l in enumerate(lines) if l.startswith("loaded in"))
+    # (after the placement table: its "first token of a reply" row differs with --mtp)
+    i = max(k for k, l in enumerate(lines) if l.startswith(("loaded in", "  first token of a reply")))
     j = max(k for k, l in enumerate(lines) if l.startswith("["))
     return "\n".join(l for l in lines[i + 1:j] if not l.startswith("otpu-chat:")), lines[j]
 for i in range(3):

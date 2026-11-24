@@ -1280,6 +1280,23 @@ Cost estimate for a draft, which has not been measured:
 The verify of 2 rows reads the weights once. The card run, `r8_bonsai_mtp.cmd`, measures
 equality, acceptance and tok/s: three prompts, each plain, then `--mtp` int8, then fp4.
 
+**Card, 2026-11-24 (ed482f26, host 345e1b4e).** The replies equal plain greedy decode's for
+all three prompts and both formats (ECC 0/0). The checker's "DIFF" came from comparing the
+placement table, whose "first token of a reply" row differs; it is fixed. The run is **slower**,
+though:
+
+| | plain | MTP int8 | MTP fp4 |
+|---|---|---|---|
+| Mcycles a token | 13.02 | 21.1-27.4 | 20.2-26.2 |
+| acceptance | - | 0.46-0.90 | 0.51-0.95 |
+
+An iteration costs ~40 Mcycles in every run. The 2-row verify cannot use GRQ QUAD, which is
+M 1 only in the ISA and the RTL (`cmd_gq4`: four quarters of one row on columns 0-3). So the
+verify runs plain GRQ: OTPU_GQ4=0 decode costs 36.56 Mcycles. The draft is ~3-3.5 Mcycles;
+fp4 saves ~0.5. An MTP speedup needs GRQ QUAD for M 2 (rows 0 / 1 on columns 0-3 / 4-7 of
+MCOLS 8). Estimate: verify ~13.5 + draft ~3.5 = ~17 Mcycles an iteration, ~10 Mcycles a token
+at acceptance 0.7 (~13 tok/s, +30 %). Until then, Bonsai's chat should not take `--mtp`.
+
 ## 12. Open questions
 
 - The MTP dataflow (section 6.1) is **confirmed against mlx_vlm 0.6.8**'s Qwen3.5 drafter:
