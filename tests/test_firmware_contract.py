@@ -24,7 +24,7 @@ def test_host_contract_matches_tmm_instruction():
 
 
 def test_current_firmware_is_r5x_lean():
-    """The current firmware is r5x lean (46a18fc1): the top-level entry and its "known" entry agree,
+    """The current firmware is r5x lean ed482f26 (46a18fc1 with the GSC adapter pipelined): the top-level entry and its "known" entry agree,
     and r8_build.cmd's CFG_HASH check gives its hash with the build's defaults (no BIN / BIN GSC / T5 /
     atan)."""
     import os
@@ -33,13 +33,13 @@ def test_current_firmware_is_r5x_lean():
 
     contract = firmware_contract.load_contract(ROOT / "firmware_contract.json")
     fw = contract["firmware"]
-    assert fw["build_id"] == "0x46a18fc1" and fw["source_commit"].startswith("46a18fc1")
+    assert fw["build_id"] == "0xed482f26" and fw["source_commit"].startswith("ed482f26")
     current = [k for k in contract["known"] if k.get("status") == "current"]
     assert len(current) == 1
     k = current[0]
     assert (k["build_id"], k["cfg_hash"], k["bitstream_sha256"], k["version"]) == (
         fw["build_id"], fw["cfg_hash"], fw["bitstream_sha256"], fw["version"])
-    info = {"build_id": 0x46a18fc1, "cfg": {"hash": 0xadd73610}, "D": 128, "MCOLS": 8, "LANES": 8}
+    info = {"build_id": 0xed482f26, "cfg": {"hash": 0xadd73610}, "D": 128, "MCOLS": 8, "LANES": 8}
     assert firmware_contract._match_known(contract, info)["status"] == "current"
     line = next(l for l in (ROOT / "tools/nextgen/windows/r8_build.cmd").read_text().splitlines()
                 if "CFG_HASH check" in l and l.startswith("python -c"))
@@ -53,7 +53,7 @@ def test_current_firmware_is_r5x_lean():
                          text=True, check=True).stdout
     assert "CFG_HASH check a905c3db" in out
     ps = (ROOT / "tools/build_r8_133.ps1").read_text()
-    assert "vivado-r8-m8-133.33-46a18fc1-lean" in (
+    assert "vivado-r8-m8-133.33-ed482f26-lean" in (
         ROOT / "tools/nextgen/card_runs/r8/r8_load.cmd").read_text()
     for knob, value in (("OTPU_MEMCH_WREG", "'0'"), ("OTPU_LITEDRAM_RTW", "'3'"),
                         ("TRACE_DEPTH", "'16384'"), ("OTPU_DROP_FEATURES", "'TBIN TBGSC TD5 TATAN'")):

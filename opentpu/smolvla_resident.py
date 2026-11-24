@@ -42,6 +42,16 @@ def _shuffle_map(seq: int, C: int, s: int) -> np.ndarray:
     return x[:, ::C]                                            # [tokens, s*s] source rows
 
 
+def _dt_region(t, x) -> tuple:
+    """A DT tensor's whole extent with x in its interior rows: (byte address, uint8 bytes)."""
+    buf = np.zeros(t.nbytes, np.uint8)
+    f = buf.view(np.float32)
+    for r in range(t.L):
+        o = (t.pad + r) * t.rs
+        f[o:o + t.C] = x[r]
+    return t.addr, buf
+
+
 class VLA:
     def __init__(self, g, imgs, lang_rows, state, x, enc_ops, step_ops, steps, chunk, A):
         self.g, self.imgs, self.lang_rows, self.state, self.x = g, imgs, lang_rows, state, x
@@ -61,24 +71,37 @@ class VLA:
             out += s
         return out
 
-    def image(self, images, state, noise, seed: int | None = None) -> np.ndarray:
-        """images: [C, H, W] each (the policy's preprocessed pixels); state [max_state_dim];
-        noise [chunk, max_action_dim], or with device_noise None and the `seed`."""
-        g = self.g
-        img = g.image()
-        f = img.view(np.float32)
+    def inputs(self, images, state, noise, seed: int | None = None) -> list:
+        """The DRAM regions the inputs fill, each input tensor whole (its padding and slack
+        zero, as in a fresh image): [(byte address, uint8 bytes)]. images: [C, H, W] each (the
+        policy's preprocessed pixels); state [max_state_dim]; noise [chunk, max_action_dim],
+        or with device_noise None and the `seed`. A run leaves the weights (and every byte
+        the next run reads before writing) as it found them, so a policy runs again on new
+        inputs by writing just these (image() puts them into a fresh image)."""
+        out = []
         for t, x in zip(self.imgs, images):
+            buf = np.zeros(t.nbytes, np.uint8)
+            f = buf.view(np.float32)
             x = np.asarray(x, np.float32).transpose(1, 2, 0)
             for h in range(t.H):
-                o = (t.addr + 4 * ((t.border + h) * t.rs + t.border * t.C)) // 4
+                o = (t.border + h) * t.rs + t.border * t.C
                 f[o:o + t.W * t.C] = x[h].reshape(-1)
-        g.put(img, self.state, np.asarray(state, np.float32).reshape(1, -1))
+            out.append((t.addr, buf))
+        out.append(_dt_region(self.state, np.asarray(state, np.float32).reshape(1, -1)))
         if self.seed is not None:
             if seed is None or noise is not None:
                 raise ValueError("device_noise: a seed, and no host noise")
-            img.view(np.uint32)[self.seed.addr // 4] = seed & 0xFFFFFFFF     # (raw)
-            return img
-        g.put(img, self.x, np.asarray(noise, np.float32).reshape(self.chunk, self.A))
+            out.append((self.seed.addr, np.array([seed & 0xFFFFFFFF], "<u4").view(np.uint8)))
+        else:
+            out.append(_dt_region(self.x, np.asarray(noise, np.float32).reshape(self.chunk,
+                                                                                self.A)))
+        return out
+
+    def image(self, images, state, noise, seed: int | None = None) -> np.ndarray:
+        """A fresh DRAM image with the inputs (inputs())."""
+        img = self.g.image()
+        for a, b in self.inputs(images, state, noise, seed):
+            img[a:a + len(b)] = b
         return img
 
     def actions(self, img) -> np.ndarray:

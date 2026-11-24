@@ -456,49 +456,68 @@ def chain_segments(words: list, waitc: bool, room: int, D: int) -> list[tuple[in
     return segs
 
 
+class ChainPlan:
+    """A resident graph's programs prepared once for chained runs on the card (chain_slots,
+    chain_segments): assembled, their wait entries computed (once per distinct program), the
+    slots built. run() then costs the slots' writes (none again for a single segment: the
+    runs leave the slot area above the image alone) and a start and a poll a segment, so a
+    policy run again on new inputs (VLA.inputs) pays its preparation once."""
+
+    def __init__(self, board, progs, at: int, workers: int | None = None):
+        import time
+        from . import isa as I
+        t0 = time.perf_counter()
+        ps = [p for _, p in progs]
+        words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
+        ents = board_entries(board, words, ps, workers)
+        info = getattr(board, "_info", None) or board.info()
+        D = info["D"]
+        imem = (info.get("cfg") or {}).get("IMEM_WORDS") or \
+            getattr(getattr(board, "cfg", None), "IMEM_WORDS", 1 << 15)
+        room = (info.get("cfg") or {}).get("DRAM_BYTES")
+        waitc = bool(ents) and ents[0] is not None
+        segs = chain_segments(words, waitc, room - at, D) if room else [(0, len(words))]
+        self.at = at
+        self.parts = [chain_slots(words[lo:hi], ents[lo:hi], at, D, imem) for lo, hi in segs]
+        self.written = False
+        self.stats = {"programs": len(progs), "runs": len(segs),
+                      "distinct": len({w.tobytes() for w in words}),
+                      "slots_mib": round(max(4 * len(b) for b, _, _ in self.parts) / 2**20, 1),
+                      "prepare_s": round(time.perf_counter() - t0, 2)}
+
+    def run(self, board, timeout: float = 600.0) -> dict:
+        """Every segment in order: its slots written (a single segment's once), its first
+        program loaded and started, one halt polled. The image's inputs are the caller's."""
+        import time
+        st = {"cycles": 0, "instructions": 0}
+        load = run = 0.0
+        for blob, slots, loaded in self.parts:
+            t1 = time.perf_counter()
+            if len(self.parts) > 1 or not self.written:
+                board.write(self.at, blob.view(np.uint8))
+            board.load_program(self.at, loaded[0][0], loaded[0][1])
+            t2 = time.perf_counter()
+            r = board.run(timeout=timeout)
+            load, run = load + t2 - t1, run + time.perf_counter() - t2
+            st["cycles"] += r["cycles"]
+            st["instructions"] += r["instructions"][0]
+        self.written = True
+        st["load_s"], st["run_s"] = round(load, 2), round(run, 2)
+        return st
+
+
 def run_board_chained(board, progs, at: int, workers: int | None = None,
                       timeout: float = 600.0) -> dict:
-    """run_board's programs as chained runs on the card: every program written into its chain
-    slot (chain_slots), the first loaded and started; the card chains through the rest
-    (HALT CHAIN: the program loader's DRAM read each) and the host polls one halt. Where the
-    slots do not fit between `at` and the DRAM's end, consecutive segments that do
-    (chain_segments), one run each over the same slot area (a SmolVLA base: its 3.9 GiB image
-    leaves ~130 MiB for ~400 MiB of slots: 4 runs, not 12,948). The wait entries once per
-    distinct program, as run_board. The stats split the wall: prepare (assembly, entries),
-    load (the slots' writes and the first loads), run."""
-    import time
-    from . import isa as I
-    st = {"programs": len(progs), "cycles": 0, "instructions": 0}
-    t0 = time.perf_counter()
-    ps = [p for _, p in progs]
-    words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
-    ents = board_entries(board, words, ps, workers)
-    info = getattr(board, "_info", None) or board.info()
-    D = info["D"]
-    imem = (info.get("cfg") or {}).get("IMEM_WORDS") or getattr(getattr(board, "cfg", None),
-                                                                "IMEM_WORDS", 1 << 15)
-    room = (info.get("cfg") or {}).get("DRAM_BYTES")
-    waitc = bool(ents) and ents[0] is not None
-    segs = chain_segments(words, waitc, room - at, D) if room else [(0, len(words))]
-    st["runs"] = len(segs)
-    st["distinct"] = len({w.tobytes() for w in words}) if len(words) < 100000 else None
-    st["prepare_s"] = round(time.perf_counter() - t0, 2)
-    load = run = 0.0
-    mib = 0.0
-    for lo, hi in segs:
-        blob, slots, loaded = chain_slots(words[lo:hi], ents[lo:hi], at, D, imem)
-        mib = max(mib, 4 * len(blob) / 2**20)
-        t1 = time.perf_counter()
-        board.write(at, blob.view(np.uint8))
-        board.load_program(at, loaded[0][0], loaded[0][1])
-        t2 = time.perf_counter()
-        r = board.run(timeout=timeout)
-        load, run = load + t2 - t1, run + time.perf_counter() - t2
-        st["cycles"] += r["cycles"]
-        st["instructions"] += r["instructions"][0]
-    st["slots_mib"] = round(mib, 1)
-    st["load_s"], st["run_s"] = round(load, 2), round(run, 2)
-    return st
+    """run_board's programs as chained runs on the card (ChainPlan: prepared, then run once):
+    every program written into its chain slot (chain_slots), the first loaded and started;
+    the card chains through the rest (HALT CHAIN: the program loader's DRAM read each) and the
+    host polls one halt. Where the slots do not fit between `at` and the DRAM's end,
+    consecutive segments that do (chain_segments), one run each over the same slot area (a
+    SmolVLA base: its 3.9 GiB image leaves ~130 MiB for ~400 MiB of slots: 4 runs, not
+    12,948). The stats split the wall: prepare (assembly, entries, slots), load (the slots'
+    writes and the first loads), run."""
+    plan = ChainPlan(board, progs, at, workers)
+    return {**plan.stats, **plan.run(board, timeout)}
 
 # ---------------------------------------------------------------- 2-D (NHWC) tensors
 class T2:

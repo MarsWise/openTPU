@@ -554,3 +554,52 @@ def test_run_board_chained_segments(waitc):
     with pytest.raises(ValueError, match="larger than the room"):
         RG.run_board_chained(small, progs, at, workers=1)
     assert small.loads == [] and small.runs == 0
+
+
+@pytest.mark.parametrize("small", [False, True], ids=["one-segment", "segments"])
+def test_chain_plan_runs_again_on_new_inputs(small):
+    """A ChainPlan prepared once runs the graph again after only its input is rewritten: the
+    image the sequential runs of a fresh image with that input leave; a single segment's slots
+    written once (the runs leave the slot area alone), segments' every run."""
+    import dataclasses
+    from opentpu import isa as I
+    from opentpu import waits as W
+    torch.manual_seed(3)
+    m = torch.nn.Conv1d(64, 64, 3, 1, 1)
+    w, b = m.weight.detach().numpy(), m.bias.detach().numpy()
+    g = RG.Graph(cfg())
+    xt = g.tensor(16, 64, 2)
+    y = g.conv1d(xt, w, b, 1, 1)
+    y = g.group_norm(y, 8, np.ones(64), np.zeros(64), 1e-5, act="mish")
+    out = g.conv1d(y, w, b, 1, 1)
+    progs = g.compile() * 2
+    at = -(-(len(g.image()) + (1 << 16)) // 4096) * 4096
+    words = [np.asarray(I.assemble(p), np.uint32) for _, p in progs]
+    big = max(len(x) for x in words) // 8 + 2
+    room = (2 * (-(-32 * big // 128) * 128) + 4096) if small else (1 << 22) - at
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=at + room)
+    W._mem.clear()
+    card = _ChainCard(c, True)
+    writes = []
+    wr = card.write
+    card.write = lambda a, d: (writes.append(a), wr(a, d))
+    rng = np.random.default_rng(4)
+    img = g.image()
+    g.put(img, xt, rng.normal(size=(16, 64)))
+    card.write(0, img)
+    plan = RG.ChainPlan(card, progs, at, workers=1)
+    plan.run(card)
+    for k in range(2):
+        x = rng.normal(size=(16, 64)).astype(np.float32)
+        fresh = g.image()
+        g.put(fresh, xt, x)
+        ref, _ = RG.run_isa(g.cfg, progs, fresh)
+        reg = np.zeros(xt.nbytes, np.uint8)
+        g.put(reg, RG.DT(0, xt.L, xt.C, xt.pad, xt.rs), x)
+        card.write(xt.addr, reg)
+        plan.run(card)
+        np.testing.assert_array_equal(g.read(card.dram, out), g.read(ref, out))
+        assert np.array_equal(card.dram[:len(fresh)], ref)
+    slot_writes = sum(1 for a in writes if a == at)
+    assert slot_writes == (3 * plan.stats["runs"] if small else 1)
+    assert (plan.stats["runs"] > 1) == small

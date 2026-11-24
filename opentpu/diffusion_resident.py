@@ -28,7 +28,7 @@ def _np(t):
 class Loop:
     def __init__(self, g, sample, gfeat, times, noises, step_progs, common, coeffs, A, T, E):
         self.g, self.sample, self.gfeat, self.times = g, sample, gfeat, times
-        self.noises, self.step_progs, self.common = noises, step_progs, common
+        self.noise_t, self.step_progs, self.common = noises, step_progs, common
         self.coeffs, self.A, self.T, self.E = coeffs, A, T, E
         self.enc_progs, self.enc_in = [], []         # (with the observation encoders)
         self.seed = None                             # device_noise: the seed's word
@@ -76,7 +76,7 @@ class Loop:
             w[(self.seed.addr + 4 * self.seed.pad * self.seed.rs) // 4] = seed & 0xFFFFFFFF
             return img
         g.put(img, self.sample, np.asarray(noise0).reshape(self.T, self.A))
-        for nt, z in zip(self.noises, step_noise):
+        for nt, z in zip(self.noise_t, step_noise):
             g.put(img, nt, np.asarray(z).reshape(self.T, self.A))
         return img
 

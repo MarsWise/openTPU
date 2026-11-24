@@ -94,6 +94,9 @@ def main():
     ap.add_argument("--backend", default="isa", choices=("isa", "board"))
     ap.add_argument("--check-isa", action="store_true")
     ap.add_argument("--dev", default="/dev/xdma0")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="--resident: run the policy N times, new noise each, only the inputs "
+                         "written again")
     ap.add_argument("--sequential", action="store_true",
                     help="--resident on the card: a launch a program (default: one chained run)")
     ap.add_argument("--wsplit", action="store_true")
@@ -182,17 +185,21 @@ def main():
 
 
 
-def run_on_card(board, progs, at: int, sequential: bool = False) -> dict:
-    """The resident programs on the card: one chained run (resident.run_board_chained: the
-    card goes from program to program by HALT CHAIN, the host starts it once) where the
-    bitstream chains (CAPS bit30) and `sequential` is off, else a launch a program."""
+def run_on_card(board, progs, at: int, sequential: bool = False):
+    """The resident programs on the card: chained runs (resident.ChainPlan: the card goes from
+    program to program by HALT CHAIN, the host starts each segment once) where the bitstream
+    chains (CAPS bit30) and `sequential` is off, else a launch a program. (stats, the plan or
+    None: a plan runs the policy again on new inputs without its preparation.)"""
     from opentpu import resident as RG
     if not sequential and (board.info().get("caps") or {}).get("gen"):
         try:
-            return RG.run_board_chained(board, progs, at)
-        except ValueError as e:                 # no room for the slots, a program too long
+            plan = RG.ChainPlan(board, progs, at)
+        except ValueError as e:                 # a program larger than the room for slots
             print(f"chained run refused ({e}): a launch a program")
-    return RG.run_board(board, progs, at)
+        else:
+            return {**plan.stats, **plan.run(board)}, plan
+    return RG.run_board(board, progs, at), None
+
 
 def run_resident(a, pol, x, ref, t_ref):
     """SmolVLA with nothing computed on the host (the inputs written once, the actions read)."""
@@ -239,7 +246,8 @@ def run_resident(a, pol, x, ref, t_ref):
         got, st = vla.actions(img), {"instructions": n}
     else:
         board.write(0, img)
-        st = run_on_card(board, progs, -(-(len(img) + (1 << 20)) // 4096) * 4096, a.sequential)
+        at = -(-(len(img) + (1 << 20)) // 4096) * 4096
+        st, plan = run_on_card(board, progs, at, a.sequential)
         got = board.read(vla.x.addr, vla.x.nbytes).view(np.float32).reshape(vla.chunk, vla.A)
         if a.check_isa:
             iso, _ = RG.run_isa(c, progs, img)
@@ -250,6 +258,44 @@ def run_resident(a, pol, x, ref, t_ref):
           f"{float(np.abs(got - ref).max()):.4f} (range {float(np.abs(ref).max()):.3f}); host: "
           f"inputs written, actions read, nothing computed"
           f"{' (the noise drawn on the device from the seed)' if dn else ''}")
+    # --repeat: the policy again on new noise, the compiled programs, their entries, the chain
+    # slots and the weights on the card kept: only the inputs written (VLA.inputs)
+    for k in range(1, a.repeat):
+        import torch
+        if dn:
+            sk, nk = a.seed + 1 + k, None
+            z = torch.as_tensor(vla.noise(sk))[None]
+        else:
+            sk = None
+            nk = np.random.default_rng(a.seed + 1000 + k).standard_normal(
+                noise[0].shape).astype(np.float32)
+            z = torch.as_tensor(nk)[None]
+        with torch.no_grad():
+            rk = pol.model.sample_actions(imgs, masks, toks, lmask, state,
+                                          noise=z.clone())[0].numpy()
+        regs = vla.inputs(pix, state[0].numpy(), nk, seed=sk)
+        t0 = time.time()
+        if board is None:
+            for ad, b in regs:
+                img[ad:ad + len(b)] = b
+            img, n = RG.run_isa(c, progs, img)
+            gk, sk_st = vla.actions(img), {"instructions": n}
+            t_w = 0.0
+        else:
+            for ad, b in regs:
+                board.write(ad, b)
+            t_w = time.time() - t0
+            sk_st = plan.run(board) if plan is not None else RG.run_board(board, progs, at)
+            gk = board.read(vla.x.addr, vla.x.nbytes).view(np.float32).reshape(vla.chunk,
+                                                                                 vla.A)
+        wall = time.time() - t0
+        same = ""
+        if a.check_isa:
+            iso, _ = RG.run_isa(c, progs, vla.image(pix, state[0].numpy(), nk, seed=sk))
+            same = f", == a fresh image's ISA run: {np.array_equal(gk, vla.actions(iso))}"
+        rel = float(np.linalg.norm(gk - rk) / np.linalg.norm(rk))
+        print(f"repeat {k}: device run {wall:.2f}s (inputs {sum(len(b) for _, b in regs)} bytes "
+              f"written in {t_w:.3f}s; {sk_st}), rel L2 {rel:.4f}{same}")
     return 0
 
 

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "firmware": {
-    "name": "openTPU NextGen r5x lean m8 133.33 MHz: r5x less TMM T5 and TFN atan, shared TFN ROM, one RAND generator (current, 2026-11-23)",
-    "source_commit": "46a18fc18a9aa95a212a1f7628c02cf766caee1e",
-    "build_id": "0x46a18fc1",
+    "name": "openTPU NextGen r5x lean m8 133.33 MHz with the GSC adapter pipelined (GSC_PIPE): r5x less TMM T5 and TFN atan, shared TFN ROM, one RAND generator (current, 2026-11-24)",
+    "source_commit": "ed482f26fc66c1c9ef3838c51a4154927a073a60",
+    "build_id": "0xed482f26",
     "cfg_hash": "0xadd73610",
-    "bitstream_sha256": "db6d04a4370fc6fe165d11ded74e5fec98e40601f732f9e0d74813c9011b5fdf",
+    "bitstream_sha256": "2193aa7db58247f6ac7c412f87a00fce52a94baa6c4abcbadd1e746d09c3af2e",
     "part": "xc7k480tffg1156-2",
     "version": {
       "D": 128,
@@ -151,6 +151,18 @@
       "build_id": "0x46a18fc1",
       "cfg_hash": "0xadd73610",
       "bitstream_sha256": "db6d04a4370fc6fe165d11ded74e5fec98e40601f732f9e0d74813c9011b5fdf",
+      "version": {
+        "D": 128,
+        "MCOLS": 8,
+        "LANES": 8
+      },
+      "status": "superseded by r5x lean ed482f26 (2026-11-24: the GSC adapter pipelined, Bonsai 10.13 tok/s)"
+    },
+    {
+      "name": "r8 r5x lean ed482f26 (r8_build_lean.cmd): 46a18fc1's build with otpu_tmm_gsc PIPE (a GSC TMM's K-block subcommands issued while the previous drains); signoff WNS +0.019 / WHS +0.015 (core +0.095, userclk1 rerouted -0.009 -> +0.019); card 2026-11-24: r8_card_tests 17/0/0 ECC 0/0; profile Bonsai 2 4B 13.16 Mcycles a token (10.13 tok/s, was 15.79 / 8.45), MXU_STARVE 10.5 % (was 25 %); BitNet 7.54, Qwen3.5-0.8B 6.69 (unchanged)",
+      "build_id": "0xed482f26",
+      "cfg_hash": "0xadd73610",
+      "bitstream_sha256": "2193aa7db58247f6ac7c412f87a00fce52a94baa6c4abcbadd1e746d09c3af2e",
       "version": {
         "D": 128,
         "MCOLS": 8,

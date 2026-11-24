@@ -35,7 +35,7 @@ skip() { echo "CHECK SKIP: $1"; SKIPS=$((SKIPS+1)); }
 relok() { python3 - "$1" "$2" <<'PY'
 import re, sys
 m = re.findall(r"rel L2 ([0-9.]+)", open(sys.argv[1]).read())
-sys.exit(0 if m and float(m[-1]) < float(sys.argv[2]) else 1)
+sys.exit(0 if m and max(float(x) for x in m) < float(sys.argv[2]) else 1)   # every run's
 PY
 }
 cd "$R" || exit 1
@@ -172,15 +172,15 @@ for st in 10 100; do
   check_ecc sec-ok || exit 1
 done
 
-log "2a. SmolVLA tiny, resident: card == ISA"
+log "2a. SmolVLA tiny, resident: card == ISA; run twice more, only the inputs rewritten: == a fresh image's ISA run"
 rescrub
 check_ecc sec-ok || exit 1
-PYTHONPATH="$R" timeout 3600 "$LV/bin/python" tools/smolvla_run.py --tiny --backend board --resident --check-isa 2>&1 | tee "$OUT/smolvla_tiny.txt"
-rc=$?; [ "$rc" = 0 ] && grep -q "card == ISA: True" "$OUT/smolvla_tiny.txt" && pass "SmolVLA tiny resident card == ISA" || fail "SmolVLA tiny resident card == ISA"
+PYTHONPATH="$R" timeout 3600 "$LV/bin/python" tools/smolvla_run.py --tiny --backend board --resident --check-isa --repeat 3 2>&1 | tee "$OUT/smolvla_tiny.txt"
+rc=$?; [ "$rc" = 0 ] && grep -q "card == ISA: True" "$OUT/smolvla_tiny.txt" && [ "$(grep -c "fresh image's ISA run: True" "$OUT/smolvla_tiny.txt")" = 2 ] && pass "SmolVLA tiny resident card == ISA" || fail "SmolVLA tiny resident card == ISA"
 check_ecc sec-ok || exit 1
-log "2b. lerobot/smolvla_base resident (gate: rel L2 < 0.1 vs float32; first run of the real checkpoint resident)"
+log "2b. lerobot/smolvla_base resident, and once more on new noise with only the inputs written (gate: rel L2 < 0.1 vs float32, both runs)"
 check_ecc sec-ok || exit 1
-PYTHONPATH="$R" timeout 10800 "$LV/bin/python" tools/smolvla_run.py --policy lerobot/smolvla_base --backend board --resident 2>&1 | tee "$OUT/smolvla_base.txt"
+PYTHONPATH="$R" timeout 10800 "$LV/bin/python" tools/smolvla_run.py --policy lerobot/smolvla_base --backend board --resident --repeat 2 2>&1 | tee "$OUT/smolvla_base.txt"
 rc=$?; [ "$rc" = 0 ] && relok "$OUT/smolvla_base.txt" 0.1 && pass "SmolVLA base resident" || fail "SmolVLA base resident"
 check_ecc sec-ok || exit 1
 

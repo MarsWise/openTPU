@@ -13,7 +13,7 @@ r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
 | Qwen3.5-0.8B / 2B | PHYS lean | 20.1 / 8.4 int8, 28.0 fp4 (0.8B) | 0.8B fp4: one SEC step |
 | LFM2.5-230M | PHYS lean | 66.9 int8, 96.7 fp4 | - |
 | BitNet b1.58 2B4T, vLLM 4 slots (sampled / greedy / logprobs) | PHYS lean | 17.7 | 4-bit head |
-| Bonsai 2 4B (GRQ QUAD) | PHYS lean | 8.5 (plain GRQ 3.4) | MXU 52 % MAC at 67 % DRAM: K-block accumulation in the MXU |
+| Bonsai 2 4B (GRQ QUAD) | PHYS lean ed482f26 | 10.13 (46a18fc1: 8.5; plain GRQ 3.4) | MXU 63 % MAC at 80 % DRAM, MXU_STARVE 10.5 %: the per-K-block drain wait (overlap: RTL) |
 | Cactus Needle 26M int8 / CQ4 | PHYS lean, == ISA | 19.7 / 16.7 | decoder step at run arguments (one program a prompt): card 675 / 457 tok/s int8 / CQ4 (was 19.7 / 16.7); device token loop |
 | LFM3 text decoder | PHYS lean | 8.3 | SWA / context past 255 |
 | MiniCPM5-2B Q4_K_M | PHYS lean | 6.7 | chat template |

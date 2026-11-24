@@ -103,3 +103,12 @@ MCOLS 8; RTL == ISA bit for bit):
 
 The rest of a block's extra cycles is the drain the next block waits for (not overlapped: that
 needs a read-after-write check in the drain). The card's gain is NOT RUN (needs a bitstream).
+
+On the card (2026-11-24, r5x lean ed482f26 = 46a18fc1 with PIPE, `r8_profile.cmd`, PHYSICAL FPGA
+VERIFIED, ECC 0/0): Bonsai 2 4B GRQ QUAD **13.16 Mcycles a token, 10.13 tok/s** (was 15.79 / 8.45:
+-16.7 % cycles, +20 % tok/s); DRAM 80 % of the port (was 67 %), MXU MAC 62.8 % (was 52 %),
+MXU_STARVE 10.5 % (was 25 %). BitNet (7.54) and Qwen3.5-0.8B (6.69 Mcycles) unchanged, as
+expected (no GSC). What is left of the starve is the wait for each K-block's drain (~104 cycles
+a block in RTL simulation): overlapping it needs the MXU to start the next command before the
+previous one drains (a RAW check in the drain), on the timing-critical MXU path; at the port's
+~95 % the ceiling is ~12 tok/s.
