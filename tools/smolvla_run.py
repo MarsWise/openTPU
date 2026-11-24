@@ -94,6 +94,8 @@ def main():
     ap.add_argument("--backend", default="isa", choices=("isa", "board"))
     ap.add_argument("--check-isa", action="store_true")
     ap.add_argument("--dev", default="/dev/xdma0")
+    ap.add_argument("--sequential", action="store_true",
+                    help="--resident on the card: a launch a program (default: one chained run)")
     ap.add_argument("--wsplit", action="store_true")
     ap.add_argument("--device-rows", action="store_true",
                     help="activations, LayerNorm / RMSNorm and tensor sums / products on the "
@@ -179,6 +181,19 @@ def main():
     return 0
 
 
+
+def run_on_card(board, progs, at: int, sequential: bool = False) -> dict:
+    """The resident programs on the card: one chained run (resident.run_board_chained: the
+    card goes from program to program by HALT CHAIN, the host starts it once) where the
+    bitstream chains (CAPS bit30) and `sequential` is off, else a launch a program."""
+    from opentpu import resident as RG
+    if not sequential and (board.info().get("caps") or {}).get("gen"):
+        try:
+            return RG.run_board_chained(board, progs, at)
+        except ValueError as e:                 # no room for the slots, a program too long
+            print(f"chained run refused ({e}): a launch a program")
+    return RG.run_board(board, progs, at)
+
 def run_resident(a, pol, x, ref, t_ref):
     """SmolVLA with nothing computed on the host (the inputs written once, the actions read)."""
     from opentpu import resident as RG, smolvla_resident as SR
@@ -224,7 +239,7 @@ def run_resident(a, pol, x, ref, t_ref):
         got, st = vla.actions(img), {"instructions": n}
     else:
         board.write(0, img)
-        st = RG.run_board(board, progs, -(-(len(img) + (1 << 20)) // 4096) * 4096)
+        st = run_on_card(board, progs, -(-(len(img) + (1 << 20)) // 4096) * 4096, a.sequential)
         got = board.read(vla.x.addr, vla.x.nbytes).view(np.float32).reshape(vla.chunk, vla.A)
         if a.check_isa:
             iso, _ = RG.run_isa(c, progs, img)

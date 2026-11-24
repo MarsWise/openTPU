@@ -19,7 +19,7 @@ r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
 | MiniCPM5-2B Q4_K_M | PHYS lean | 6.7 | chat template |
 | Granite 4.2 3B Q4_K_M | PHYS lean | 6.2 | int8 MLP for accuracy |
 | YOLOX-Nano, strict FPGA-only | PHYS lean (frame) | - | COCO-500 0.283 measured on r5x |
-| Diffusion Policy pusht 10 / 100 steps, SmolVLA tiny / base | PHYS lean | - | device loop (12948 launches), program cache (prepare 39.6 s) |
+| Diffusion Policy pusht 10 / 100 steps, SmolVLA tiny / base | PHYS lean | - | one chained run (HALT CHAIN slots: ISA / RTL, card NOT RUN; was 12948 launches), program cache (prepare 39.6 s) |
 | PaddleOCR-VL 1.6 | PHYS r5x (text right, ECC) | - | rerun with calibrate_until; preprocessing on the card |
 | Bonsai 2 2B | ISA (T5 off on lean: its layers go TERNARY_GSC) | - | card run |
 | Bonsai 1-bit (MLX) | NOT SUPPORTED on lean (needs TMM BIN) | - | - |

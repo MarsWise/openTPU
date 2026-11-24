@@ -401,3 +401,120 @@ def test_run_board_entries_once_per_distinct_program(workers):
     b2.waitc = False
     RG.run_board(b2, progs, 4096, workers=workers)
     assert all(e is None for _, _, e in b2.loads)
+
+
+def _chain_graph(reps: int = 3):
+    """Conv1d, GroupNorm + Mish, conv1d: three programs, `reps` times (a loop's steps)."""
+    torch.manual_seed(3)
+    m = torch.nn.Conv1d(64, 64, 3, 1, 1)
+    w, b = m.weight.detach().numpy(), m.bias.detach().numpy()
+    g = RG.Graph(cfg())
+    xt = g.tensor(16, 64, 2)
+    y = g.conv1d(xt, w, b, 1, 1)
+    y = g.group_norm(y, 8, np.ones(64), np.zeros(64), 1e-5, act="mish")
+    g.conv1d(y, w, b, 1, 1)
+    img = g.image()
+    g.put(img, xt, np.random.default_rng(1).normal(size=(16, 64)))
+    return g, g.compile() * reps, img
+
+
+def test_chained_run_isa_identical():
+    """The programs as one chained run (chain_slots: HALT CHAIN from slot to slot) leave the
+    image the sequential runs leave, bit for bit; two instructions more a link."""
+    g, progs, img = _chain_graph()
+    a, na = RG.run_isa(g.cfg, progs, img.copy())
+    at = -(-(len(img) + (1 << 16)) // 4096) * 4096
+    b, nb = RG.run_isa_chained(g.cfg, progs, img.copy(), at)
+    assert np.array_equal(a, b)
+    assert nb == na + 2 * (len(progs) - 1)
+
+
+@pytest.mark.parametrize("waitc", [False, True])
+def test_run_board_chained_one_launch(waitc):
+    """run_board_chained: the slots written at once (each its program with the chain tail and,
+    on a WAITC card, its wait entries: the program's own, computed once per distinct program,
+    and zeros for the tail), the first program loaded and run once; the card (an ISA model
+    that follows HALT CHAIN through the slots' words) leaves the sequential runs' image."""
+    import dataclasses
+    from opentpu import isa as I
+    from opentpu import waits as W
+    from opentpu.isasim import Machine
+    g, progs, img = _chain_graph()
+    ref, _ = RG.run_isa(g.cfg, progs, img.copy())
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=1 << 22)
+
+    class Card:
+        slices = 1
+
+        def __init__(self):
+            self.waitc = waitc
+            self._info = {"D": c.D, "cfg": {"IMEM_WORDS": c.IMEM_WORDS,
+                                            "DRAM_BYTES": c.DRAM_BYTES}}
+            self.dram = np.zeros(c.DRAM_BYTES, np.uint8)
+            self.loads, self.runs = [], 0
+
+        def write(self, addr, data):
+            data = np.asarray(data).view(np.uint8)
+            self.dram[addr:addr + len(data)] = data
+
+        def load_program(self, addr, words, entries=None):
+            self.loads.append((addr, np.asarray(words, np.uint32), entries))
+
+        def run(self, timeout=None):
+            self.runs += 1
+            _, w, _ = self.loads[-1]
+            prog = [I.Instr.decode(w[8 * k:8 * k + 8]) for k in range(len(w) // 8)]
+            m = Machine(c, [prog], [self.dram]).run(max_steps=1 << 40)
+            self.dram = m.slices[0].dram
+            return {"cycles": 1, "instructions": [m.slices[0].icount]}
+
+    W._mem.clear()
+    card = Card()
+    card.write(0, img)
+    at = -(-(len(img) + (1 << 16)) // 4096) * 4096
+    st = RG.run_board_chained(card, progs, at, workers=1)
+    assert card.runs == 1 and len(card.loads) == 1 and card.loads[0][0] == at
+    assert st["programs"] == len(progs) and st["distinct"] == len(progs) // 3
+    assert np.array_equal(card.dram[:len(img)], ref)
+    # the slots: each program's words with its tail, then (WAITC) its own entries + 3 zeros
+    words = [np.asarray(I.assemble(p), np.uint32) for _, p in progs]
+    ents = [W.entries(w, c.D, 1, prog=p) for w, (_, p) in zip(words, progs)] if waitc \
+        else [None] * len(words)
+    blob, slots, loaded = RG.chain_slots(words, ents, at, c.D, c.IMEM_WORDS)
+    assert np.array_equal(card.dram[at:at + 4 * len(blob)].view(np.uint32), blob)
+    for i, ((addr, n), (w, e)) in enumerate(zip(slots, loaded)):
+        assert addr % c.D == 0 and len(w) == 8 * n
+        assert np.array_equal(w[:len(words[i]) - 8], words[i][:-8])
+        if waitc:
+            k = len(words[i]) // 8 - 1
+            assert np.array_equal(e[:k], ents[i][:k]) and not e[k:].any()
+            o = (addr - at) // 4
+            assert np.array_equal(blob[o:o + len(W.loadable(w, e, c.D))], W.loadable(w, e, c.D))
+        else:
+            assert e is None
+
+
+@pytest.mark.parametrize("seq_wc", [0, 1])
+def test_chained_run_rtl(have_verilator, seq_wc):
+    """The chained run on the board RTL (the loader's HALT CHAIN from DRAM slots; with the
+    WAITC sequencer each slot's wait entries after its words) == the sequential ISA runs."""
+    import dataclasses
+    from opentpu import isa as I
+    from opentpu import rtlsim
+    from opentpu import waits as W
+    g, progs, img = _chain_graph(2)
+    ref, _ = RG.run_isa(g.cfg, progs, img.copy())
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=1 << 22)
+    at = -(-(len(img) + (1 << 16)) // 4096) * 4096
+    words = [np.asarray(I.assemble(p), np.uint32) for _, p in progs]
+    ents = [W.entries(w, c.D, 1, prog=p) for w, (_, p) in zip(words, progs)] if seq_wc \
+        else [None] * len(words)
+    blob, slots, loaded = RG.chain_slots(words, ents, at, c.D, c.IMEM_WORDS)
+    im = np.zeros(at + 4 * len(blob), np.uint8)
+    im[:len(img)] = img
+    im[at:] = blob.view(np.uint8)
+    first = [I.Instr.decode(loaded[0][0][8 * k:8 * k + 8]) for k in range(slots[0][1])]
+    ua = {"SEQ_WC": seq_wc, "WIN": 16} if seq_wc else None
+    drams, _, _ = rtlsim.run(c, [first], [im], axi=True, stall=30, seed=1, uarch=ua,
+                             boot=True)
+    np.testing.assert_array_equal(drams[0][:len(img)], ref)

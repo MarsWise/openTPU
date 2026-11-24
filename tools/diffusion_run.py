@@ -96,6 +96,8 @@ def main():
     ap.add_argument("--backend", default="isa", choices=["isa", "board"])
     ap.add_argument("--check-isa", action="store_true")
     ap.add_argument("--dev", default="/dev/xdma0")
+    ap.add_argument("--sequential", action="store_true",
+                    help="--resident on the card: a launch a program (default: one chained run)")
     ap.add_argument("--wsplit", action="store_true")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
@@ -182,6 +184,19 @@ def main():
     return 0
 
 
+
+def run_on_card(board, progs, at: int, sequential: bool = False) -> dict:
+    """The resident programs on the card: one chained run (resident.run_board_chained: the
+    card goes from program to program by HALT CHAIN, the host starts it once) where the
+    bitstream chains (CAPS bit30) and `sequential` is off, else a launch a program."""
+    from opentpu import resident as RG
+    if not sequential and (board.info().get("caps") or {}).get("gen"):
+        try:
+            return RG.run_board_chained(board, progs, at)
+        except ValueError as e:                 # no room for the slots, a program too long
+            print(f"chained run refused ({e}): a launch a program")
+    return RG.run_board(board, progs, at)
+
 def run_resident(a, pol, cfg, b, noise):
     """The policy on the device with nothing computed on the host: the observation (normalized
     images and states), the initial noise and the scheduler's per-step noise written once, every
@@ -233,7 +248,7 @@ def run_resident(a, pol, cfg, b, noise):
     else:
         board.write(0, img)
         at = -(-(len(img) + (1 << 20)) // 4096) * 4096
-        st = RG.run_board(board, progs, at)
+        st = run_on_card(board, progs, at, a.sequential)
         got = board.read(loop.sample.addr, loop.sample.nbytes).view(np.float32)
         got = got.reshape(-1, loop.A)[loop.sample.pad:loop.sample.pad + loop.T]
         if a.check_isa:

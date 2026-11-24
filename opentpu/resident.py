@@ -377,6 +377,101 @@ def run_board(board, progs, at: int, workers: int | None = None) -> dict:
     return st
 
 
+
+def chain_slots(words: list, ents: list, at: int, D: int, imem_words: int):
+    """The programs as one chained run (docs/isa.md "HALT CHAIN"): program i's final HALT
+    becomes `LI R1, slot i+1; LI R2, its instructions; HALT CHAIN R1, R2` (the last keeps its
+    HALT), each in its own slot from DRAM byte `at` (D-byte aligned), with its wait entries
+    after it where `ents` has them (WAITC: waits.loadable; the three control instructions
+    take zero entries: none matters for them). Returns (blob: uint32 words to write at `at`,
+    [(slot address, instructions)], [(words, entries)] each slot's program as loaded)."""
+    from . import isa as I
+    from . import waits as W
+    n = len(words)
+    lens = [len(w) // 8 + (2 if i + 1 < n else 0) for i, w in enumerate(words)]
+    waitc = bool(ents) and ents[0] is not None
+    if max(lens) > imem_words // 8:
+        raise ValueError(f"a chained program of {max(lens)} instructions: IMEM holds "
+                         f"{imem_words // 8}")
+    # a slot's bytes: the words padded to D bytes, then (WAITC) 8 bytes of entries each
+    slot = [-(-32 * k // D) * D + (8 * k if waitc else 0) for k in lens]
+    addrs = [at]
+    for b in slot[:-1]:
+        addrs.append(addrs[-1] + -(-b // D) * D)
+    out, loaded = [], []
+    for i, w in enumerate(words):
+        w = np.asarray(w, "<u4")
+        last = w[-8:]
+        if (last[0] & 0xFF) != I.HALT or (last[0] >> 24) & I.F_CHAIN:
+            raise ValueError(f"program {i} does not end with a plain HALT")
+        e = None if not waitc else np.asarray(ents[i], np.uint64)
+        if i + 1 < n:
+            tail = np.asarray(I.assemble([I.li(1, addrs[i + 1]), I.li(2, lens[i + 1]),
+                                          I.halt(chain=True, ra=1, rb=2)]), "<u4")
+            w = np.concatenate([w[:-8], tail])
+            if waitc:
+                e = np.concatenate([e[:-1], np.zeros(3, np.uint64)])
+        loaded.append((w, e))
+        img = W.loadable(w, e, D) if waitc else w
+        pad = np.zeros(-(-4 * len(img) // D) * D // 4 - len(img), "<u4")
+        out.append(np.concatenate([img, pad]))
+    return np.concatenate(out), list(zip(addrs, lens)), loaded
+
+
+def run_isa_chained(cfg, progs, img: np.ndarray, at: int) -> tuple[np.ndarray, int]:
+    """run_isa's programs as one chained run (chain_slots, from `at`): (image, instructions,
+    the chain slots' area included: [:len(img)] is the image)."""
+    import dataclasses
+    from . import isa as I
+    from .isasim import Machine
+    words = [np.asarray(I.assemble(p), np.uint32) for _, p in progs]
+    blob, slots, loaded = chain_slots(words, [None] * len(words), at, cfg.D, cfg.IMEM_WORDS)
+    end = at + 4 * len(blob)
+    size = 1 << max(20, (end - 1).bit_length())
+    c = dataclasses.replace(cfg, DRAM_BYTES=size)
+    im = np.zeros(size, np.uint8)
+    im[:len(img)] = img
+    im[at:end] = blob.view(np.uint8)
+    first = [I.Instr.decode(loaded[0][0][8 * k:8 * k + 8]) for k in range(slots[0][1])]
+    s = Machine(c, [first], [im]).run(max_steps=1 << 40).slices[0]
+    return s.dram[:len(img)].copy(), s.icount
+
+
+def run_board_chained(board, progs, at: int, workers: int | None = None,
+                      timeout: float = 600.0) -> dict:
+    """run_board's programs as one run on the card: every program written into its chain slot
+    (chain_slots) at once, the first loaded and started; the card chains through the rest
+    (HALT CHAIN: the program loader's DRAM read each) and the host polls one halt. The wait
+    entries once per distinct program, as run_board. The stats split the wall: prepare
+    (assembly, entries, slots), load (the slots' write and the first load), run."""
+    import time
+    from . import isa as I
+    st = {"runs": 1, "programs": len(progs)}
+    t0 = time.perf_counter()
+    ps = [p for _, p in progs]
+    words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
+    ents = board_entries(board, words, ps, workers)
+    info = getattr(board, "_info", None) or board.info()
+    D = info["D"]
+    imem = (info.get("cfg") or {}).get("IMEM_WORDS") or getattr(getattr(board, "cfg", None),
+                                                                "IMEM_WORDS", 1 << 15)
+    blob, slots, loaded = chain_slots(words, ents, at, D, imem)
+    room = (info.get("cfg") or {}).get("DRAM_BYTES")
+    if room and at + 4 * len(blob) > room:
+        raise ValueError(f"the chain slots end at {at + 4 * len(blob):#x}, past the DRAM "
+                         f"({room:#x})")
+    st["distinct"] = len({w.tobytes() for w in words}) if len(words) < 100000 else None
+    st["slots_mib"] = round(4 * len(blob) / 2**20, 1)
+    st["prepare_s"] = round(time.perf_counter() - t0, 2)
+    t1 = time.perf_counter()
+    board.write(at, blob.view(np.uint8))
+    board.load_program(at, loaded[0][0], loaded[0][1])
+    t2 = time.perf_counter()
+    r = board.run(timeout=timeout)
+    st["load_s"], st["run_s"] = round(t2 - t1, 2), round(time.perf_counter() - t2, 2)
+    st["cycles"], st["instructions"] = r["cycles"], r["instructions"][0]
+    return st
+
 # ---------------------------------------------------------------- 2-D (NHWC) tensors
 class T2:
     """A device image [H, W, C] (one sample), `border` zero pixels around it and `tail` words
