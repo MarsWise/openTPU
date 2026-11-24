@@ -114,8 +114,10 @@ set_max_delay -datapath_only -from $c_ucl -through [get_pins -quiet -filter {DIR
 # write-data FIFO u_of and the tag FIFO u_tag (data, write enables), the output command register
 # (oc, oc_v) and the three FIFOs' write pointers; the arbiter (run, cur_x, rm_busy, rm_x), the
 # reads in flight and not yet in their FIFO (a_out, x_out, a_pend, x_pend), the read slots
-# (a_seq, x_seq), each master's commands in the output queues (a_nq, x_nq) and the four input
-# FIFOs' read pointers. (Two ports, ld-2port routed: the same kinds, 268 CDC-13, 152 CDC-1 and
+# (a_seq, x_seq), each master's commands in the output queues (a_nq, x_nq), XDMA's batch timer
+# (g_xt: x_age, x_ripe; reset whenever x_ok is low, so an empty FIFO's changing head never reaches
+# them: ed482f26's report_cdc listed them, 4 CDC-1 and 36 CDC-15) and the four input FIFOs' read
+# pointers. (Two ports, ld-2port routed: the same kinds, 268 CDC-13, 152 CDC-1 and
 # 108 CDC-15 at the new endpoints before they were listed here.) Safe by the pointer protocol: an
 # entry is read only after the write pointer that covers it has crossed (two uclk flip-flops
 # after the source cycle that wrote it; the RAM paths are limited to one uclk period above), and
@@ -134,7 +136,7 @@ set_max_delay -datapath_only -from $c_ucl -through [get_pins -quiet -filter {DIR
 # paths, so a new path from these RAMs into other logic is still reported.
 set w_src [get_pins -quiet -filter {IS_LEAF && REF_PIN_NAME == CLK} -of_objects [get_cells -quiet -hierarchical -filter {NAME =~ *u_aq/mem_reg* || NAME =~ *u_ad/mem_reg* || NAME =~ *u_xq/mem_reg* || NAME =~ *u_xd/mem_reg*}]]
 set w_ram [get_pins -quiet -filter {IS_LEAF && (REF_PIN_NAME == I || REF_PIN_NAME == WE)} -of_objects [get_cells -quiet -hierarchical -filter {NAME =~ *u_oq/mem_reg* || NAME =~ *u_of/mem_reg* || NAME =~ *u_tag/mem_reg*}]]
-set w_ff  [get_pins -quiet -filter {DIRECTION == IN && REF_PIN_NAME != C} -of_objects [get_cells -quiet {g_port[*].oc_reg[*] g_port[*].oc_v_reg g_port[*].u_oq/wp_reg* g_port[*].u_of/wp_reg* g_port[*].u_tag/wp_reg* run_reg[*] cur_x_reg rm_busy_reg rm_x_reg a_out_reg[*] x_out_reg[*] a_pend_reg[*] x_pend_reg[*] a_seq_reg[*] x_seq_reg[*] a_nq_reg[*] x_nq_reg[*] u_aq/rbin_reg* u_aq/rgray_reg* u_ad/rbin_reg* u_ad/rgray_reg* u_xq/rbin_reg* u_xq/rgray_reg* u_xd/rbin_reg* u_xd/rgray_reg*}]]
+set w_ff  [get_pins -quiet -filter {DIRECTION == IN && REF_PIN_NAME != C} -of_objects [get_cells -quiet {g_port[*].oc_reg[*] g_port[*].oc_v_reg g_port[*].u_oq/wp_reg* g_port[*].u_of/wp_reg* g_port[*].u_tag/wp_reg* run_reg[*] cur_x_reg rm_busy_reg rm_x_reg a_out_reg[*] x_out_reg[*] a_pend_reg[*] x_pend_reg[*] a_seq_reg[*] x_seq_reg[*] a_nq_reg[*] x_nq_reg[*] g_xt.x_age_reg[*] g_xt.x_ripe_reg u_aq/rbin_reg* u_aq/rgray_reg* u_ad/rbin_reg* u_ad/rgray_reg* u_xq/rbin_reg* u_xq/rgray_reg* u_xd/rbin_reg* u_xd/rgray_reg*}]]
 set w_ar  [get_pins -quiet -filter {IS_LEAF && REF_PIN_NAME == CLK} -of_objects [get_cells -quiet -hierarchical -filter {NAME =~ *u_ar/mem_reg*}]]
 set w_why "otpu_mem_ch: an input FIFO's head (distributed RAM, read asynchronously in uclk) into the uclk arbiter and output logic; read only after its write pointer crossed, not rewritten before the read pointer crossed back; loads qualified by the FIFO's registered not-empty (oc's value: by c_cmd_valid)"
 if {[llength $w_src] && [llength $w_ram]} {

@@ -135,3 +135,42 @@ if {[llength $xr_src] && [llength $xr_dst]} {
 if {[catch {create_waiver -type METHODOLOGY -id {TIMING-9} -user "otpu_native_sys" -description "otpu_mem_ch's FIFO heads (distributed RAM read asynchronously across the clocks, guarded by the gray pointers) and XDMA's read data from them; each crossing is waived in report_cdc by its two ends"} msg]} {
   puts "CRITICAL WARNING: \[otpu_top_native.tcl\] TIMING-9 waiver not created: $msg"
 }
+
+# ---- report_cdc, the rest of ed482f26's critical rows (2026-11-24 review, docs/nextgen/CDC_SIGNOFF.md):
+# (1) LiteDRAM's CSR AXI-Lite crossing (LiteX AXI CDC, u_ld/{aw,w,b,ar,r}_cdc): 3-bit gray-coded
+#     FIFO pointers into MultiReg synchronizers, cut by LiteX's set_false_path to mr_ff cells
+#     (CDC-6, 10 rows). A false path leaves their skew unbounded; set_bus_skew bounds it to one
+#     period of the faster of the two clocks (7.5 ns), so a pointer is never seen with two bits in
+#     flight. Then waived.
+# (2) CDC-10: LiteDRAM's CRG reset (crg_rst0 = rst | soc_rst, soc_rst = reset_wr_stb &
+#     reset_storage[0], the ctrl_reset CSR) into the MMCM / PLL reset registers FDCE / FDCE_8 in
+#     the 50 MHz input clock. The host never writes ctrl_reset (opentpu/host: no use; csr.csv only),
+#     so reset_storage[0] stays 0 and soc_rst is constant: the combinational term cannot glitch.
+#     Waived on that ground; a host change that writes ctrl_reset must revisit it.
+# (3) CDC-13: XDMA's pipe_clock pclk_sel into its BUFGCTRL select (Xilinx IP, by design).
+set ld_gs [get_pins -quiet -filter {REF_PIN_NAME == C} -of_objects [get_cells -quiet -hierarchical -filter {NAME =~ u_ld/*_cdc_cdc_graycounter*_q_reg*}]]
+set ld_gd [get_pins -quiet -filter {REF_PIN_NAME == D} -of_objects [get_cells -quiet -hierarchical -filter {NAME =~ u_ld/xilinxmultiregimpl*_regs0_reg*}]]
+if {[llength $ld_gs] && [llength $ld_gd]} {
+  if {[catch {set_bus_skew -from [get_cells -of_objects $ld_gs] -to [get_cells -of_objects $ld_gd] 7.5} msg]} {
+    puts "CRITICAL WARNING: \[otpu_top_native.tcl\] LiteDRAM CSR gray pointers: set_bus_skew not set: $msg"
+  }
+  if {[catch {create_waiver -type CDC -id {CDC-6} -user "otpu_native_sys" -description "LiteDRAM's CSR AXI-Lite crossing (LiteX AXI CDC): 3-bit gray-coded FIFO pointers into MultiReg synchronizers, one bit changing per source cycle; set_bus_skew 7.5 ns bounds their skew" -from $ld_gs -to $ld_gd} msg]} {
+    puts "CRITICAL WARNING: \[otpu_top_native.tcl\] CDC-6 waiver for LiteDRAM's CSR crossing not created: $msg"
+  }
+} else {
+  puts "CRITICAL WARNING: \[otpu_top_native.tcl\] LiteDRAM CSR gray pointers: [llength $ld_gs] sources, [llength $ld_gd] synchronizers"
+}
+set rs_src [get_pins -quiet {u_ld/reset_storage_reg[*]/C}]
+set rs_dst [get_pins -quiet {u_ld/FDCE/D u_ld/FDCE_8/D}]
+if {[llength $rs_src] && [llength $rs_dst]} {
+  if {[catch {create_waiver -type CDC -id {CDC-10} -user "otpu_native_sys" -description "LiteDRAM's CRG reset: crg_rst0 = rst | (reset_wr_stb & reset_storage\[0\]) into the MMCM / PLL reset registers; the host never writes ctrl_reset, so reset_storage\[0\] stays 0 and the term is constant (no glitch)" -from $rs_src -to $rs_dst} msg]} {
+    puts "CRITICAL WARNING: \[otpu_top_native.tcl\] CDC-10 waiver for LiteDRAM's CRG reset not created: $msg"
+  }
+}
+set pc_src [get_pins -quiet -hierarchical -filter {NAME =~ u_bd/*pipe_clock_i/pclk_sel_reg/C}]
+set pc_dst [get_pins -quiet -hierarchical -filter {NAME =~ u_bd/*pipe_clock_i/pclk_i1_bufgctrl.pclk_i1/S*}]
+if {[llength $pc_src] && [llength $pc_dst]} {
+  if {[catch {create_waiver -type CDC -id {CDC-13} -user "otpu_native_sys" -description "XDMA's pipe_clock: pclk_sel into its BUFGCTRL select (Xilinx IP, the clock switch's own design)" -from $pc_src -to $pc_dst} msg]} {
+    puts "CRITICAL WARNING: \[otpu_top_native.tcl\] CDC-13 waiver for XDMA's pclk_sel not created: $msg"
+  }
+}
