@@ -1,5 +1,29 @@
 # Nextgen implementation progress
 
+## Kokoro-82M on the device, card test package for 81dc3958 (2026-11-24, night)
+
+- **Kokoro-82M whole graph** (`opentpu/kokoro_graph.py`, `tools/kokoro_card.py`): every model
+  operation of KModel.forward_with_tokens on the device, in two graphs.
+  - Graph A: PL-BERT, the duration encoder, the durations, the text encoder.
+  - Graph B: built for the rounded durations. It covers the alignment row copies, F0Ntrain, the
+    decoder, and SineGen (phases mod 1, linear interpolation, VOP RAND Box-Muller noise). Then
+    the source STFT (fp32 DFT, atan2), the generator and the iSTFT.
+  - The host only maps phonemes to ids and picks the voice row. It reads back T durations
+    (graph B's shape) and writes the seed.
+  - The reference is hexgrad's kokoro 0.9.4 modules, vendored in `tools/kokoro/ref`.
+    `tests/test_kokoro_graph.py`: 4 passed.
+  - ISA measurements: graph A cos 0.998-0.99998 with equal durations; F0 / N 0.99999; log-mel
+    cos 0.994; generator alone 22.1 dB.
+  - Card: `r8_kokoro.cmd`.
+- `resident.Graph.conv1d` splits long outputs into row-block programs (IMEM).
+- **Card scripts for the new firmware:**
+  - `r8_card_check`: 3 GRQ QUAD 2-row cases and the TGQ4M bit check. Board model: 5/5 GRQ QUAD
+    cases pass.
+  - `r8_all_tests.cmd new`: profile, Bonsai MTP, Qwen3.5 MTP, LFM3 fp4, Ouro, Dory, Maple, the
+    ISA-only HF models (`r8_more_models`: ReasonLite, LFM2.5 thinking, FunctionGemma,
+    Qwen3.5-4B fp4), PaddleOCR, Kokoro.
+  - `llm_card.py`: `ouro` / `dory` kinds.
+
 ## GRQ QUAD of 2 rows + drain overlap (RTL), Maple-Preview, Qwen3.5 MTP / LFM3 fp4 card scripts (2026-11-24)
 
 - **GRQ QUAD of 2 rows** (`TGQ4M`, CAPS2 bit21; docs/mtp.md 11.1). This was the reason Bonsai MTP

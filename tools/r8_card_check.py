@@ -61,7 +61,8 @@ LEFT_OUT = {R8A_HASH: R8A_LEFT_OUT, R8X_HASH: R8X_LEFT_OUT, R8N_HASH: R8N_LEFT_O
 R8_CAPS2 = ("tgsc", "tbin", "tbgsc", "vcmp", "vu8", "tgrq", "vrand", "tcq", "tatan", "qst4",
             "ldx", "td5", "vbfly", "vaff", "qst6", "vcswp")
 R8_SIM = ("TPAIR", "TQUAD", "TFN", "DSTEP", "TGSC", "VCMP", "TBIN", "TBGSC", "VU8", "TGRQ",
-          "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4")
+          "VRAND", "TCQ", "TATAN", "QST4", "LDX", "TD5", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4",
+          "TGQ4M")
 IMG_MAX, DUMP, ZERO, END = 0x200000, 0x200000, 0x280000, 0x300000
 
 
@@ -79,6 +80,9 @@ def caps_checks(info: dict, sim: bool = False) -> list:
         extra = [k for k in gone if c2.get(k)]
         out.append((not extra, "CAPS2: the build leaves out " + " / ".join(gone),
                     ", ".join(extra)))
+    if h == R8M_HASH:
+        out.append((bool(c2.get("tgq4m")), "CAPS2: GRQ QUAD of 2 rows (TGQ4M, bit21)",
+                    "set" if c2.get("tgq4m") else "clear: not the 81dc3958 build"))
     known = (R8Q_HASH, *LEFT_OUT) if c2.get("tgq4") else (R8_HASH,)
     out.append((sim or h in known, "CFG_HASH is r8's",
                 f"{h:#010x}, r8 {R8_HASH:#010x}, with GRQ QUAD {R8Q_HASH:#010x}, area build "
@@ -174,6 +178,12 @@ def r8_cases(card) -> list:
         for kb, acc, n in ((5, False, 20), (7, True, 36)):
             cfg, img, head, gq, quad = GQ.gq4_case(kb, acc, n, mcols=min(8, card.MCOLS))
             out.append((f"TMM GRQ QUAD (KB {kb}{', ACC' if acc else ''})",
+                        head + [quad, gq, quad, I.halt()], img))
+    if getattr(card, "TGQ4M", False):            # GRQ QUAD of 2 rows (CAPS2 bit21, 81dc3958)
+        for kb, acc, n, ors in ((4, True, 8, 12), (7, True, 36, 44), (5, False, 20, 23)):
+            cfg, img, head, gq, quad = GQ.gq4_case(kb, acc, n, mcols=min(8, card.MCOLS), m=2,
+                                                   ors=ors)
+            out.append((f"TMM GRQ QUAD 2 rows (KB {kb}, N {n}, rs {ors}{', ACC' if acc else ''})",
                         head + [quad, gq, quad, I.halt()], img))
     for dense in ((False, True) if getattr(card, "TD5", False) else (False,)):
         _, (cfg, prog, img) = T5.run(24, 2, 3, gsc=True, dense=dense)

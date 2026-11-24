@@ -226,8 +226,13 @@ class Graph:
         view = Tensor(x.addr + 4 * ((x.pad - pad) * Cin), (Lo, k * Cin), (stride * Cin, 1))
         wk = np.ascontiguousarray(w.transpose(0, 2, 1).reshape(Cout, k * Cin))
         b = np.zeros(Cout, np.float32) if b is None else b
-        self.op(name, dense_k, x=view, w=self.weight(wk), b=self.vec(b), y=y.rows(), M=Lo,
-                K=k * Cin, act=act)
+        wt, bt = self.weight(wk), self.vec(b)
+        ch = [(r, min(Lo, r + LINEAR_ROWS)) for r in range(0, Lo, LINEAR_ROWS)]
+        for i, (r0, r1) in enumerate(ch):       # many rows: a program per row block (IMEM;
+            v = view if len(ch) == 1 else Tensor(view.base + 4 * r0 * stride * Cin,  # Kokoro's
+                                                 (r1 - r0, k * Cin), (stride * Cin, 1))  # 7321)
+            self.op(name if len(ch) == 1 else f"{name}.{i}", dense_k, x=v, w=wt, b=bt,
+                    y=y.rows(r0, r1), M=r1 - r0, K=k * Cin, act=act)
         return y
 
     def conv_transpose1d(self, x: DT, w: np.ndarray, b: np.ndarray | None, stride: int,

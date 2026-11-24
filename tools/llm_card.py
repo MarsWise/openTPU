@@ -11,6 +11,8 @@ device graph), against the fp32 reference of the same weights:
     python tools/llm_card.py lfm3 DIR          LFM3's text decoder, weights by row range
                                                (lfm3.PartWeights: index.json, *.bin, tokenizer.json)
     python tools/llm_card.py gguf FILE.gguf    a llama-architecture GGUF (MiniCPM5-2B, Granite 4.2)
+    python tools/llm_card.py ouro DIR          Ouro-1.4B / 2.6B (looped, llm/ouro_dev.py)
+    python tools/llm_card.py dory FILE.gguf    Dory 1.0 4B (looped nGPT, llm/dory.py)
     python tools/llm_card.py maple FILE.gguf   Maple-Preview (TQ2_0 ternary MoE, llm/maple.py):
                                                --wformat tgsc, --experts slots a layer (the host
                                                streams the others), cap <= 512
@@ -60,6 +62,31 @@ def gguf_model(path):
     index = {p: i for i, p in enumerate(vocab)}
     ids = [spec.bos] + [index[p] for p in PIECES]
     return (spec, w, ids, lambda: Q3.reference_logits(spec, C._Lazy(w), ids),
+            lambda t: "".join(vocab[i] for i in t).replace("Ġ", " ").replace("Ċ", "\n"))
+
+
+def ouro_model(path):
+    """Ouro-1.4B / 2.6B (HF folder: config.json, model.safetensors, tokenizer.json; the folder's
+    .py files are not run): the layer stack run total_ut_steps times (ouro_dev)."""
+    from opentpu.llm import ouro_dev as O
+    from opentpu.llm.qwen3 import load_weights
+    import tokenizers
+    spec, W = O.Spec.from_hf(path), load_weights(path)
+    tok = tokenizers.Tokenizer.from_file(os.path.join(path, "tokenizer.json"))
+    ids = tok.encode(PROMPT, add_special_tokens=False).ids
+    return spec, W, ids, lambda: O.reference_logits(spec, W, ids), tok.decode
+
+
+def dory_model(path):
+    """NVIDIA Nemotron-Labs Dory 1.0 4B (GGUF architecture dory: looped nGPT, llm/dory.py)."""
+    from opentpu.llm import dory as DY
+    R = DY.Raw(path)
+    spec = DY.spec_from_gguf(R.g)
+    vocab = R.g.kv["tokenizer.ggml.tokens"]
+    index = {p: i for i, p in enumerate(vocab)}
+    ids = [index[p] for p in PIECES] if all(p in index for p in PIECES) else \
+        [1784, 8961, 1307, 5498, 1395]          # (tests/test_dory.py's "The capital of France is")
+    return (spec, DY.Weights(spec, R), ids, lambda: DY.reference_logits(spec, R, ids),
             lambda t: "".join(vocab[i] for i in t).replace("Ġ", " ").replace("Ċ", "\n"))
 
 
@@ -142,7 +169,7 @@ def run(name, spec, W, ids, reference, decode, cfg, backend=None, ecc=None, cap=
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("kind", choices=["lfm3", "gguf", "maple"])
+    ap.add_argument("kind", choices=["lfm3", "gguf", "maple", "ouro", "dory"])
     ap.add_argument("path")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--isa", action="store_true")
@@ -157,7 +184,8 @@ def main() -> int:
     if a.formats:
         os.environ["OTPU_FORMATS"] = a.formats
     spec, W, ids, reference, decode = {"lfm3": lfm3_model, "gguf": gguf_model,
-                                       "maple": maple_model}[a.kind](a.path)
+                                       "maple": maple_model, "ouro": ouro_model,
+                                       "dory": dory_model}[a.kind](a.path)
     name = f"{a.kind} {Path(a.path).name}"
     if a.isa:
         from opentpu.isasim import board_config

@@ -23,13 +23,13 @@ r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
 | PaddleOCR-VL 1.6 | PHYS r5x (text right, ECC) | - | rerun with calibrate_until; preprocessing on the card |
 | Bonsai 2 2B | ISA (T5 off on lean: its layers go TERNARY_GSC) | - | card run |
 | Bonsai 1-bit (MLX) | NOT SUPPORTED on lean (needs TMM BIN) | - | - |
-| Ouro 1.4B, Dory 4B, MiniCPM-V | ISA | - | card runs |
+| Ouro 1.4B, Dory 4B, MiniCPM-V | ISA | - | card: r8_llm.cmd ouro / dory (MiniCPM-V: no weights here) |
 | Qwen3.5-4B, LFM2-2.6B, LFM2.5-8B-A1B, gemma-4, SmolLM3, Phi-4-mini | SOURCE INTEGRATED | - | first card run |
 | ReasonLite 0.6B, FunctionGemma 270M | IMPLEMENTING | - | whole graph |
 | Bonsai 2 4B + MTP | PHYS lean ed482f26: replies == plain greedy, slower (verify on plain GRQ) | 4.9-6.6 | GRQ QUAD of 2 rows (TGQ4M, RTL SIMULATED; r8_build_lean.cmd 81dc3958) |
 | Maple-Preview 20B-A1B (TQ2_0 ternary MoE, 256 experts top 8) | ISA (tiny Maple with TQ2_0 structure: tgsc layers and experts, clamped SwiGLU, RoPE kinds, expert streaming bit exact) | - | card: r8_llm.cmd maple (128 slots a layer, context <= 512) |
-| MusicGen-small, SD 1.5 | PLANNED | - | - |
-| Kokoro 82M | ISA, decoder blocks on real weights (resblock, conv_post + iSTFT 41-47 dB) | - | atan2 VPU polynomial done (TATAN off); full graph |
+| MusicGen-small, SD 1.5 | IMPLEMENTING (SD 1.5 256 px) / PLANNED | - | - |
+| Kokoro 82M v1.0 (af_heart) | ISA, the whole graph (PL-BERT, durations, text encoder, alignment, F0 / N, decoder, SineGen with VOP RAND noise, STFT, generator, iSTFT) on the device: durations equal, F0 / N cos 0.99999, log-mel cos 0.994; generator alone on the reference inputs: waveform cos 0.997, 22.1 dB | - | card: r8_kokoro.cmd |
 
 ## r5x status per model (2026-11-21)
 

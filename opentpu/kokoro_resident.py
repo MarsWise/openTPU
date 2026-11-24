@@ -180,6 +180,15 @@ def _overlap(a, b, c, d, gain, y):
     ol.store(y, wave * ol.load(gain))
 
 
+def _blocks(g, L: int, C: int, most: int = 512):
+    """g._chunks' row blocks, each at most `most` rows (a program's instructions grow with its
+    rows: Kokoro's 7321 frames in one overlap-add were 6559 instructions)."""
+    out = []
+    for lo, hi in g._chunks(L, C):
+        out += [(r, min(hi, r + most)) for r in range(lo, hi, most)]
+    return out
+
+
 def istft_head(g, x):
     """Kokoro Generator's final 22 channels to mono samples in [frames-1, 5].
 
@@ -191,7 +200,7 @@ def istft_head(g, x):
     if x.C != 2 * bins or x.L < 2:
         raise ValueError("Kokoro iSTFT needs at least two frames of 22 channels")
     z = g.tensor(x.L, 2 * bins)
-    for lo, hi in g._chunks(x.L, 4 * bins):     # (magnitude, phase, cos, sin: half the rows)
+    for lo, hi in _blocks(g, x.L, 4 * bins):    # (magnitude, phase, cos, sin: half the rows)
         g.op("kokoro.polar", _polar, x=x.rows(lo, hi), y=z.rows(lo, hi), bins=bins)
     t = np.arange(fft)
     angle = (2 * np.pi / fft) * t[:, None] * np.arange(bins)
@@ -205,13 +214,13 @@ def istft_head(g, x):
     # int8 MXU product: exp(log magnitude) magnifies the spectrum's error (28 dB at int8)
     B = g.const((window[:, None] * basis).astype(np.float32))
     bt = Tensor(B, (fft, 2 * bins), (2 * bins, 1))
-    for lo, hi in g._chunks(x.L, 4 * fft):
+    for lo, hi in _blocks(g, x.L, 4 * fft):
         g.op("kokoro.irfft", _irfft, z=z.rows(lo, hi), basis=bt, y=frames.rows(lo, hi),
              n=fft)
     y = g.tensor(x.L - 1, hop)
     # Center cropping starts at sample 10. A phase-q contribution to output
     # row j therefore comes from frame j+2-q. Padded frame rows are zero.
-    for lo, hi in g._chunks(y.L, hop * 4):
+    for lo, hi in _blocks(g, y.L, hop * 4):
         rows = np.arange(lo, hi)
         env = np.zeros((hi - lo, hop))
         views = []
@@ -239,7 +248,7 @@ def decoder_tail(g, x, weight_v, weight_g, bias):
         raise ValueError("invalid Kokoro conv_post weights")
     w = fold_weight_norm(v, weight_g)
     activated = g.tensor(x.L, x.C, pad=3)
-    for lo, hi in g._chunks(x.L, x.C):
+    for lo, hi in _blocks(g, x.L, x.C):
         g.op("kokoro.leaky_relu", _leaky, x=x.rows(lo, hi), y=activated.rows(lo, hi))
     spectrum = g.conv1d(activated, w, bias, pad=3, name="kokoro.conv_post")
     return istft_head(g, spectrum)
