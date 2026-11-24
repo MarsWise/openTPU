@@ -29,13 +29,14 @@ def test_atan_table_accuracy():
     assert T.tfn(T.BY_NAME["atan"], np.float32([1.0, 5.0]))[0] == np.float32(math.pi / 4)
 
 
-def test_atan2_reference_accuracy():
+@pytest.mark.parametrize("table", [True, False])
+def test_atan2_reference_accuracy(table):
     rng = np.random.default_rng(3)
     y = rng.normal(size=20000).astype(np.float32) * 10 ** rng.uniform(-3, 3, 20000).astype(np.float32)
     x = rng.normal(size=20000).astype(np.float32) * 10 ** rng.uniform(-3, 3, 20000).astype(np.float32)
     y[:6] = [0, 1, -1, 0, 1, -1]
     x[:6] = [0, 0, 0, -1, 1, -1]
-    got = A.reference(y, x).astype(np.float64)
+    got = A.reference(y, x, table).astype(np.float64)
     want = np.arctan2(y.astype(np.float64), x.astype(np.float64))
     assert np.abs(got - want).max() < 1e-6
 
@@ -45,19 +46,22 @@ def _k(a, b, out, N: int):
     ol.store(out[0:N], A.atan2(ol.load(a[0:N]), ol.load(b[0:N])))
 
 
-def _cfg():
+def _cfg(table=True):
     return Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16, DRAM_BYTES=1 << 24, TFN=True,
-                  DSTEP=True, VCMP=True, TATAN=True)
+                  DSTEP=True, VCMP=True, TATAN=table)
 
 
-@pytest.mark.parametrize("backend", ["isa", "rtl"])
-def test_atan2_kernel(backend, request):
+@pytest.mark.parametrize("backend, table", [("isa", True), ("rtl", True), ("isa", False),
+                                            ("rtl", False)])
+def test_atan2_kernel(backend, table, request):
+    """Bit for bit the reference: the TFN table, and the polynomial (lean firmware: no
+    TATAN, no TFN atan instruction in the program)."""
     if backend == "rtl":
         request.getfixturevalue("have_verilator")
     rng = np.random.default_rng(5)
     N = 200
     y, x = rng.normal(size=(2, N)).astype(np.float32)
     y[:4], x[:4] = [0, 1, -1, 2], [0, 0, -3, -2]
-    got = launch(_k, _cfg(), backend=backend, a=Input(y), b=Input(x), out=Output((N,)),
+    got = launch(_k, _cfg(table), backend=backend, a=Input(y), b=Input(x), out=Output((N,)),
                  N=N).outputs["out"]
-    np.testing.assert_array_equal(got.view(np.uint32), A.reference(y, x).view(np.uint32))
+    np.testing.assert_array_equal(got.view(np.uint32), A.reference(y, x, table).view(np.uint32))

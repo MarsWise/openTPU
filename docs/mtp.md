@@ -1228,6 +1228,58 @@ it.
 The wall rate trails the device's by MTP's bucket compiles. otpu-chat does not turn the program
 cache on, so a cold process pays them in its first reply.
 
+### 11.8 Native Bonsai 2 (2026-11-24)
+
+Ternary Bonsai 2 4B has an MTP layer only in PrismML's GGUF,
+`Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf`. The GGUF holds the pack's model: its blocks 0-31
+are, byte for byte, those of `-PQ2_0.gguf`, and its last block is the MTP layer
+(`qwen35.block_count` 33, `qwen35.nextn_predict_layers` 1).
+
+- **The MTP layer is not ternary.** Its blk.32 attention and MLP and `nextn.eh_proj`
+  (= `mtp.fc`, 5120 -> 2560) are Q8_0 in the model's basis, outside the Hadamard manifest.
+- **The norms** (`nextn.enorm`, `hnorm`, `shared_head_norm` = `mtp.pre_fc_norm_embedding`,
+  `pre_fc_norm_hidden`, `mtp.norm`) are stored as 1 + w, like every llama.cpp norm. This was
+  checked against Qwen3.5-2B's `mtp.*`. In zero-centred form:
+  - embedding norm: -0.47 here, -0.43 in the 2B;
+  - hidden norm: -0.22 here, -0.28 in the 2B.
+- **The head** is the model's tied head.
+
+How it runs (`bonsai2.BonsaiMTPWeights`, `load_weights(pack, mtp=True)`):
+
+- **Weights.** The model comes from the MLX pack, and `mtp.*` from the GGUF. The GGUF's model
+  must equal the pack's: some attention and MLP projections are compared exactly, and a
+  difference refuses the pair. `find_mtp_gguf` looks for the file:
+  - `$OTPU_BONSAI_MTP`;
+  - a `*MTP*.gguf` in the pack's directory;
+  - `models/bonsai2-4b-mtp/` (where `r8_fetch_models.cmd` and `r8_bonsai_mtp.cmd` put it).
+- **The image.** The MTP layer and fc are int8 rows (or fp4 with
+  `OTPU_BONSAI_MTP_FORMAT=fp4`, half the bytes a draft reads), with no Hadamard. The draft head
+  holds the model-basis rows of the tied head: the inverse rotation of the embedding.
+- **The verify** is the rows kernel, with 2 rows. Native Bonsai's Engine keeps 2 rows in its
+  I/O area when `Spec.mtp` is set.
+  - The rows are rotated once per DeltaNet layer, as the step's are.
+  - Every out-projection group is flushed whole, because its Hadamard block spans the group's
+    four heads.
+- **Tests** (`tests/test_bonsai_mtp.py`, ISA): a tiny native model gives plain greedy decode's
+  tokens:
+  - for the MTP's drafts and for drafts that are all right, all wrong or mixed;
+  - in the host loop, and in the device loop (V, E, D, D1).
+
+  Its committed states equal plain decode's word for word. The MTP program follows
+  `mtp_reference`, with int8 or fp4. The GGUF mapping is checked on a synthetic GGUF, and the
+  real file loads: 32 layers plus `mtp.*`, with the values above.
+
+Cost estimate for a draft, which has not been measured:
+
+| part | int8 | fp4 |
+|---|---|---|
+| MTP layer and fc | ~120 MB | about half |
+| draft head (fp4, 32K rows) | 42 MB | 42 MB |
+| share of a decode step's weight traffic | about 18% | about 10% |
+
+The verify of 2 rows reads the weights once. The card run, `r8_bonsai_mtp.cmd`, measures
+equality, acceptance and tok/s: three prompts, each plain, then `--mtp` int8, then fp4.
+
 ## 12. Open questions
 
 - The MTP dataflow (section 6.1) is **confirmed against mlx_vlm 0.6.8**'s Qwen3.5 drafter:

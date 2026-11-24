@@ -1,5 +1,22 @@
 # Nextgen implementation progress
 
+## Bonsai MTP, atan without TATAN, Kokoro blocks (2026-11-24)
+
+- **Bonsai 2 MTP** (docs/mtp.md 11.8). The MTP layer comes from PrismML's
+  `-PQ2_0-MTP-Q8_0.gguf`. Its main blocks are byte-identical to `-PQ2_0`'s. The MTP layer is
+  int8 (or fp4 with `OTPU_BONSAI_MTP_FORMAT`), with no Hadamard. On the ISA, a tiny native
+  model gives plain greedy decode's tokens, whatever the drafts, in the host loop and in the
+  device loop, and its states equal plain decode's. Not yet on the card: `r8_bonsai_mtp.cmd`.
+- **atan2 on the lean firmware.** `kernels/atan2.atan01` runs an odd polynomial of degree 15
+  on the VPU when the target has no TATAN. It is bit-exact on the ISA and on the RTL.
+- **Kokoro-82M decoder blocks** (Codex's `kokoro_resident.py`, finished):
+  - the real AdaINResBlock1 reaches cos 0.99988; Kokoro has no InstanceNorm affine, so its
+    defaults are used;
+  - in conv_post + iSTFT, the inverse DFT moved from an int8 MXU product to the fp32 VPU:
+    28.2 dB became 41.6-47.4 dB;
+  - the checkpoint is converted with `torch.load(weights_only=True)` (`tools/kokoro/convert.py`,
+    sha256 pinned).
+
 ## r5x lean: shared TFN ROM, one RAND generator (2026-11-22)
 
 - `otpu_se_comp`: one TFN coefficient ROM for each two lanes (dual-port block RAM, a port a lane): 4 copies instead of 8. `otpu_vpu` `RAND_W` (default 1): one VOP RAND generator, a RAND chunk one column a cycle through the composites' narrow-issue path; the numbers are the same (a function of each column's counter). RTL SIMULATED: test_se_comp 39, test_vrand 18, VPU / board / stream / TFN / atan / format gates 119, all passed.

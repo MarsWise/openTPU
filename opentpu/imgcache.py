@@ -77,10 +77,16 @@ def cache_dir() -> Path | None:
 
 def checkpoint(model_dir) -> tuple | None:
     """The identity of a checkpoint directory: (name, size, mtime, header hash) of its
-    config.json and *.safetensors files, or None (no directory, no weight file)."""
+    config.json and *.safetensors files, or None (no directory, no weight file); of a single
+    file (a GGUF), its own (the hash of its first 16 MiB: header and tensor table)."""
     if model_dir is None:
         return None
     d = Path(model_dir)
+    if d.is_file():                 # one weight file (Bonsai 2's MTP GGUF): its header part
+        st = d.stat()
+        with open(d, "rb") as f:
+            h = hashlib.blake2b(f.read(1 << 24), digest_size=16).hexdigest()
+        return ((d.name, st.st_size, st.st_mtime_ns, h),)
     files = sorted(d.glob("*.safetensors"))
     if not files:
         return None

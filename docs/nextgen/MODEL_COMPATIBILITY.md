@@ -26,7 +26,9 @@ r8_speed, r8_ttft; ECC 0 / 0 except one r8_ttft step, VERIFIED_RESULTS.csv).
 | Ouro 1.4B, Dory 4B, MiniCPM-V | ISA | - | card runs |
 | Qwen3.5-4B, LFM2-2.6B, LFM2.5-8B-A1B, gemma-4, SmolLM3, Phi-4-mini | SOURCE INTEGRATED | - | first card run |
 | ReasonLite 0.6B, FunctionGemma 270M | IMPLEMENTING | - | whole graph |
-| MusicGen-small, Kokoro 82M, SD 1.5 | PLANNED | - | Kokoro: atan as a VPU polynomial (TATAN off) |
+| Bonsai 2 4B + MTP | ISA (tiny native model; real GGUF loads) | - | card: r8_bonsai_mtp.cmd |
+| MusicGen-small, SD 1.5 | PLANNED | - | - |
+| Kokoro 82M | ISA, decoder blocks on real weights (resblock, conv_post + iSTFT 41-47 dB) | - | atan2 VPU polynomial done (TATAN off); full graph |
 
 ## r5x status per model (2026-11-21)
 

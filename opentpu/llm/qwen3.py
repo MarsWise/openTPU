@@ -254,9 +254,9 @@ def load_weights(model_dir, mtp: bool = False) -> Weights:
     opentpu/llm/mtp.py). Gemma 4: gemma4.load_weights (its PLE table read by rows)."""
     cfg = Path(model_dir) / "config.json"
     if cfg.exists() and json.loads(cfg.read_text()).get("model_type") == "prism_hadamard_qwen35":
-        if mtp:
-            raise ValueError("Bonsai 2 MTP has not been implemented")
-        from .bonsai2 import RotatedWeights
+        from .bonsai2 import BonsaiMTPWeights, RotatedWeights, find_mtp_gguf
+        if mtp:                         # (the MTP layer from PrismML's MTP GGUF)
+            return BonsaiMTPWeights(RotatedWeights(model_dir), find_mtp_gguf(model_dir))
         return RotatedWeights(model_dir)
     if cfg.exists() and isinstance(json.loads(cfg.read_text()).get("quantization"), dict):
         if mtp:
@@ -1637,8 +1637,8 @@ def _mlp(x, lw, spec: Spec, post=None):
     sid = ol.program_id()
     xs = ol.quantize(rmsnorm(x, ol.load(lw.g_post), spec.eps))
     wg, wu = lw.wg, lw.wu
-    if getattr(spec, "native_bonsai", False):
-        from dataclasses import replace
+    if getattr(spec, "native_bonsai", False) and wg.hsigns is not None:    # (Bonsai 2's MTP
+        from dataclasses import replace                                     # layer: int8)
         from ..kernels.hadamard import stationary
         xs = stationary(xs, wg)
         wg, wu = (replace(w, hsigns=None, hblock=0) for w in (wg, wu))
@@ -2511,7 +2511,9 @@ class Engine:
         if getattr(spec, "native_bonsai", False):
             # Initial native firmware path: one token per run. It preserves full Hadamard
             # blocks and uses the verified step decoder for prompt tokens as well.
-            rows, prompt_runs, tile_runs = 1, False, False
+            # (MTP decoding's verify: 2 rows a run, its DeltaNet groups flushed whole)
+            rows = 2 if getattr(spec, "mtp", False) else 1
+            prompt_runs, tile_runs = False, False
         self.spec, self.cap, self.block = spec, cap, block
         self.prog_cache = PC.enabled() if prog_cache is None else bool(prog_cache)
         self.prompt_runs = prompt_runs

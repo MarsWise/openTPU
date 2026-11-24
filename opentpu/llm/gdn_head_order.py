@@ -77,3 +77,10 @@ class GroupedGDNWeights(Mapping):
 
     def embedding_table(self):
         return self.source.embedding_table()
+
+    def head_rows(self, ids):
+        return self.source.head_rows(ids)
+
+    @property
+    def mtp(self):
+        return getattr(self.source, "mtp", False)

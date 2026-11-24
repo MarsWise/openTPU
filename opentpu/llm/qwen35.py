@@ -211,8 +211,8 @@ class Spec:
 
     def check(self, cfg: Config) -> None:
         S, D = cfg.S, cfg.D
-        if self.native_bonsai and (S != 1 or D != 128 or not cfg.TGSC or self.mtp):
-            raise ValueError("native Bonsai 2 requires one slice, D=128, TGSC firmware and no MTP")
+        if self.native_bonsai and (S != 1 or D != 128 or not cfg.TGSC):
+            raise ValueError("native Bonsai 2 requires one slice, D=128 and TGSC firmware")
         need = [(self.head_dim % D == 0, f"head_dim {self.head_dim} % D"),
                 (self.rope_dim % 2 == 0 and self.rope_dim <= self.head_dim, "rope_dim"),
                 (self.lin_dk % D == 0 and self.lin_dv % D == 0,
@@ -831,6 +831,12 @@ class Image(EmbedHost):
         self.subs = subs(self.plan, lambda k: self.layouts[k[1]].size[k[0]])
         if spec.mtp:                # an attention block after the model's (the formats without a
             gm = tuple(fmt(k, spec.layers) for k in ("delta", "attn", "gateup", "down"))  # range)
+            if spec.native_bonsai:  # Bonsai 2's MTP layer is not ternary (the GGUF's Q8_0 nextn
+                import os           # layer, model basis): int8 rows (OTPU_BONSAI_MTP_FORMAT=fp4:
+                mf = os.environ.get("OTPU_BONSAI_MTP_FORMAT", "int8")  # half the bytes a draft
+                if mf not in ("int8", "fp4"):
+                    raise ValueError(f"OTPU_BONSAI_MTP_FORMAT={mf}: int8 or fp4")
+                gm = (mf,) * 4      # reads), no Hadamard
             if gm not in self.layouts:
                 self.layouts[gm] = self._layout(gm, mlp, rb)
             self.keys += ((ATTN, gm),)
@@ -1145,7 +1151,10 @@ class Image(EmbedHost):
                          ("gm", "norm")):
                 put(0, mo[k], g1(f"mtp.{n}.weight"))
             put_q(mo["fc"], [W["mtp.fc.weight"]], self.mtp_fc)
-            put_q(mo["dh"], [head[:self.nd]], "fp4")
+            # the draft head's rows in the model's basis (native Bonsai 2's tied head is stored
+            # Hadamard-rotated; its inverse-rotated embedding rows are the model basis)
+            put_q(mo["dh"], [W.head_rows(np.arange(self.nd)) if spec.native_bonsai
+                             else head[:self.nd]], "fp4")
         put_head(self, W, qb, put, put_q, rows)     # (and the tied int8 head's gather scales)
         qb.wait()
         if self.lookup:
@@ -2066,6 +2075,13 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
         ol.store(gr[r, nl:2 * nl], br)
         del dr, br
     del ab, alog, dtb
+    wh = dn.wh
+    if spec.native_bonsai:          # the rows rotated once for every pair's projections (as
+        from ..kernels.hadamard import stationary       # _deltanet's: the same words)
+        xs = stationary(xs, dn.wh(0))
+
+        def wh(p):
+            return replace(dn.wh(p), hsigns=None, hblock=0)
     gn = ol.load(lw.gn)
     y = ol.zeros([R, spec.hidden])
     dstep = ol.has_dstep()
@@ -2208,8 +2224,8 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
         for j in range(1, min(K, p0 + 1)):              # positions p0-K+1 ..: the window
             sl = (K - 1 - j) * CP                       # (_past)
             ol.load(win[sl:sl + CP], out=X[K - 1 - j, :])
-        ol.dot(xs, dn.wh(p)[0:CP, :], out=X[K - 1:K - 1 + R, :])
-        ol.dot(xs, dn.wh(p)[CP:RP, :], out=Z)                            # z of a, of b
+        ol.dot(xs, wh(p)[0:CP, :], out=X[K - 1:K - 1 + R, :])
+        ol.dot(xs, wh(p)[CP:RP, :], out=Z)                            # z of a, of b
         if window:
             store_window(p, b)
 
@@ -2293,10 +2309,10 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
         ON = ol.empty([R, og * dv])                     # the group's normed, gated o
 
         def mm_x(p, t):
-            ol.dot(xs, dn.wh(p)[0:CP, :], out=PB[t][1][K - 1:K - 1 + R, :])
+            ol.dot(xs, wh(p)[0:CP, :], out=PB[t][1][K - 1:K - 1 + R, :])
 
         def mm_z(p, t):
-            ol.dot(xs, dn.wh(p)[CP:RP, :], out=PB[t][2])                 # z of a, of b
+            ol.dot(xs, wh(p)[CP:RP, :], out=PB[t][2])                 # z of a, of b
 
         def fetch(p, t, taps=True):
             X = PB[t][1]
@@ -2354,7 +2370,12 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
             if not last2:
                 mm_z(p + 2, t)
             if half is not None:
-                flush(ng - 1, ON[:, 2 * half * dv:(2 * half + 2) * dv], 2 * half, 2 * half + 2)
+                if spec.native_bonsai:      # the Hadamard block couples all four heads: the
+                    if half == 1:           # last group whole, once both halves are in ON
+                        flush(ng - 1, ON, 0, og)
+                else:
+                    flush(ng - 1, ON[:, 2 * half * dv:(2 * half + 2) * dv], 2 * half,
+                          2 * half + 2)
             elif g is not None:
                 flush(g, ON, 0, og)
             if not last2:
@@ -2396,7 +2417,12 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
             pair((g, q))
             ol.store(on[:, q * 2 * dv:(q + 1) * 2 * dv], ONp)
         flush(g, ol.load(on), 0, og)
-    if split:                                           # the last group, pair by pair
+    if split and spec.native_bonsai:    # (Hadamard blocks span the group: whole, as above)
+        for q in range(gp):
+            pair((ng - 1, q))
+            ol.store(on[:, q * 2 * dv:(q + 1) * 2 * dv], ONp)
+        flush(ng - 1, ol.load(on), 0, og)
+    elif split:                                         # the last group, pair by pair
         for q in range(gp):     # (unrolled: its out_proj columns' first block, k0, is an MM's
             #                     immediate)
             pair((ng - 1, q))

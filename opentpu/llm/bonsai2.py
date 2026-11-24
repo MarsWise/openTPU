@@ -221,6 +221,10 @@ class RotatedWeights(Mapping):
             self._big = (name, value)
         return value
 
+    def head_rows(self, ids):
+        """Rows of the tied head in the model's basis (the embedding's inverse rotation)."""
+        return self.native["model.embed_tokens.weight"].embedding_reference(list(ids))
+
     def embedding_table(self):
         mat = self.native["model.embed_tokens.weight"]
         out = np.empty(mat.shape, np.float32)
@@ -267,6 +271,12 @@ _GG = {"attn_norm.weight": ("input_layernorm.weight", "norm"),
        "ffn_gate.weight": ("mlp.gate_proj.weight", None),
        "ffn_up.weight": ("mlp.up_proj.weight", None),
        "ffn_down.weight": ("mlp.down_proj.weight", None)}
+# the MTP layer's own tensors (blk.<layers>.nextn.*, after its transformer block) -> HF names;
+# llama.cpp stores every norm as 1 + w (checked: the nextn norms against Qwen3.5-2B's mtp.*)
+_NEXTN = {"nextn.eh_proj.weight": ("mtp.fc.weight", None),
+          "nextn.enorm.weight": ("mtp.pre_fc_norm_embedding.weight", "norm"),
+          "nextn.hnorm.weight": ("mtp.pre_fc_norm_hidden.weight", "norm"),
+          "nextn.shared_head_norm.weight": ("mtp.norm.weight", "norm")}
 
 
 class GGUFWeights(Mapping):
@@ -322,15 +332,43 @@ class GGUFWeights(Mapping):
                        "lm_head.weight": "token_embd.weight" if self.tied else "output.weight",
                        "model.norm.weight": "output_norm.weight"}
         self._how = {"model.norm.weight": "norm"}
+        # an MTP GGUF (qwen35.nextn_predict_layers): its last block is the MTP layer, with the
+        # nextn tensors (eh_proj = fc over [embedding, hidden], the two input norms, the head's
+        # norm; the head shared, the embedding the model's)
+        self.nextn = int(kv.get("qwen35.nextn_predict_layers", 0))
+        if self.nextn not in (0, 1):
+            raise ValueError(f"{self.nextn} MTP layers: one is supported")
+        self.layers = kv["qwen35.block_count"] - self.nextn
+        self.mtp = self.nextn == 1
         for n in g.tensors:
             if not n.startswith("blk."):
                 continue
             _, i, rest = n.split(".", 2)
+            if int(i) >= self.layers:
+                if rest in _NEXTN:
+                    hf, how = _NEXTN[rest]
+                    self._where[hf], self._how[hf] = n, how
+                    continue
+                pre = "mtp.layers.0."
+            else:
+                pre = f"model.layers.{i}."
             if rest not in _GG:
                 raise ValueError(f"unmapped GGUF tensor {n}")
             hf, how = _GG[rest]
-            self._where[f"model.layers.{i}.{hf}"] = n
-            self._how[f"model.layers.{i}.{hf}"] = how
+            self._where[pre + hf] = n
+            self._how[pre + hf] = how
+        if self.mtp:
+            need = [hf for hf, _ in _NEXTN.values()] + [
+                "mtp.layers.0." + _GG[r + ".weight"][0] for r in (
+                    "attn_norm", "post_attention_norm", "attn_q", "attn_k", "attn_v",
+                    "attn_output", "attn_q_norm", "attn_k_norm", "ffn_gate", "ffn_up",
+                    "ffn_down")]
+            miss = [h for h in need if h not in self._where]
+            if miss:
+                raise ValueError(f"MTP layer incomplete: {miss}")
+            mt = [self._where[h] for h in self._where if h.startswith("mtp.")]
+            if any(n in self.rotated for n in mt):     # (the device runs it unrotated: int8)
+                raise ValueError("a Hadamard-rotated MTP tensor: not supported")
         for n in self.rotated:              # (a plain llama.cpp GGUF has none)
             ti = g.tensors[n]
             if ti.type not in (GG.PTQ1_0, GG.PQ2_0, GG.Q2_0) or ti.shape[0] not in self._signs:
@@ -450,12 +488,72 @@ class GGUFWeights(Mapping):
         return len(self._where)
 
 
+def find_mtp_gguf(model_dir) -> Path:
+    """Bonsai 2's MTP layer: PrismML ships it only in the GGUF (Ternary-Bonsai-2-<n>B-PQ2_0-MTP-
+    Q8_0.gguf). $OTPU_BONSAI_MTP, else a *MTP*.gguf in the pack's directory or in
+    models/bonsai2-4b-mtp beside it (tools/nextgen/card_runs/r8/r8_fetch_models.cmd's)."""
+    import os
+    env = os.environ.get("OTPU_BONSAI_MTP")
+    if env:
+        return Path(env)
+    d = Path(model_dir)
+    for c in [*sorted(d.glob("*MTP*.gguf")), *sorted((d.parent / "bonsai2-4b-mtp").glob("*MTP*.gguf"))]:
+        return c
+    raise ValueError(f"Bonsai 2 MTP: no *MTP*.gguf in {d} or {d.parent / 'bonsai2-4b-mtp'} "
+                     "(or set OTPU_BONSAI_MTP)")
+
+
+class BonsaiMTPWeights(Mapping):
+    """The MLX pack's model (RotatedWeights) and the MTP GGUF's MTP layer (mtp.*: its nextn
+    block, Q8_0, model basis; GGUFWeights). The GGUF's model must be the pack's: a few of its
+    projections are compared exactly (their s * trit values in the rotated basis) and any
+    difference refuses the pair, since the drafter was trained on that model's hidden rows."""
+
+    def __init__(self, base, gguf):
+        self.base = base
+        self.g = gguf if isinstance(gguf, GGUFWeights) else GGUFWeights(gguf)
+        if not self.g.mtp:
+            raise ValueError(f"{self.g.path}: no MTP layer (qwen35.nextn_predict_layers)")
+        # (attention and MLP projections: the DeltaNet's GGUF rows are in another head order)
+        mats = [n for n in self.g if n.startswith("model.layers.")
+                and n.endswith((".self_attn.q_proj.weight", ".mlp.down_proj.weight"))]
+        if not mats:
+            raise ValueError(f"{self.g.path}: no projection to compare with the pack")
+        for name in dict.fromkeys([mats[0], mats[1 % len(mats)], mats[-1]]):
+            a, b = base[name], self.g[name]
+            if a.shape != b.shape or not np.array_equal(a, b):
+                raise ValueError(f"the MTP GGUF's model differs from the pack at {name}: "
+                                 "its drafter belongs to another model")
+        self._mtp = [n for n in self.g if n.startswith("mtp.")]
+        # (the image cache's identity: the pack's directory and the GGUF, imgcache.checkpoint)
+        self.model_dir = getattr(base, "model_dir", None)
+        self.mtp_from = Path(self.g.path)
+
+    def __getitem__(self, name):
+        return self.g[name] if name.startswith("mtp.") else self.base[name]
+
+    def __iter__(self):
+        return iter([*self.base, *self._mtp])
+
+    def __len__(self):
+        return len(self.base) + len(self._mtp)
+
+    def head_rows(self, ids):
+        return self.base.head_rows(ids)
+
+    def embedding_table(self):
+        return self.base.embedding_table()
+
+    def signs_for(self, width):
+        return self.base.signs_for(width)
+
+
 def spec_from_gguf(path_or_weights):
     """qwen35.Spec of a Bonsai 2 GGUF (its qwen35.* keys; the layer kinds from its tensors)."""
     from .qwen35 import ATTN, LIN, Spec
     w = path_or_weights if isinstance(path_or_weights, GGUFWeights) else GGUFWeights(path_or_weights)
     kv, t = w.g.kv, w.g.tensors
-    L = kv["qwen35.block_count"]
+    L = w.layers                    # (an MTP GGUF's last block is its MTP layer)
     kinds = tuple(ATTN if f"blk.{i}.attn_q.weight" in t else LIN for i in range(L))
     every = kv.get("qwen35.full_attention_interval")
     if every and kinds != tuple(ATTN if (i + 1) % every == 0 else LIN for i in range(L)):
