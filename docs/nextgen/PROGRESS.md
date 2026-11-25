@@ -42,8 +42,9 @@
   a plain prompt is a repetitive refusal (no reference check in r8_more_models yet).
 - **PaddleOCR, third run**: 3 of 3 NOT TRUSTED (corrected errors in both channels, one DED).
   Reproducible: the vision tower's load finds the DDR3 margin; ODT / RON trials need approval.
-- **Dory**: int8 4446 MiB; fp4 gate / up 4254 MiB (> 4096). Next: fp4 head, cap 128; Dory's
-  MemoryError now lists its parts. **Qwen3.5-4B folder**: the model read as 43 layers, hidden
+- **Dory 4B on the card: PASS** (fp4 gate / up, int8 down, fp4 head, cap 128): logits cos
+  0.9955-0.9984 to fp32, ' Paris', 32 greedy tokens on the card, 1.99 tok/s decode (the
+  recurrent block runs 4 loops), ECC 0 / 0. int8 needed 4446 MiB, fp4 gate / up alone 4254. **Qwen3.5-4B folder**: the model read as 43 layers, hidden
   3968, vocab 478656: 6894 MiB in fp4 (layers 3989, MTP + head 997, tables 1878): does not fit
   one 4 GiB slice; out of r8_more_models' default list.
 - **GRQ QUAD on Bonsai 4B decode** (r8_profile A / B on the same firmware): 12.93 Mcycles a token
