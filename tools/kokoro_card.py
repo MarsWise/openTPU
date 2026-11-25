@@ -89,9 +89,15 @@ class BoardRunner:
     def write_at(self, at, a):
         self.b.write(at, np.ascontiguousarray(a).view(np.uint8).reshape(-1))
 
+    profile = False
+
     def run(self, progs, top):
         from opentpu import resident as RG
         at = -(-(top + (1 << 20)) // 4096) * 4096
+        if self.profile:                       # each program on its own: its cycles
+            rows = RG.profile_board(self.b, progs, at)
+            print(RG.profile_table(rows), flush=True)
+            return {"programs": len(rows), "cycles": sum(c for _, c in rows), "profiled": True}
         return RG.run_board_chained(self.b, progs, at)
 
     def read(self, g, t):
@@ -111,6 +117,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", default="kokoro.wav")
     ap.add_argument("--isa", action="store_true")
+    ap.add_argument("--profile", action="store_true",
+                    help="on the card: each program run on its own, cycles by op family")
     ap.add_argument("--compile-only", action="store_true",
                     help="graph A run (its durations shape B), graph B compiled, not run")
     ap.add_argument("--dev", default="/dev/xdma0")
@@ -149,6 +157,7 @@ def main() -> int:
         ecc0 = memcal.ecc(board.t)
         print(f"card: build {info.get('build_id') or 0:08x}, ECC {ecc0}", flush=True)
         run = BoardRunner(board)
+        run.profile = a.profile
     g = RG.Graph(cfg)
     kk = KG.Kokoro(W, cfgj)
     t0 = time.time()

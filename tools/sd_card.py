@@ -81,6 +81,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default="sd.png")
     ap.add_argument("--isa", action="store_true")
+    ap.add_argument("--profile", action="store_true",
+                    help="on the card: each program run on its own, cycles by op family")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--ref", action="store_true")
     a = ap.parse_args()
@@ -142,19 +144,26 @@ def main() -> int:
         out = g.read(img, S._dt(img_t))
     else:
         from opentpu import isa as I
-        words, cache, asm = [], {}, {}
+        words, cache, asm, named = [], {}, {}, []
         for i in range(0, len(ops), 256):               # (assembled words only, one array per
-            for _, p in S.compile_cached(g, ops[i:i + 256], cache):   # distinct program: ~90k
+            for n, p in S.compile_cached(g, ops[i:i + 256], cache):   # distinct program: ~90k
                 if id(p) not in asm:                    # ops, a few thousand distinct)
                     asm[id(p)] = np.asarray(I.assemble(p), np.uint32)
                 words.append(asm[id(p)])
+                if a.profile:
+                    named.append((n, p))
         print(f"{len(words)} programs compiled in {time.time() - t0:.0f} s", flush=True)
         t0 = time.time()
         board.write(0, img)
         t_w = time.time() - t0
         at = -(-(len(img) + (1 << 20)) // 4096) * 4096
-        plan = RG.ChainPlan(board, None, at, words=words)
-        st = {**plan.stats, **plan.run(board, timeout=3600.0)}
+        if a.profile:                                   # each program on its own: its cycles
+            rows = RG.profile_board(board, named, at, words=words)
+            print(RG.profile_table(rows, top=30), flush=True)
+            st = {"programs": len(rows), "cycles": sum(c for _, c in rows), "profiled": True}
+        else:
+            plan = RG.ChainPlan(board, None, at, words=words)
+            st = {**plan.stats, **plan.run(board, timeout=3600.0)}
         st["write_s"] = round(t_w, 1)
         t_ = img_t
         raw = board.read(t_.addr, 4 * t_.H * t_.W * t_.C).view(np.float32)

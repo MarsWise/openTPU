@@ -639,3 +639,29 @@ def test_group_norm2d_pieces(tm):
     got = np.stack([fl[y.addr // 4 + (h + y.border) * y.rs + y.border * C:][:W * C]
                     for h in range(H)]).reshape(H, W, C)
     assert rel(got, want) < 1e-4, rel(got, want)
+
+
+def test_profile_board_and_table():
+    """profile_board runs each program on its own and keeps its cycles; profile_table sums
+    them by family (numbers and the trailing block index dropped)."""
+    class Stub:
+        waitc = False
+
+        def __init__(self):
+            self.loaded = []
+
+        def load_program(self, at, w, e):
+            self.loaded.append(len(w))
+
+        def run(self, timeout):
+            return {"cycles": 100 * self.loaded[-1], "instructions": [self.loaded[-1]]}
+
+    words = [np.zeros(n, np.uint32) for n in (1, 2, 3, 4)]
+    progs = [("gen.rb01.c1.0", None), ("gen.rb02.c1.1", None), ("stft", None), ("gen.rb11.c1", None)]
+    rows = RG.profile_board(Stub(), progs, 0, words=words)
+    assert rows == [("gen.rb01.c1.0", 100), ("gen.rb02.c1.1", 200), ("stft", 300),
+                    ("gen.rb11.c1", 400)]
+    t = RG.profile_table(rows)
+    line = next(l for l in t.splitlines() if l.startswith("gen.rb.c "))
+    assert line.split()[1] == "0.00" and line.split()[-1] == "3"
+    assert t.splitlines()[1].startswith("gen.rb.c")          # the largest family first

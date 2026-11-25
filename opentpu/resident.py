@@ -519,6 +519,39 @@ class ChainPlan:
         return st
 
 
+def profile_board(board, progs, at: int, words=None, workers: int | None = None) -> list:
+    """[(name, cycles)]: the programs in order on the card, each loaded and run on its own
+    (run_board's way: the same order, so the same state as a chained run), its cycle count
+    kept. progs: [(name, program)]; words: their assembled words when the caller has them."""
+    from . import isa as I
+    ps = [p for _, p in progs]
+    words = words if words is not None else [np.asarray(I.assemble(p), np.uint32) for p in ps]
+    ents = board_entries(board, words, ps, workers)
+    out = []
+    for (name, _), w, e in zip(progs, words, ents):
+        board.load_program(at, w, e)
+        out.append((name, board.run(timeout=60.0)["cycles"]))
+    return out
+
+
+def profile_table(rows, mhz: float = 133.333, top: int = 25) -> str:
+    """profile_board's rows summed by op family (the name with its numbers and its trailing
+    block index dropped: gen.rb01.c1.3 -> gen.rb.c): cycles, share, ms, programs."""
+    import re
+    fam: dict = {}
+    for name, cyc in rows:
+        k = re.sub(r"\.\d+$", "", name)
+        k = re.sub(r"\d+", "", k)
+        c, n = fam.get(k, (0, 0))
+        fam[k] = (c + cyc, n + 1)
+    tot = sum(c for c, _ in fam.values()) or 1
+    lines = [f"{'family':<40} {'Mcycles':>9} {'share':>6} {'ms':>8} {'programs':>8}"]
+    for k, (c, n) in sorted(fam.items(), key=lambda kv: -kv[1][0])[:top]:
+        lines.append(f"{k:<40} {c / 1e6:9.2f} {100 * c / tot:5.1f}% {c / mhz / 1e3:8.1f} {n:8d}")
+    lines.append(f"{'total':<40} {tot / 1e6:9.2f} {100.0:5.1f}% {tot / mhz / 1e3:8.1f} {len(rows):8d}")
+    return "\n".join(lines)
+
+
 def run_board_chained(board, progs, at: int, workers: int | None = None,
                       timeout: float = 600.0) -> dict:
     """run_board's programs as chained runs on the card (ChainPlan: prepared, then run once):
