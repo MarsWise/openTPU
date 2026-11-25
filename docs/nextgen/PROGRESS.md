@@ -1,5 +1,39 @@
 # Nextgen implementation progress
 
+## 16b4564a-lean on the card: GRQ QUAD of 2 rows measured; fixes from r8_all_tests (2026-11-25)
+
+- **16b4564a-lean loaded** (CFG_HASH 81dc3958, caps2 tgq4m). DDR3 gate: every ECC counter 0 / 0
+  in ddr_diag, ddr_split and ddr_check ("DRAM CLEAN on 16b4564a-lean").
+- **Bonsai 2 4B MTP with GRQ QUAD of 2 rows** (PHYSICAL FPGA VERIFIED, all 6 replies equal to
+  plain greedy). An MTP iteration (2-row verify + draft) now costs ~24.5 Mcycles at every
+  acceptance, against ~40 on ed482f26 (plain GRQ verify): TGQ4M does what it was built for.
+  - Plain decode 12.80 Mcycles a token (10.4 tok/s). MTP 12.38-16.88 Mcycles a token
+    (acceptance 0.46-0.95), before 20.2-27.4. Break-even acceptance is now ~0.91: MTP is about
+    even with plain decode, not faster.
+  - The verify is ~21 Mcycles, 1.65x a plain step. What is left is per row (DeltaNet's DSTEP
+    and VPU work for 32 heads, attention, both rows' head and argmax), not the weights:
+    next, a per-phase profile of the verify run.
+- **Qwen3.5 MTP on 81dc3958**: the same as on ed482f26 (all EQUAL; 0.8B fp4 28.0 -> 43.6 tok/s
+  device). TTFT 0.34-0.8 s once the program cache is warm (26-36 s cold, first runs).
+- **Decode is DDR-bound** (r8_profile): BitNet 2B 91 %, Qwen3.5-0.8B 95 %, Qwen3.5-2B 96 % of
+  the port's 128 B/cycle, MXU busy 98-100 %.
+- **Also PASS on 81dc3958**: Needle int8 / CQ4, LFM3 int8 / fp4, MiniCPM5, Granite, Ouro
+  (cos 0.9994-0.9999), Maple, ReasonLite, LFM2.5-thinking, Kokoro (both phrases, the same
+  cycles), SD 256 px (12.31 Gcycles, the same).
+- **Fixed after the run:**
+  - `r8_card_tests.sh` and `r8_restore_pcie.cmd` did not list 81dc3958 as r8 ("NOT r8"): the
+    card tests, the TGQ4M card cases among them, stopped at step 0. Now listed.
+  - Dory: its decode program with fp4 MLPs is 33424 words, more than IMEM's 32768 ("program
+    does not fit IMEM"). r8_llm runs it int8 at cap 256: 3649 MiB, 29968 words.
+  - FunctionGemma (gemma3_text): otpu-chat's qwen3.load_weights returned plain Weights
+    (KeyError layer_scalar). gemma3_text now goes to gemma4.load_weights (Gemma3Weights).
+  - Qwen3.5-4B fp4: "6894 MiB per slice". The MemoryError now names what takes the DRAM
+    (I/O, layers + KV / state, MTP + head, lookup tables) and the model's dimensions; this
+    host's estimate for a 4B is 2860 MiB, so the next run's message decides the fix.
+- **PaddleOCR**: 2 of 3 images PASS; the third had one corrected ECC error in channel 0 during
+  the vision tower (NOT TRUSTED). loadcal kept channel 1 lanes at 2-3 taps ("may read wrong
+  words"). Rerun.
+
 ## Card results on ed482f26; SD and Kokoro fitted to the card's TMEM (2026-11-25)
 
 - **Kokoro-82M and SD 1.5 run on the card** (8ea484b9 host tree, ed482f26-lean, ECC 0 / 0).

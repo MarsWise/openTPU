@@ -251,7 +251,8 @@ def load_weights(model_dir, mtp: bool = False) -> Weights:
     loaded, under the names of a text-only one (model.language_model.* -> model.*): not the
     vision tower and projector (VISION), nor the multi-token prediction layers (mtp.*) unless
     `mtp` (Qwen3.5's drafter,
-    opentpu/llm/mtp.py). Gemma 4: gemma4.load_weights (its PLE table read by rows)."""
+    opentpu/llm/mtp.py). Gemma 4 and Gemma 3 (FunctionGemma): gemma4.load_weights (its PLE table read
+    by rows; Gemma 3's norms and layer scalars as Gemma 4's, Gemma3Weights)."""
     cfg = Path(model_dir) / "config.json"
     if cfg.exists() and json.loads(cfg.read_text()).get("model_type") == "prism_hadamard_qwen35":
         from .bonsai2 import BonsaiMTPWeights, RotatedWeights, find_mtp_gguf
@@ -264,7 +265,8 @@ def load_weights(model_dir, mtp: bool = False) -> Weights:
         from .mlx_weights import MLXWeights
         return MLXWeights(model_dir)
     if cfg.exists() and json.loads(cfg.read_text()).get("model_type") in ("gemma4",
-                                                                          "gemma4_text"):
+                                                                          "gemma4_text",
+                                                                          "gemma3_text"):
         from .gemma4 import load_weights as gemma4_weights
         return gemma4_weights(model_dir)
     return Weights(model_dir, mtp)

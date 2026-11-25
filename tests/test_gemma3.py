@@ -59,6 +59,18 @@ def test_spec_from_gemma3(tiny):
     assert np.all(W["model.layers.0.layer_scalar"] == 1)
 
 
+def test_qwen3_load_weights_takes_gemma3(tmp_path_factory, tiny):
+    """otpu-chat loads checkpoints with qwen3.load_weights: a gemma3_text one must come back as
+    Gemma3Weights (layer scalars 1, 1 + w gains), not plain Weights (FunctionGemma on the card:
+    KeyError model.layers.0.layer_scalar)."""
+    from opentpu.llm.qwen3 import load_weights
+    m, _, _ = tiny
+    d = tmp_path_factory.mktemp("gemma3_q3")
+    m.save_pretrained(d)
+    W = load_weights(d)
+    assert isinstance(W, G.Gemma3Weights) and np.all(W["model.layers.0.layer_scalar"] == 1)
+
+
 def test_reference_matches_hf(tiny):
     m, W, spec = tiny
     toks = [int(t) for t in np.random.default_rng(0).integers(0, 1000, 40)]

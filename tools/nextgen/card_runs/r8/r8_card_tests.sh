@@ -107,12 +107,12 @@ print("build", hex(i.get("build_id") or 0), "core_khz", i.get("core_khz"), "caps
 h = (i.get("cfg") or {}).get("hash", 0)
 print("cfg hash", hex(h))
 open(sys.argv[1], "w").write(f"VU8={int(bool(c2.get('vu8')))}\nTGRQ={int(bool(c2.get('tgrq')))}\n"
-                             f"R8={int(h in (0x93e29b18, 0xa905c3db, 0x37f51889, 0x432e34c2, 0xadd73610))}\n")   # r8; with GRQ QUAD (C2); C4 (area); A
+                             f"R8={int(h in (0x93e29b18, 0xa905c3db, 0x37f51889, 0x432e34c2, 0xadd73610, 0x81dc3958))}\n")   # r8; with GRQ QUAD (C2); C4 (area); A
 PY
 rc=$?; [ "$rc" = 0 ] && [ -f "$OUT/r8caps.env" ] || { fail "card capability read"; exit 1; }
 . "$OUT/r8caps.env"
 echo "   VU8=$VU8 TGRQ=$TGRQ R8=$R8"
-[ "$R8" = 1 ] || { fail "the loaded firmware is not r8 (CFG_HASH 93e29b18, a905c3db with GRQ QUAD, 37f51889 the C4 area build, 432e34c2 experiment A / r5x, or add73610 r5x lean): load it first"; exit 1; }
+[ "$R8" = 1 ] || { fail "the loaded firmware is not r8 (CFG_HASH 93e29b18, a905c3db with GRQ QUAD, 37f51889 the C4 area build, 432e34c2 experiment A / r5x, add73610 r5x lean, or 81dc3958 r5x lean with GRQ QUAD of 2 rows): load it first"; exit 1; }
 ecc || echo "   (ECC before the scrub: an earlier run's or never-written beats; 0b scrubs)"
 
 log "0b. DRAM after the load: the core's CPU calibrates both channels, scrub (zeros: ECC check bits valid), loadcal under load, selftest"

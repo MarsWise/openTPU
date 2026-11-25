@@ -848,6 +848,7 @@ class Image(EmbedHost):
                          + (spec.layers - n_attn) * 4 * self.slots *
                          (nl // 2 * (K - 1) * self.CP + nl * dv * dk))   # and state
         self.mtpo, self.nd = {}, min(MTP_VOCAB, spec.vocab)
+        marks = [("I/O", 0), ("layers + KV / state", self.layer0), ("MTP + head", b.next)]
         if spec.mtp:                # the MTP's norms (embedding, hidden, output), fc, draft head
             self.mtpo = {"ge": b.alloc(4 * H), "gh": b.alloc(4 * H), "gm": b.alloc(4 * H),
                          "fc": (b.alloc(H * rb(2 * H, self.mtp_fc)),       # (attn's)
@@ -857,6 +858,7 @@ class Image(EmbedHost):
         self.head = (b.alloc(self.v_loc * Q.row_bytes(H, self.head_format, D)),
                      b.alloc(self.v_loc * Q.scale_bytes(H, self.head_format, D)
                              + (4 * H if spec.native_bonsai else 0)))
+        marks.append(("lookup tables (embedding, RoPE, masks, chains)", b.next))
         # the int8 embedding rows of the resident decode are the tied int8 head's (S = 1)
         shared = spec.tied and self.head_format == "int8" and S == 1
         if embed_host is None:      # an int8 table of its own on the host by default where its
@@ -892,8 +894,14 @@ class Image(EmbedHost):
             b.next = self.offload.end
         self.nbytes = b.next
         if self.nbytes > cfg.DRAM_BYTES:
+            marks.append(("end", b.next))
+            parts = ", ".join(f"{n} {(marks[i + 1][1] - a) / 2**20:.0f}"
+                              for i, (n, a) in enumerate(marks[:-1]))
             raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB per slice, "
-                              f"DRAM_BYTES is {cfg.DRAM_BYTES / 2**20:.0f} MiB")
+                              f"DRAM_BYTES is {cfg.DRAM_BYTES / 2**20:.0f} MiB ({parts} MiB; "
+                              f"{spec.layers} layers, hidden {spec.hidden}, ffn {spec.ffn}, "
+                              f"vocab {spec.vocab}, cap {cap}, {wformat} / head "
+                              f"{self.head_format}{', MTP' if spec.mtp else ''})")
 
     def before_slots(self, b) -> None:
         """A subclass's own DRAM, allocated from `b` (qwen3._Bump) after the model's and before
