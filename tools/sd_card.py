@@ -165,6 +165,13 @@ def main() -> int:
     check(bool(np.isfinite(im).all()) and float(im.std()) > 0.05,
           f"a {a.size} px image, finite and not flat", f"{a.out}; {st}; wall {wall:.0f} s")
     if a.ref:
+        try:
+            import diffusers  # noqa: F401
+        except ImportError:
+            print("REFERENCE NOT RUN: diffusers is not installed for this Python "
+                  "(pip install diffusers==0.43.0); compare the PNG elsewhere", flush=True)
+            a.ref = False
+    if a.ref:
         z0 = RN.seeded_reference(1, h * w * 4, a.seed, 1).reshape(h * w, 4)
         ref = reference(U, unet, ids_c, ids_u, z0, h, w, a.steps, a.guidance)
         c = float((im * ref).sum() / np.linalg.norm(im) / np.linalg.norm(ref))

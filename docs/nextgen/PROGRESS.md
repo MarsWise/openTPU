@@ -2,6 +2,21 @@
 
 ## Card results on ed482f26; SD and Kokoro fitted to the card's TMEM (2026-11-25)
 
+- **Kokoro-82M and SD 1.5 run on the card** (8ea484b9 host tree, ed482f26-lean, ECC 0 / 0).
+  PHYSICAL FPGA VERIFIED:
+  - Kokoro phrase 1 (1.52 s of audio): device 3.13 s (417.5 Mcycles), wall 18.9 s with the
+    host's compile and writes. Durations equal to the reference, F0 / N cos 0.99999, log-mel
+    cos 0.9942: the same numbers as the ISA run.
+  - Kokoro phrase 2 (3.25 s of audio, 9906 programs): device 6.67 s, log-mel cos 0.9932.
+  - SD 1.5 256 px, 20 steps, CFG 7.5, "a photo of a red fox in the snow", seed 42: 105305
+    programs (5323 distinct) in 2 chained runs, 12.31 Gcycles, device 92.3 s, wall 118 s
+    after a 177 s graph build and 74 s compile. The host had no diffusers; the reference was
+    computed here (diffusers 0.43 fp32, the same initial latent): card PNG vs reference PNG
+    cos 0.9642, PSNR 22.6 dB, the same picture. `sd_card.py --ref` now skips with a message
+    when diffusers is missing.
+- **16b4564a-lean built** (CFG_HASH 81dc3958, TGQ4M + GQ4_PIPE): WNS +0.015 ns, WHS +0.028 ns,
+  otpu.bit sha256 fd8beb43...cdb43d. The userclk1 reroute was not kept (-0.053 ns); the
+  routed design was reopened. Not loaded yet.
 - **Card runs on ed482f26-lean** (CFG_HASH add73610; host tree 16b4564a / d07a8f1d). Every run
   had ECC 0 / 0 before and after. PHYSICAL FPGA VERIFIED:
   - **Qwen3.5 MTP** (`r8_mtp.cmd`, greedy, 3 prompts): every MTP reply equals plain decode
