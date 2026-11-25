@@ -507,14 +507,13 @@ class ChainPlan:
         """progs: (name, program) pairs; or words: the programs already assembled (a long
         pipeline compiled in chunks, its Python programs dropped: SD 1.5's ~25k)."""
         import time
-        from types import SimpleNamespace
         from . import isa as I
         t0 = time.perf_counter()
         if words is None:
             ps = [p for _, p in progs]
             words = [np.asarray(I.assemble(p), np.uint32) for p in ps]
         else:
-            ps = [SimpleNamespace(run_args=None)] * len(words)
+            ps = [None] * len(words)            # entries decode the words (their run_args kept)
             progs = words
         ents = board_entries(board, words, ps, workers)
         info = getattr(board, "_info", None) or board.info()
@@ -609,7 +608,8 @@ def _compile_one(i: int):
     if len(prog) > cfg.IMEM_WORDS // 8:
         raise ol.CompileError(f"{name}: {len(prog)} instructions, IMEM holds "
                               f"{cfg.IMEM_WORDS // 8}")
-    return np.asarray(I.assemble(prog), np.uint32)
+    from .compiler import Words
+    return Words.of(I.assemble(prog), run_args=getattr(prog, "run_args", ()))
 
 
 def compile_words(cfg, ops, workers: int | None = None) -> list:

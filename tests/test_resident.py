@@ -685,6 +685,27 @@ def test_compile_words_matches_compile_and_dedups():
     assert got[0] is got[1] is got[2]
 
 
+@pytest.mark.parametrize("waitc", [False, True])
+def test_chain_plan_from_words_small(waitc):
+    """ChainPlan(words=compile_words(...)) of a few programs (no worker pool: SD's prompt-token
+    plan) on a WAITC card: the entries come from the words themselves, the run leaves the
+    sequential image."""
+    import dataclasses
+    from opentpu import waits as W
+    g, _, img = _chain_graph()
+    ref, _ = RG.run_isa(g.cfg, g.compile(), img.copy())
+    c = dataclasses.replace(g.cfg, DRAM_BYTES=1 << 22)
+    W._mem.clear()
+    card = _ChainCard(c, waitc)
+    card.write(0, img)
+    at = -(-(len(img) + (1 << 16)) // 4096) * 4096
+    words = RG.compile_words(g.cfg, g.ops, workers=1)
+    assert len(words) <= 8
+    plan = RG.ChainPlan(card, None, at, words=words)
+    plan.run(card)
+    assert np.array_equal(card.dram[:len(img)], ref)
+
+
 def test_plan_cache_and_sparse_image(tmp_path, monkeypatch):
     """PlanCache keeps a run's pickled plan by key, drops the oldest beyond KEEP; a sparse
     image comes back byte for byte; ChainPlan.from_parts takes the parts as they were."""
