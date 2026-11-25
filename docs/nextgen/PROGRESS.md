@@ -23,8 +23,16 @@
     have the previous one's kernels and arena addresses (`sd_graph._layout`; inputs, constants
     and kept outputs below the arena by shape only) writes everything it reads and no border:
     no zeroing. A 3-step build now zeroes only before the VAE (another layout).
-- Before the card rerun: ISA / RTL tests (63 passed: SD graph, Kokoro graph / resident,
-  resident ops), Kokoro phrase 1 and SD 64 px end to end on the ISA against the references.
+- **On the card after the fixes (2afc7679 host, 81dc3958, ECC 0 / 0, PHYSICAL):**
+  - Kokoro phrase 1, graph B: 417.0 -> 280.4 Mcycles (1.49x; device 2.1 s for 1.52 s of
+    audio). dilated_conv 221.1 -> 132.2, instance_affine 107.6 -> 59.1 (now VPU-bound: ~0.84
+    Mcycles for 3 passes over ~1.2M elements on 8 lanes). Phrase 2: 889.6 -> 596.7 Mcycles
+    (4.5 s for 3.25 s). Quality unchanged: log-mel 0.9945 / 0.9931, durations equal.
+  - SD 256 px 20 steps: 12.31 -> 10.48 Gcycles, device 92.3 -> 78.6 s; image cos 0.957 /
+    PSNR 21.8 dB to diffusers fp32 (was 0.964 / 22.6), the same picture. 1 step: 1807.6 ->
+    1381.6 Mcycles; `vae.ur.gn` 532 -> 206, UNet arena zeroing gone.
+  - Wall time is still mostly the host: Kokoro 22.7 s for phrase 1 (graph B compile 13.7 s,
+    prepare 6.0 s); SD graph build 172 s + compile 73 s before 101 s on the card.
 
 ## 16b4564a-lean on the card: GRQ QUAD of 2 rows measured; fixes from r8_all_tests (2026-11-25)
 
