@@ -1,8 +1,9 @@
 @echo off
-rem Claude: Stable Diffusion 1.5 text to image on the card (every model operation on the device):  r8_sd.cmd
+rem Claude: Stable Diffusion 1.5 text to image on the card (every model operation on the device):  r8_sd.cmd [ddim]
 rem Copies C:\ai-models\diffusion\sd-v1-5 (text_encoder, unet, vae, tokenizer, scheduler: ~2 GB) to the host once;
-rem 256 px, 20 DDIM steps with guidance 7.5, then the image against diffusers (fp32, host CPU) from the same latent.
-rem Saves r8_sd.log, sd_256.png and sd_256.ref.png here. No bitstream load, no rescan. Not during another run.
+rem the host fetches LCM-LoRA (135 MB) and TAESD (10 MB) once at 2 MB/s. 256 px, LCM-LoRA 4 steps + TAESD, then the
+rem image against diffusers (fp32, host CPU) from the same latent; "ddim": also 20 DDIM steps (guidance 7.5) + the VAE.
+rem Saves r8_sd.log, sd_lcm.png / sd_lcm.ref.png (and sd_256*.png) here. No bitstream load, no rescan.
 setlocal
 set KH=C:\Users\user\.copilot\session-state\11d00541-3609-4624-ad4e-77febeaa144f\files\linux-host_known_hosts
 set H=nvx@192.168.0.157
@@ -22,11 +23,11 @@ ssh %O% %H% "touch ~/llm_card/sd15/.copied" || goto fail
 :run
 if exist "%~dp0sync_next.bundle" (copy /y "%~dp0sync_next.bundle" "%~dp0sync.bundle" >nul & del "%~dp0sync_next.bundle")
 scp %O% "%~dp0sync.bundle" "%~dp0r8_sd.sh" %H%:/tmp/ || goto fail
-ssh %O% %H% "tr -d '\r' < /tmp/r8_sd.sh > /tmp/r8_sd_exec.sh && bash -o pipefail -c 'bash /tmp/r8_sd_exec.sh 2>&1 | tee /tmp/r8_sd.log'"
+ssh %O% %H% "tr -d '\r' < /tmp/r8_sd.sh > /tmp/r8_sd_exec.sh && bash -o pipefail -c 'bash /tmp/r8_sd_exec.sh %1 2>&1 | tee /tmp/r8_sd.log'"
 set RUNRC=%errorlevel%
-scp %O% %H%:/tmp/r8_sd.log %H%:/tmp/sd_256*.png "%~dp0." || set RUNRC=1
+scp %O% %H%:/tmp/r8_sd.log %H%:/tmp/sd_*.png "%~dp0." || set RUNRC=1
 echo.
-echo Log: %~dp0r8_sd.log   image: %~dp0sd_256.png (reference sd_256.ref.png)
+echo Log: %~dp0r8_sd.log   image: %~dp0sd_lcm.png (reference sd_lcm.ref.png)
 pause
 exit /b %RUNRC%
 :fail

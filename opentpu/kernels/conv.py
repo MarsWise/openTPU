@@ -92,9 +92,11 @@ def pack_conv_weight(w: np.ndarray, D: int) -> np.ndarray:
 
 @ol.jit
 def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, stride: int,
-           pad: int, act: str = "silu", res=None, wlo=None, roll: bool = True):
-    """y [OH*OW, Cout] (or a [OH, OW, Cout] view) = act(conv2d(x, w) + b) (+ res, a view like
-    y: a residual added after the activation, YOLOX's Bottleneck). x: pad_input rows
+           pad: int, act: str = "silu", res=None, wlo=None, roll: bool = True,
+           post: str = "none"):
+    """y [OH*OW, Cout] (or a [OH, OW, Cout] view) = post(act(conv2d(x, w) + b) (+ res)): res a
+    view like y, a residual added after the activation (YOLOX's Bottleneck); post an activation
+    after it (TAESD's block: relu(conv(x) + x)). x: pad_input rows
     [Hp, row_words] (or a view of at least that many words a row); w: Weight(pack_conv_weight)
     [Cout, KH*Kp]; b: [Cout]. wlo: split_weight's low part (a second MM per kernel row).
     roll=False: no rolling patches (a shorter program: cnngraph falls back to it when the rolled
@@ -103,6 +105,7 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     OH, OW, Hp, Wp, Kp, rw = geometry(H, W, Cin, KH, KW, stride, pad, D)
     R = ol.current().cfg.act_rows
     f = ACTS[act]
+    fp = ACTS[post]
     bias = ol.load(b)
     groups = [(o, min(R, OW - o)) for o in range(0, OW, R)]
     cfg = ol.current().cfg
@@ -147,6 +150,8 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
                 yt.set(f(yt))
             if res is not None:
                 yt.set(yt + ol.load(_out(res, oh, ow0, n, OW), out=rbuf[0:n, :]))
+            if fp is not None:
+                yt.set(fp(yt))
             ol.store(_out(y, oh, ow0, n, OW), yt)
 
     rbuf = ol.empty([Rt, Cout]) if res is not None else None
@@ -186,6 +191,8 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
                     yt.set(f(yt))
                 if res is not None:
                     yt.set(yt + ol.load(_out(res, oh, ow0, n, OW), out=rbuf[0:n, :]))
+                if fp is not None:
+                    yt.set(fp(yt))
                 ol.store(_out(y, oh, ow0, n, OW), yt)
 
         for k in range(KH - stride):           # the first row's older rows

@@ -1,5 +1,28 @@
 # Nextgen implementation progress
 
+## SD 1.5: LCM-LoRA (4 steps, no guidance) and the TAESD decoder on the device (2026-11-26)
+
+- **Files (fetched at most 2 MB/s, sha256 pinned):** latent-consistency/lcm-lora-sdv1-5
+  `pytorch_lora_weights.safetensors` (openrail++, sha256 8f90d840..., kohya format: 278 UNet
+  modules, rank 64, alpha 8) and madebyollin/taesd `diffusion_pytorch_model.safetensors` (MIT,
+  sha256 db169d69...). Safetensors only; nothing from the repos is executed.
+- **LoRA:** `sd_graph.Weights(lora=)` merges W + alpha / rank up @ down into each UNet weight as
+  it is read (linear, 1x1, 3x3). All 278 modules name a UNet weight of SD 1.5's config with
+  matching shapes, and the same modules diffusers' own kohya conversion names (SOURCE /
+  SOFTWARE VERIFIED here on the real file; test on a synthetic LoRA).
+- **Sampler:** `lcm_schedule` = LCMScheduler on SD 1.5's config (timesteps and the step as
+  x' = a x + b eps + c z, test against diffusers for 1 / 2 / 4 / 8 steps); `lcm_k` on the VPU;
+  guidance 1 -> one UNet evaluation a step (4 instead of DDIM's 40) and one CLIP pass; each
+  step's noise drawn on the device (VOP RAND, key 2 + step).
+- **TAESD:** `SD.taesd_decode` from the existing conv2d program: 3 tanh(z / 3), conv + ReLU,
+  residual blocks with the new `post` activation after the residual (kernels/conv.py), nearest
+  x2, x 2 - 1 folded into the last conv. ISA vs AutoencoderTiny with TAESD's weights: cos
+  0.9993, PSNR 36-38 dB (int8 MXU).
+- Whole LCM + TAESD chain on the ISA with stand-ins for CLIP / UNet: cos > 0.995 to NumPy +
+  diffusers (ISA SIMULATED). Real-size run and timing: card pending (`r8_sd.cmd`).
+- Card: `r8_sd.cmd` (LCM + TAESD + --ref; `r8_sd.cmd ddim` adds the 20-step DDIM run),
+  `r8_media_profile.cmd` profiles the LCM pipeline too.
+
 ## Host plan cache for SD / Kokoro; Kokoro AdaIN + Snake + padding fused (2026-11-25)
 
 - **Plan cache (SOFTWARE VERIFIED, card run pending):** `resident.PlanCache` keeps the sparse

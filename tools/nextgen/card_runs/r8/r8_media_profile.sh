@@ -25,5 +25,13 @@ timeout 3600 "$P" tools/kokoro_card.py --weights "$K/conv" --config "$K/config.j
   --out /tmp/kokoro_prof.wav --profile || rc=1
 echo; echo "######## $(date +%H:%M:%S) SD 1.5 256 px, 1 step, profiled"
 timeout 7200 "$P" tools/sd_card.py --sd "$S" --size 256 --steps 1 --seed 42 --out /tmp/sd_prof.png --profile || rc=1
+L=$HOME/llm_card/lcm-lora-sdv1-5/pytorch_lora_weights.safetensors; T=$HOME/llm_card/taesd/diffusion_pytorch_model.safetensors
+if [ -f "$L" ] && [ -f "$T" ]; then
+  echo; echo "######## $(date +%H:%M:%S) SD 1.5 256 px, LCM-LoRA 4 steps + TAESD, profiled"
+  timeout 7200 "$P" tools/sd_card.py --sd "$S" --size 256 --lcm-lora "$L" --taesd "$T" --seed 42 \
+    --out /tmp/sd_lcm_prof.png --profile || rc=1
+else
+  echo; echo "(no LCM-LoRA / TAESD on the host yet: r8_sd.cmd fetches them)"
+fi
 echo; echo "== $(date +%H:%M:%S) DONE rc $rc"
 exit $rc

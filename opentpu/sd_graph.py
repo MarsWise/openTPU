@@ -42,6 +42,31 @@ def cfg_ddim_k(x, eu, ec, y, gs: float, a: float, b: float):
     ol.store(y, ol.load(x) * a + e * b)
 
 
+@ol.jit
+def lcm_k(x, e, y, a: float, b: float, z=None, c: float = 0.0):
+    """y = a x + b e (+ c z): one LCMScheduler step (epsilon prediction, no clipping) folded
+    into three coefficients: the denoised sample c_out x0 + c_skip x carried to the previous
+    timestep with the step's noise z (none on the last step)."""
+    v = ol.load(x) * a + ol.load(e) * b
+    if z is not None:
+        v = v + ol.load(z) * c
+    ol.store(y, v)
+
+
+@ol.jit
+def cfg_k(eu, ec, y, gs: float):
+    """y = eu + gs (ec - eu): classifier-free guidance alone (LCM with guidance > 1)."""
+    u = ol.load(eu)
+    ol.store(y, u + (ol.load(ec) - u) * gs)
+
+
+@ol.jit
+def softclamp_k(x, y, c: float):
+    """y = c tanh(x / c) (TAESD's latent clamp, c = 3)."""
+    from .kernels import lib
+    ol.store(y, lib.softcap(ol.load(x), c))
+
+
 class SDGraph(RG.Graph):
     """A Graph whose constants (weights, vectors) live in their own region from `cbase` (the
     activations bump from 0) and are shared: the same array's packing is placed once (keyed
@@ -83,14 +108,17 @@ class SDGraph(RG.Graph):
             self._memo[k] = super().vec(v)
         return self._memo[k]
 
-    def conv2d(self, x, w, b, stride: int, pad: int, name="conv2d"):
-        """resident's conv2d with the packed weights shared (memo by their bytes)."""
+    def conv2d(self, x, w, b, stride: int, pad: int, name="conv2d", act="none", res=None,
+               post="none", border: int = 0):
+        """resident's conv2d with the packed weights shared (memo by their bytes). act after
+        the bias, res (a T2 of the output's shape) added after it, post after that; border 1:
+        the output written into a bordered buffer (the next 3x3 convolution's input)."""
         from .compiler import QTensor
         from .kernels import conv as C
         from . import quant as Q
         Cout, Cin, KH, KW = w.shape
         OH, OW, Hp, Wp, Kp, rw = C.geometry(x.H, x.W, Cin, KH, KW, stride, pad, self.D)
-        y = self.tensor2(OH, OW, Cout)
+        y = self.tensor2(OH, OW, Cout, border, self.D if border else 0)
         k = self._key("c", w)
         if k not in self._memo:
             p = C.pack_conv_weight(np.asarray(w, np.float32), self.D)
@@ -100,7 +128,8 @@ class SDGraph(RG.Graph):
         b = np.zeros(Cout, np.float32) if b is None else b
         self.op(name, C.conv2d, x=x.rows(pad, rw), w=self._memo[k], b=self.vec(b),
                 y=y.interior(), H=x.H, W=x.W, Cin=Cin, Cout=Cout, KH=KH, KW=KW, stride=stride,
-                pad=pad, act="none")
+                pad=pad, act=act, **({} if res is None else {"res": res.interior()}),
+                **({} if post == "none" else {"post": post}))
         return y
 
     def image(self, size=None):
@@ -145,27 +174,73 @@ def _t2(d: RG.DT, H: int, W: int) -> RG.T2:
     return RG.T2(d.addr, H, W, d.C)
 
 
+def lora_targets(unet_keys, lora_keys) -> dict:
+    """A kohya LoRA's modules (lora_unet_<path with _ for .>.lora_down.weight / .lora_up.weight
+    / .alpha) -> the UNet weight each changes (diffusers names, no prefix). Every module must
+    name exactly one weight."""
+    by = {}
+    for k in unet_keys:
+        if k.endswith(".weight"):
+            n = "lora_unet_" + k[:-len(".weight")].replace(".", "_")
+            if n in by:
+                raise ValueError(f"LoRA names collide: {by[n]} and {k}")
+            by[n] = k
+    mods = sorted({k.rsplit(".lora_down.weight", 1)[0] for k in lora_keys
+                   if k.endswith(".lora_down.weight")})
+    if not mods:
+        raise ValueError("no kohya lora_down weights in the LoRA file")
+    miss = [m for m in mods if m not in by]
+    if miss:
+        raise ValueError(f"{len(miss)} LoRA modules name no UNet weight, e.g. {miss[:3]}")
+    return {by[m]: m for m in mods}
+
+
+def lora_delta(down, up, alpha, shape, scale: float = 1.0) -> np.ndarray:
+    """scale * alpha / rank * up @ down, in the weight's shape (linear, 1x1 or 3x3 conv)."""
+    r = down.shape[0]
+    d = up.reshape(up.shape[0], r).astype(np.float64) @ down.reshape(r, -1).astype(np.float64)
+    a = float(alpha) if alpha is not None else float(r)
+    return (scale * a / r * d).reshape(shape).astype(np.float32)
+
+
 class Weights:
     """SD 1.5's diffusers safetensors (fp16 or fp32) read lazily as fp32 under prefixes:
-    text. (text_encoder), unet. (one file or shards), vae. -- keys -> files."""
+    text. (text_encoder), unet. (one file or shards), vae., taesd. (AutoencoderTiny) -- keys
+    -> files. lora: a kohya LoRA file (LCM-LoRA) merged into the UNet's weights as they are
+    read (W + scale alpha / rank up @ down)."""
 
-    def __init__(self, text=None, unet=(), vae=None):
+    def __init__(self, text=None, unet=(), vae=None, taesd=None, lora=None,
+                 lora_scale: float = 1.0):
         from safetensors import safe_open
         self.files, self.index = [], {}
         for pre, paths in (("text.", [text] if text else []), ("unet.", list(unet)),
-                           ("vae.", [vae] if vae else [])):
+                           ("vae.", [vae] if vae else []), ("taesd.", [taesd] if taesd else [])):
             for p in paths:
                 f = safe_open(str(p), "np")
                 self.files.append(f)
                 for k in f.keys():
                     self.index[pre + k] = (f, k)
+        self.lora, self.lora_scale = {}, lora_scale
+        if lora:
+            f = safe_open(str(lora), "np")
+            self.files.append(f)
+            ukeys = [k[5:] for k in self.index if k.startswith("unet.")]
+            self._lf = f
+            self.lora = {"unet." + k: m for k, m in lora_targets(ukeys, list(f.keys())).items()}
 
     def __contains__(self, k):
         return k in self.index
 
     def __getitem__(self, k):
         f, key = self.index[k]
-        return np.asarray(f.get_tensor(key), np.float32)
+        w = np.asarray(f.get_tensor(key), np.float32)
+        m = self.lora.get(k)
+        if m is not None:
+            lf = self._lf
+            al = lf.get_tensor(m + ".alpha") if m + ".alpha" in lf.keys() else None
+            w = w + lora_delta(lf.get_tensor(m + ".lora_down.weight"),
+                               lf.get_tensor(m + ".lora_up.weight"), al, w.shape, self.lora_scale)
+        return w
 
     def keys(self):
         return self.index.keys()
@@ -398,6 +473,49 @@ class SD:
         return self.conv(g, h, V + "decoder.conv_out.", name="vae.conv_out")
 
 
+    # ---- TAESD (AutoencoderTiny's decoder)
+    def taesd_decode(self, g, z: RG.T2, blocks=(3, 3, 3, 1)) -> RG.T2:
+        """diffusers DecoderTiny: 3 tanh(z / 3), conv + ReLU, then per stage `blocks` residual
+        blocks (relu(conv(relu(conv(relu(conv(x))))) + x)), nearest x2 and a bias-free conv
+        between stages, the 3-channel conv last with x * 2 - 1 folded into its weights.
+        z [h, w, 4] dense (no scaling: AutoencoderTiny's scaling factor is 1) -> [8h, 8w, 3]."""
+        P = "taesd.decoder.layers."
+        zc = g.tensor(z.H * z.W, z.C)
+        g.op("taesd.clamp", softclamp_k, x=_dt(z).rows(), y=zc.rows(), c=3.0)
+        x = self.bordered(g, _t2(zc, z.H, z.W), "taesd.border")
+        i = 0
+
+        def conv(x, act="none", res=None, post="none", border=1, bias=True, w2=1.0, b2=0.0,
+                 name="taesd.conv"):
+            nonlocal i
+            w = self.w(f"{P}{i}.weight") * w2
+            b = (self.w(f"{P}{i}.bias") if bias else np.zeros(w.shape[0], np.float32)) * w2 + b2
+            return g.conv2d(x, w, b, 1, 1, name=name, act=act, res=res, post=post,
+                            border=border)
+
+        h = conv(x, act="relu", name="taesd.conv_in")
+        i = 2
+        for si, nb in enumerate(blocks):
+            last = si == len(blocks) - 1
+            for bi in range(nb):
+                q = f"{P}{i}.conv."
+                tag = f"taesd.s{si}b{bi}"
+                c1 = g.conv2d(h, self.w(q + "0.weight"), self.w(q + "0.bias"), 1, 1,
+                              name=tag + ".c1", act="relu", border=1)
+                c2 = g.conv2d(c1, self.w(q + "2.weight"), self.w(q + "2.bias"), 1, 1,
+                              name=tag + ".c2", act="relu", border=1)
+                dense = bi == nb - 1 and not last       # (the upsample reads a dense image)
+                h = g.conv2d(c2, self.w(q + "4.weight"), self.w(q + "4.bias"), 1, 1,
+                             name=tag + ".c3", res=h, post="relu", border=0 if dense else 1)
+                i += 1
+            if not last:
+                i += 1                                  # (the Upsample layer: no weights)
+                h = conv(self.upsample2(g, h, f"taesd.s{si}up"), bias=False,
+                         name=f"taesd.s{si}conv")
+                i += 1
+        return conv(h, border=0, w2=2.0, b2=-1.0, name="taesd.conv_out")
+
+
 # ================================================================ the schedule (host constants)
 def ddim_schedule(steps: int, train: int = 1000, beta_start=0.00085, beta_end=0.012,
                   offset: int = 1):
@@ -415,6 +533,34 @@ def ddim_schedule(steps: int, train: int = 1000, beta_start=0.00085, beta_end=0.
         a = math.sqrt(ap / at)
         b = math.sqrt(1 - ap) - math.sqrt(ap) * math.sqrt(1 - at) / math.sqrt(at)
         out.append((int(t), a, b))
+    return out
+
+
+def lcm_schedule(steps: int, train: int = 1000, beta_start=0.00085, beta_end=0.012,
+                 original: int = 50, timestep_scaling: float = 10.0):
+    """LCMScheduler from SD 1.5's scheduler config (scaled_linear betas, set_alpha_to_one
+    False, epsilon prediction, no clipping): the timesteps and each step's (t, a, b, c) with
+    x_prev = a x + b eps + c z (z the step's noise; c = 0 on the last step)."""
+    betas = np.linspace(beta_start ** 0.5, beta_end ** 0.5, train, dtype=np.float64) ** 2
+    ac = np.cumprod(1 - betas)
+    k = train // original
+    origin = (np.arange(1, original + 1) * k - 1)[::-1]
+    idx = np.floor(np.linspace(0, len(origin), num=steps, endpoint=False)).astype(np.int64)
+    ts = origin[idx]
+    out = []
+    for i, t in enumerate(ts):
+        last = i == len(ts) - 1
+        tp = ts[i] if last else ts[i + 1]
+        at, ap = ac[t], ac[tp]
+        st = t * timestep_scaling
+        c_skip = 0.25 / (st ** 2 + 0.25)
+        c_out = st / (st ** 2 + 0.25) ** 0.5
+        a = c_out / math.sqrt(at) + c_skip
+        b = -c_out * math.sqrt(1 - at) / math.sqrt(at)
+        if last:
+            out.append((int(t), a, b, 0.0))
+        else:
+            out.append((int(t), math.sqrt(ap) * a, math.sqrt(ap) * b, math.sqrt(1 - ap)))
     return out
 
 
@@ -447,32 +593,46 @@ def _layout(ops, lo: int = 0) -> tuple:
     return tuple((id(k), tuple(sorted((n, arg(v)) for n, v in a.items()))) for _, k, a in ops)
 
 
-def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float = 7.5):
-    """The whole pipeline on one Graph: both prompts' CLIP states, the initial latent from the
-    seed (VOP RAND), `steps` DDIM steps of two UNet evaluations each, the VAE decoder.
+def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float = 7.5,
+                  sampler: str = "ddim", decoder: str = "vae"):
+    """The whole pipeline on one Graph: the CLIP states, the initial latent from the seed (VOP
+    RAND), the sampler's steps, the decoder.
+    sampler "ddim": DDIM with classifier-free guidance (two UNet evaluations a step);
+    "lcm": LCMScheduler (an LCM-LoRA merged into the UNet's weights): one UNet evaluation a
+    step when gs <= 1 (no guidance, as diffusers' pipeline then runs it), two when gs > 1; the
+    noise of each step but the last drawn on the device (key 2 + step).
+    decoder "vae": the KL VAE's decoder; "taesd": AutoencoderTiny's.
     -> (image T2 [8h, 8w, 3] in [-1, 1] before clamping, the seed tensor, the latent)."""
+    if sampler not in ("ddim", "lcm") or decoder not in ("vae", "taesd"):
+        raise ValueError(f"sampler {sampler!r} / decoder {decoder!r}")
+    guided = sampler == "ddim" or gs > 1
     ctx_c = sd.clip(g, ids_c)
-    ctx_u = sd.clip(g, ids_u)
+    ctx_u = sd.clip(g, ids_u) if guided else None
     n = h * w * 4
     x = g.tensor(h * w, 4)
     from . import rand as RD
     cnt = g.const(RD.bits(RD.counters(n)).view(np.float32))
     seed = g.tensor(1, 1)
-    g.op("sd.noise", RN.seeded_normal_rows, c=Tensor(cnt, (n,), (1,)),
-         seed=Tensor(seed.addr, (1,), (1,)), y=Tensor(x.addr, (1, n), (n, 1)), M=1, N=n, key=1)
-    sched = ddim_schedule(steps)
+
+    def noise(y, key):
+        g.op(f"sd.noise{key}", RN.seeded_normal_rows, c=Tensor(cnt, (n,), (1,)),
+             seed=Tensor(seed.addr, (1,), (1,)), y=Tensor(y.addr, (1, n), (n, 1)), M=1, N=n,
+             key=key)
+    noise(x, 1)
+    sched = ddim_schedule(steps) if sampler == "ddim" else lcm_schedule(steps)
     lat = [x, g.tensor(h * w, 4)]                       # ping-pong latents
     ec_keep, eu_keep = g.tensor(h * w, 4), g.tensor(h * w, 4)
-    trs = []
-    for s, (t, a, b) in enumerate(sched):
-        tr = g.tensor(1, 320)
-        trs.append(tr)
+    e_cfg = g.tensor(h * w, 4) if sampler == "lcm" and guided else None
+    z = g.tensor(h * w, 4) if sampler == "lcm" else None
+    trs = [g.tensor(1, 320) for _ in sched]
     arena = -(-g.top // RG.ALIGN) * RG.ALIGN
     used, last = [arena], None
-    for s, (t, a, b) in enumerate(sched):
+    for s, st in enumerate(sched):
+        t = st[0]
         g.consts.append((trs[s].addr, timestep_row(t)[None, :]))
         xin, xout = lat[s % 2], lat[(s + 1) % 2]
-        for ctx, keep, tag in ((ctx_c, ec_keep, "c"), (ctx_u, eu_keep, "u")):
+        evals = ((ctx_c, ec_keep, "c"),) + (((ctx_u, eu_keep, "u"),) if guided else ())
+        for ctx, keep, tag in evals:
             g.top = arena                               # every evaluation's activations reuse it
             at = len(g.ops)
             e = sd.unet(g, _t2(xin, h, w), trs[s], ctx, tag=f"s{s}{tag}")
@@ -485,13 +645,28 @@ def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float
                 zero_region(g, arena, max(used), at, f"s{s}{tag}.zero")
             last = sig
             used.append(g.top)
-        g.op(f"s{s}.ddim", cfg_ddim_k, x=xin.rows(), eu=eu_keep.rows(), ec=ec_keep.rows(),
-             y=xout.rows(), gs=float(gs), a=float(a), b=float(b))
+        if sampler == "ddim":
+            _, a, b = st
+            g.op(f"s{s}.ddim", cfg_ddim_k, x=xin.rows(), eu=eu_keep.rows(), ec=ec_keep.rows(),
+                 y=xout.rows(), gs=float(gs), a=float(a), b=float(b))
+            continue
+        _, a, b, c = st
+        e = ec_keep
+        if guided:
+            g.op(f"s{s}.cfg", cfg_k, eu=eu_keep.rows(), ec=ec_keep.rows(), y=e_cfg.rows(),
+                 gs=float(gs))
+            e = e_cfg
+        kw = {}
+        if c:
+            noise(z, 2 + s)
+            kw = dict(z=z.rows(), c=float(c))
+        g.op(f"s{s}.lcm", lcm_k, x=xin.rows(), e=e.rows(), y=xout.rows(), a=float(a),
+             b=float(b), **kw)
     x = lat[len(sched) % 2]
     g.top = arena
     at = len(g.ops)
-    img = sd.vae_decode(g, _t2(x, h, w))
-    zero_region(g, arena, max(used), at, "vae.zero")
+    img = sd.vae_decode(g, _t2(x, h, w)) if decoder == "vae" else sd.taesd_decode(g, _t2(x, h, w))
+    zero_region(g, arena, max(used), at, f"{decoder}.zero")
     return img, seed, x
 
 
@@ -507,4 +682,6 @@ def compile_cached(g, ops, cache: dict) -> list:
     return out
 
 
-__all__ = ["SD", "compile_cached", "ddim_schedule", "timestep_row", "build_txt2img", "geglu_k", "cfg_ddim_k"]
+__all__ = ["SD", "Weights", "compile_cached", "ddim_schedule", "lcm_schedule", "timestep_row",
+           "build_txt2img", "geglu_k", "cfg_ddim_k", "cfg_k", "lcm_k", "softclamp_k",
+           "lora_targets", "lora_delta"]

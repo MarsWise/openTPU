@@ -1,9 +1,13 @@
 """Stable Diffusion 1.5 text to image with every model operation on the device
 (opentpu/sd_graph.py): CLIP (prompt and empty prompt), the initial latent from the seed (VOP
-RAND), DDIM steps with classifier-free guidance (two UNet evaluations a step), the VAE decoder.
+RAND), DDIM steps with classifier-free guidance (two UNet evaluations a step), the VAE decoder;
+or with --lcm-lora (LCM-LoRA merged into the UNet's weights as they are read) LCMScheduler steps
+(default 4, guidance 1: one UNet evaluation a step, each step's noise drawn on the device) and
+with --taesd AutoencoderTiny's decoder instead of the VAE's.
 
     python tools/sd_card.py --sd DIR [--unet-shards 'DIR/unet_*.safetensors'] [--isa]
         [--prompt "..."] [--size 256] [--steps 20] [--seed 42] [--out sd.png] [--ref]
+        [--lcm-lora pytorch_lora_weights.safetensors] [--taesd diffusion_pytorch_model.safetensors]
 
 DIR: the diffusers folder (text_encoder/, unet/, vae/, tokenizer/; fp16 safetensors). The host:
 the prompt's tokens (CLIP BPE), the schedule's constants, the seed; it writes the image (all
@@ -65,6 +69,75 @@ def reference(sd_dir, unet_files, ids_c, ids_u, z0, h, w, steps, gs=7.5):
         return v.decode(x / 0.18215).sample[0].permute(1, 2, 0).numpy()
 
 
+def reference_lcm(sd_dir, unet_files, lora, taesd, ids_c, ids_u, z0, h, w, steps, gs, seed):
+    """diffusers' LCM pipeline steps (fp32, host CPU): the UNet with the LoRA merged (W + alpha
+    / rank up @ down, sd_graph.lora_delta: diffusers needs peft to load it itself), LCMScheduler
+    from SD 1.5's scheduler config, each step's noise the device's (rand: seed + 2 + step) in
+    place of the scheduler's own draw, then TAESD's decoder (or the VAE's)."""
+    import torch
+    from diffusers import AutoencoderKL, AutoencoderTiny, LCMScheduler, UNet2DConditionModel
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+    from transformers import CLIPTextConfig, CLIPTextModel
+    from opentpu import sd_graph as S
+    from opentpu.kernels import randn as RN
+    U = Path(sd_dir)
+    c = CLIPTextConfig(**{k: v for k, v in json.loads((U / "text_encoder/config.json").read_text())
+                          .items() if not k.startswith("_")})
+    te = CLIPTextModel(c).eval()
+    te.load_state_dict({k.replace("text_model.", ""): v.float() for k, v in
+                        load_file(str(U / "text_encoder/model.fp16.safetensors")).items()},
+                       strict=False)
+    guided = gs > 1
+    with torch.no_grad():
+        ec = te(torch.tensor([ids_c])).last_hidden_state
+        eu = te(torch.tensor([ids_u])).last_hidden_state if guided else None
+    del te
+    m = UNet2DConditionModel.from_config(json.loads((U / "unet/config.json").read_text())).eval()
+    for p in unet_files:
+        with safe_open(str(p), "pt") as f:
+            keys = list(f.keys())
+            for i in range(0, len(keys), 64):
+                m.load_state_dict({k: f.get_tensor(k).float() for k in keys[i:i + 64]},
+                                  strict=False)
+    lf = safe_open(str(lora), "np")
+    sdict = m.state_dict()
+    with torch.no_grad():
+        for k, mod in S.lora_targets(list(sdict), list(lf.keys())).items():
+            al = lf.get_tensor(mod + ".alpha") if mod + ".alpha" in lf.keys() else None
+            d = S.lora_delta(lf.get_tensor(mod + ".lora_down.weight"),
+                             lf.get_tensor(mod + ".lora_up.weight"), al, tuple(sdict[k].shape))
+            sdict[k].add_(torch.as_tensor(d))
+    sc = LCMScheduler.from_config(json.loads((U / "scheduler/scheduler_config.json").read_text()))
+    sc.set_timesteps(steps)
+    ts = sc.timesteps.tolist()
+    x = torch.as_tensor(z0).reshape(1, h, w, 4).permute(0, 3, 1, 2)
+    with torch.no_grad():
+        for i, t in enumerate(ts):
+            e = m(x, t, encoder_hidden_states=ec).sample
+            if guided:
+                e_u = m(x, t, encoder_hidden_states=eu).sample
+                e = e_u + gs * (e - e_u)
+            den = sc.step(e, t, x).denoised
+            if i < len(ts) - 1:
+                ap = sc.alphas_cumprod[ts[i + 1]]
+                z = torch.as_tensor(RN.seeded_reference(1, h * w * 4, seed, 2 + i)
+                                    .reshape(1, h, w, 4)).permute(0, 3, 1, 2)
+                x = ap.sqrt() * den + (1 - ap).sqrt() * z
+            else:
+                x = den
+    del m
+    with torch.no_grad():
+        if taesd:
+            v = AutoencoderTiny().eval()
+            v.load_state_dict(load_file(str(taesd)))
+            return v.decode(x).sample[0].permute(1, 2, 0).numpy()
+        v = AutoencoderKL.from_config(json.loads((U / "vae/config.json").read_text())).eval()
+        v.load_state_dict({k: t.float() for k, t in
+                           load_file(str(U / "vae/diffusion_pytorch_model.fp16.safetensors")).items()})
+        return v.decode(x / 0.18215).sample[0].permute(1, 2, 0).numpy()
+
+
 def to_png(path, a):
     from PIL import Image
     Image.fromarray(((np.clip(a, -1, 1) + 1) * 127.5).round().astype(np.uint8)).save(path)
@@ -76,8 +149,10 @@ def main() -> int:
     ap.add_argument("--unet-shards", help="glob of UNet safetensors (default: DIR/unet's file)")
     ap.add_argument("--prompt", default="a photo of a red fox in the snow")
     ap.add_argument("--size", type=int, default=256)
-    ap.add_argument("--steps", type=int, default=20)
-    ap.add_argument("--guidance", type=float, default=7.5)
+    ap.add_argument("--steps", type=int, help="default 20 (DDIM), 4 (LCM)")
+    ap.add_argument("--guidance", type=float, help="default 7.5 (DDIM), 1 (LCM: no guidance)")
+    ap.add_argument("--lcm-lora", help="LCM-LoRA (kohya safetensors): LCMScheduler steps")
+    ap.add_argument("--taesd", help="AutoencoderTiny's safetensors: its decoder for the VAE's")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default="sd.png")
     ap.add_argument("--isa", action="store_true")
@@ -88,6 +163,13 @@ def main() -> int:
     ap.add_argument("--no-cache", action="store_true",
                     help="build and compile anew, keep nothing (else: resident.PlanCache)")
     a = ap.parse_args()
+    sampler = "lcm" if a.lcm_lora else "ddim"
+    decoder = "taesd" if a.taesd else "vae"
+    if a.steps is None:
+        a.steps = 4 if a.lcm_lora else 20
+    if a.guidance is None:
+        a.guidance = 1.0 if a.lcm_lora else 7.5
+    evals = a.steps * (2 if sampler == "ddim" or a.guidance > 1 else 1)
     from transformers import CLIPTokenizer
     from opentpu import resident as RG
     from opentpu import sd_graph as S
@@ -104,7 +186,12 @@ def main() -> int:
     unet = sorted(glob.glob(a.unet_shards)) if a.unet_shards else \
         [str(U / "unet/diffusion_pytorch_model.fp16.safetensors")]
     W = S.Weights(text=U / "text_encoder/model.fp16.safetensors", unet=unet,
-                  vae=U / "vae/diffusion_pytorch_model.fp16.safetensors")
+                  vae=U / "vae/diffusion_pytorch_model.fp16.safetensors", taesd=a.taesd,
+                  lora=a.lcm_lora)
+    print(f"sampler {sampler} ({a.steps} steps, guidance {a.guidance}: {evals} UNet "
+          f"evaluations), decoder {decoder}" +
+          (f", LoRA {Path(a.lcm_lora).name}: {len(W.lora)} UNet weights" if a.lcm_lora else ""),
+          flush=True)
     tok = CLIPTokenizer(str(U / "tokenizer/vocab.json"), str(U / "tokenizer/merges.txt"))
     ids_c = tok(a.prompt, padding="max_length", max_length=77, truncation=True).input_ids
     ids_u = tok("", padding="max_length", max_length=77).input_ids
@@ -129,10 +216,11 @@ def main() -> int:
     if board is not None and not a.profile and not a.no_cache:
         from opentpu.target import arch_hash
         cache = RG.PlanCache("sd15")
-        key = cache.key("txt2img", 1, arch_hash(cfg), info.get("build_id"), cfg.DRAM_BYTES,
-                        a.size, a.steps, a.guidance,
+        key = cache.key("txt2img", 2, arch_hash(cfg), info.get("build_id"), cfg.DRAM_BYTES,
+                        a.size, a.steps, a.guidance, sampler, decoder,
                         RG.files_id(U / "text_encoder/model.fp16.safetensors", *unet,
-                                    U / "vae/diffusion_pytorch_model.fp16.safetensors"),
+                                    U / "vae/diffusion_pytorch_model.fp16.safetensors",
+                                    *[p for p in (a.lcm_lora, a.taesd) if p]),
                         RG.source_hash(__file__))
         t0 = time.time()
         hit = cache.load(key)
@@ -143,8 +231,9 @@ def main() -> int:
     if hit is None:
         g = S.SDGraph(cfg, 3 << 29)                     # constants from 1.5 GiB
         sd = S.SD(W)
-        img_t, seed_t, _ = S.build_txt2img(g, sd, ids_c, ids_u, h, w, a.steps, a.guidance)
-        print(f"{len(g.ops)} ops ({a.steps} steps x 2 UNet), built in {time.time() - t0:.0f} s; "
+        img_t, seed_t, _ = S.build_txt2img(g, sd, ids_c, ids_u, h, w, a.steps, a.guidance,
+                                           sampler=sampler, decoder=decoder)
+        print(f"{len(g.ops)} ops ({evals} UNet evaluations), built in {time.time() - t0:.0f} s; "
               f"activations {g.top / 2**20:.0f} MiB, weights {(g.ctop - g.cbase) / 2**20:.0f} MiB",
               flush=True)
         img = g.image()
@@ -230,7 +319,13 @@ def main() -> int:
             a.ref = False
     if a.ref:
         z0 = RN.seeded_reference(1, h * w * 4, a.seed, 1).reshape(h * w, 4)
-        ref = reference(U, unet, ids_c, ids_u, z0, h, w, a.steps, a.guidance)
+        if sampler == "lcm":
+            ref = reference_lcm(U, unet, a.lcm_lora, a.taesd, ids_c, ids_u, z0, h, w, a.steps,
+                                a.guidance, a.seed)
+        elif decoder == "vae":
+            ref = reference(U, unet, ids_c, ids_u, z0, h, w, a.steps, a.guidance)
+        else:
+            raise SystemExit("--ref with DDIM and --taesd: not implemented")
         c = float((im * ref).sum() / np.linalg.norm(im) / np.linalg.norm(ref))
         mse = float(((np.clip(im, -1, 1) - np.clip(ref, -1, 1)) ** 2).mean())
         psnr = 10 * np.log10(4 / max(mse, 1e-12))
