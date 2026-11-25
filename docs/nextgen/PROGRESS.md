@@ -30,9 +30,14 @@
   - Qwen3.5-4B fp4: "6894 MiB per slice". The MemoryError now names what takes the DRAM
     (I/O, layers + KV / state, MTP + head, lookup tables) and the model's dimensions; this
     host's estimate for a 4B is 2860 MiB, so the next run's message decides the fix.
-- **PaddleOCR**: 2 of 3 images PASS; the third had one corrected ECC error in channel 0 during
-  the vision tower (NOT TRUSTED). loadcal kept channel 1 lanes at 2-3 taps ("may read wrong
-  words"). Rerun.
+- **PaddleOCR** (two runs on 81dc3958): the texts are right every time, but ECC is not clean.
+  Run 1: one corrected error after the third image's tower. Run 2: two corrected errors after the
+  first image's tower, and an uncorrectable one (STATUS ECC_DED) during the third: NOT TRUSTED.
+  loadcal kept lanes at 3 taps in both runs ("may read wrong words"). The DRAM gate (ddr_diag /
+  split / check) was clean: PaddleOCR's vision tower is the load that finds the margin, as on
+  c42beb65 (12 / 7 corrected then). The open DDR3 margin issue, not a 81dc3958 regression.
+- **GRQ QUAD on Bonsai 4B decode** (r8_profile A / B on the same firmware): 12.93 Mcycles a token
+  (10.3 tok/s, DRAM port 81 %, MAC 64 %) against 36.63 with OTPU_GQ4=0 (plain GRQ, 3.6 tok/s).
 
 ## Card results on ed482f26; SD and Kokoro fitted to the card's TMEM (2026-11-25)
 
