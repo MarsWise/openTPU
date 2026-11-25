@@ -16,8 +16,12 @@
   gone from the resblocks. `dense_k` double-buffers its x / y tiles when TMEM allows.
 - Regression: test_resident, test_kokoro_*, test_sd_graph, test_conv 92 passed; cnngraph /
   diffusion / torchdev / smolvla 56 passed, 1 skipped (LeRobot pin).
-- Card check: `r8_kokoro.cmd` and `r8_sd.cmd` twice each (2nd run = cache hit), then
-  `r8_media_profile.cmd`.
+- **On the card (ebfd5770, ECC 0 / 0, PHYSICAL):** Kokoro from the cache: phrase 1 wall
+  22.7 -> 2.5 s (real-time factor 1.65), phrase 2 5.1 s; graph B 280.4 -> 255.0 Mcycles only
+  (AdaIN + Snake + padding 97.2 -> 71.9; dilated_conv 132.2 unchanged: the double buffering
+  did not move it, so its limit is elsewhere). Quality unchanged (0.9944 / 0.9932).
+  SD failed after building and saving the plan: the small prompt-token plan passed a
+  placeholder as the program to the wait analysis; fixed in d545d602 (test added).
 
 ## Kokoro and SD card profile (r8_media_profile, 81dc3958) and the fixes it pointed to (2026-11-25)
 
