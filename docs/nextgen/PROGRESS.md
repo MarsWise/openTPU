@@ -36,6 +36,16 @@
   loadcal kept lanes at 3 taps in both runs ("may read wrong words"). The DRAM gate (ddr_diag /
   split / check) was clean: PaddleOCR's vision tower is the load that finds the margin, as on
   c42beb65 (12 / 7 corrected then). The open DDR3 margin issue, not a 81dc3958 regression.
+- **Card tests on 81dc3958: 17 passed, 0 failed, 0 skipped** (r8 instructions card == ISA with
+  the TGQ4M cases, KV formats, Diffusion Policy, SmolVLA, YOLOX-Nano, vLLM BitNet, Bonsai GRQ).
+- **FunctionGemma runs on the card** (Gemma 3 weights loader fix): 55.5 tok/s device; its reply to
+  a plain prompt is a repetitive refusal (no reference check in r8_more_models yet).
+- **PaddleOCR, third run**: 3 of 3 NOT TRUSTED (corrected errors in both channels, one DED).
+  Reproducible: the vision tower's load finds the DDR3 margin; ODT / RON trials need approval.
+- **Dory**: int8 4446 MiB; fp4 gate / up 4254 MiB (> 4096). Next: fp4 head, cap 128; Dory's
+  MemoryError now lists its parts. **Qwen3.5-4B folder**: the model read as 43 layers, hidden
+  3968, vocab 478656: 6894 MiB in fp4 (layers 3989, MTP + head 997, tables 1878): does not fit
+  one 4 GiB slice; out of r8_more_models' default list.
 - **GRQ QUAD on Bonsai 4B decode** (r8_profile A / B on the same firmware): 12.93 Mcycles a token
   (10.3 tok/s, DRAM port 81 %, MAC 64 %) against 36.63 with OTPU_GQ4=0 (plain GRQ, 3.6 tok/s).
 

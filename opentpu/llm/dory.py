@@ -323,8 +323,15 @@ class Image(Q3.Image):
         b += spec.loops * spec.n_rec * self.kv_span
         self.nbytes = (b + 4095) // 4096 * 4096
         if self.nbytes > cfg.DRAM_BYTES:
-            raise MemoryError(f"model image needs {self.nbytes / 2**20:.0f} MiB, DRAM_BYTES is "
-                              f"{cfg.DRAM_BYTES / 2**20:.0f} MiB")
+            M = 2**20
+            raise MemoryError(
+                f"model image needs {self.nbytes / M:.0f} MiB, DRAM_BYTES is "
+                f"{cfg.DRAM_BYTES / M:.0f} MiB (qwen3 layout {self.gates / M:.0f} MiB: layers "
+                f"{L} x {self.LS / M:.1f}; gates {L * self.gstride / M:.0f}, tables and RoPE "
+                f"{(self.kv_area - self.tab) / M:.0f}, recurrent KV "
+                f"{spec.loops * spec.n_rec * self.kv_span / M:.0f}; hidden {H}, ffn {spec.ffn}, "
+                f"vocab {spec.vocab}, {spec.n_input} + {spec.n_rec} x {spec.loops} + "
+                f"{spec.n_out} layers, cap {cap}, {wformat} / head {self.head_format})")
 
     def build(self, W) -> list:
         imgs = super().build(W)

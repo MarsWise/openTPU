@@ -24,12 +24,13 @@ b = Board(XdmaTransport('/dev/xdma0'), check=False)
 if sys.argv[1] == 'scrub': b.scrub(force=True)
 i = b.info()
 print('   ' + sys.argv[1] + ': build', hex(i.get('build_id') or 0), 'ECC', memcal.ecc(b.t), 'ECC_DED', bool(i['status'] & (1 << 9)), 'temp', i.get('temp_c'))" "$1"; }
-[ $# -gt 0 ] || set -- reasonlite lfm25-thinking functiongemma qwen35-4b
+[ $# -gt 0 ] || set -- reasonlite lfm25-thinking functiongemma   # (qwen35-4b: named only, see below)
 rc=0
 for m in "$@"; do
   M=$HOME/llm_card/$m; X=""
   case "$m" in
-    qwen35-4b) X="--wformat fp4" ;;          # 4B: int8 would not leave room for the KV caches in 4 GiB
+    qwen35-4b) X="--wformat fp4" ;;          # the folder's model: 43 layers, hidden 3968, vocab 478656:
+                                             # 6894 MiB in fp4 (layers 3989, head 997, tables 1878), > 4096
   esac
   echo; echo "######## $(date +%H:%M:%S) $m ($M) $X"
   [ -f "$M/config.json" ] || { echo "== $m: no $M/config.json (r8_more_models.cmd copies it)"; rc=1; continue; }
