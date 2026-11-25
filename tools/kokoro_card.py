@@ -91,9 +91,21 @@ class BoardRunner:
 
     profile = False
 
+    @staticmethod
+    def at(top):
+        return -(-(top + (1 << 20)) // 4096) * 4096
+
+    def plan(self, cfg, ops, top):
+        """The ops compiled on every core and prepared as one chained run (ChainPlan)."""
+        from opentpu import resident as RG
+        return RG.ChainPlan(self.b, None, self.at(top), words=RG.compile_words(cfg, ops))
+
+    def run_plan(self, plan):
+        return {**plan.stats, **plan.run(self.b)}
+
     def run(self, progs, top):
         from opentpu import resident as RG
-        at = -(-(top + (1 << 20)) // 4096) * 4096
+        at = self.at(top)
         if self.profile:                       # each program on its own: its cycles
             rows = RG.profile_board(self.b, progs, at)
             print(RG.profile_table(rows), flush=True)
@@ -123,6 +135,8 @@ def main() -> int:
                     help="graph A run (its durations shape B), graph B compiled, not run")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--ref", action="store_true", help="compare with the float reference")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="build and compile anew, keep nothing (else: resident.PlanCache)")
     a = ap.parse_args()
     from safetensors.numpy import load_file
     from opentpu import kokoro_graph as KG
@@ -158,37 +172,90 @@ def main() -> int:
         print(f"card: build {info.get('build_id') or 0:08x}, ECC {ecc0}", flush=True)
         run = BoardRunner(board)
         run.profile = a.profile
-    g = RG.Graph(cfg)
-    kk = KG.Kokoro(W, cfgj)
+    cached = isinstance(run, BoardRunner) and not a.profile and not a.compile_only \
+        and not a.no_cache
+    if cached:
+        from opentpu.target import arch_hash
+        cache = RG.PlanCache("kokoro")
+        key_a = cache.key("A", 1, arch_hash(cfg), info.get("build_id"), cfg.DRAM_BYTES,
+                          tuple(int(i) for i in ids), a.voice, style.tobytes(),
+                          RG.files_id(Path(a.weights) / "kokoro-v1_0.safetensors",
+                                      Path(a.weights) / f"{a.voice}.safetensors"),
+                          RG.source_hash(__file__))
+    g = kk = None
+
+    def build_a(compile_: bool):
+        nonlocal g, kk
+        g = RG.Graph(cfg)
+        kk = KG.Kokoro(W, cfgj)
+        d = kk.build_a(g, ids, style)
+        return d
+
     t0 = time.time()
-    dur = kk.build_a(g, ids, style)
-    na = len(g.ops)
-    pa = g.compile()
-    img = g.image(-(-g.top // 4096) * 4096)
-    g.put(img, kk.ref_s, style)
-    print(f"graph A: {len(ids)} ids, {len(pa)} programs, compiled in {time.time() - t0:.1f} s",
-          flush=True)
+    hit_a = cache.load(key_a) if cached else None
+    if hit_a is not None:
+        img, dur, na_top = RG.dense_image(hit_a["img"]), hit_a["dur"], hit_a["top"]
+        plan_a = RG.ChainPlan.from_parts(hit_a["parts"], hit_a["at"], hit_a["stats"])
+        print(f"graph A: plan cache hit ({len(ids)} ids) in {time.time() - t0:.1f} s", flush=True)
+    else:
+        dur = build_a(True)
+        na = len(g.ops)
+        img = g.image(-(-g.top // 4096) * 4096)
+        g.put(img, kk.ref_s, style)
+        na_top = g.top
+        if cached:
+            plan_a = run.plan(cfg, g.ops, g.top)
+            cache.save(key_a, {"img": RG.sparse_image(img), "dur": dur, "top": na_top,
+                               "parts": plan_a.parts, "at": plan_a.at, "stats": plan_a.stats})
+        else:
+            pa = g.compile()
+        print(f"graph A: {len(ids)} ids, {na} programs, compiled in {time.time() - t0:.1f} s",
+              flush=True)
     t_all = time.time()
     run.write(img)
-    sa = run.run(pa, g.top)
+    sa = run.run_plan(plan_a) if cached else run.run(pa, na_top)
     frames = KG.round_durations(run.read(g, dur))
     print(f"graph A ran: {sa}; frames {int(frames.sum())} ({frames.tolist()})", flush=True)
     t0 = time.time()
-    na_consts = len(g.consts)
-    a_top = -(-g.top // 4096) * 4096
-    audio_t = kk.build_b(g, frames)
-    pb = g.compile(g.ops[na:])
-    print(f"graph B: {len(pb)} programs, compiled in {time.time() - t0:.1f} s, DRAM top "
-          f"{g.top / 2**20:.0f} MiB", flush=True)
-    if a.compile_only:
-        print("RESULT: PASS (compiled; not run)", flush=True)
-        return 0
+    a_top = -(-na_top // 4096) * 4096
+    hit_b = None
+    if cached:
+        key_b = cache.key("B", key_a, tuple(int(f) for f in frames))
+        hit_b = cache.load(key_b)
+    if hit_b is not None:
+        consts_b, top_b, seed_t, audio_t = hit_b["consts"], hit_b["top"], hit_b["seed"], \
+            hit_b["audio"]
+        t_b = hit_b["t"]
+        plan_b = RG.ChainPlan.from_parts(hit_b["parts"], hit_b["at"], hit_b["stats"])
+        print(f"graph B: plan cache hit in {time.time() - t0:.1f} s", flush=True)
+    else:
+        if g is None:                   # (A from the cache: its graph again, not compiled)
+            build_a(False)
+        na = len(g.ops)
+        na_consts = len(g.consts)
+        audio_t = kk.build_b(g, frames)
+        consts_b, top_b, seed_t = g.consts[na_consts:], g.top, kk.seed
+        t_b = {k: kk.t[k] for k in ("noise", "F0", "N")}
+        if cached:
+            plan_b = run.plan(cfg, g.ops[na:], g.top)
+            cache.save(key_b, {"consts": consts_b, "top": top_b, "seed": seed_t, "t": t_b,
+                               "audio": audio_t, "parts": plan_b.parts, "at": plan_b.at,
+                               "stats": plan_b.stats})
+            nb = len(g.ops) - na
+        else:
+            pb = g.compile(g.ops[na:])
+            nb = len(pb)
+        print(f"graph B: {nb} programs, compiled in {time.time() - t0:.1f} s, DRAM top "
+              f"{top_b / 2**20:.0f} MiB", flush=True)
+        if a.compile_only:
+            print("RESULT: PASS (compiled; not run)", flush=True)
+            return 0
     # graph B's arena zero (its tensors' pad rows are read as zeros), then its constants
-    run.write_at(a_top, np.zeros(-(-g.top // 4096) * 4096 - a_top, np.uint8))
-    for at, arr in g.consts[na_consts:]:
+    run.write_at(a_top, np.zeros(-(-top_b // 4096) * 4096 - a_top, np.uint8))
+    for at, arr in consts_b:
         run.write_at(at, arr)
-    run.write_at(kk.seed.addr + 4 * kk.seed.pad, np.array([a.seed], np.uint32))
-    sb = run.run(pb, g.top)
+    run.write_at(seed_t.addr + 4 * seed_t.pad, np.array([a.seed], np.uint32))
+    sb = run.run_plan(plan_b) if cached else run.run(pb, top_b)
     audio = run.read(g, audio_t).reshape(-1)
     wall = time.time() - t_all
     write_wav(a.out, audio)
@@ -202,13 +269,13 @@ def main() -> int:
         import torch
         from kokoro.ref import KRef
         m = KRef.load(Path(a.weights) / "kokoro-v1_0.safetensors", a.config)
-        noise = run.read(g, kk.t["noise"])
+        noise = run.read(g, t_b["noise"])
         out = m.forward_parts(ids, torch.as_tensor(style),
                               noise={"sine": noise, "rand_ini": np.zeros(9, np.float32)})
         check(out["pred_dur"].tolist() == frames.tolist(), "durations are the reference's",
               f"{frames.tolist()}")
         for k, lim in (("F0", 0.999), ("N", 0.999)):
-            c = cos(run.read(g, kk.t[k]), out[k].numpy())
+            c = cos(run.read(g, t_b[k]), out[k].numpy())
             check(c > lim, f"{k} curve cosine to the reference > {lim}", f"{c:.5f}")
         b = out["audio"].numpy()
         L = min(len(b), len(audio))

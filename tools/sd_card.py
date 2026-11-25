@@ -85,6 +85,8 @@ def main() -> int:
                     help="on the card: each program run on its own, cycles by op family")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--ref", action="store_true")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="build and compile anew, keep nothing (else: resident.PlanCache)")
     a = ap.parse_args()
     from transformers import CLIPTokenizer
     from opentpu import resident as RG
@@ -123,47 +125,93 @@ def main() -> int:
                 raise SystemExit(f"the bitstream has no {need}")
         ecc0 = memcal.ecc(board.t)
         print(f"card: build {info.get('build_id') or 0:08x}, ECC {ecc0}", flush=True)
-    g = S.SDGraph(cfg, 3 << 29)                         # constants from 1.5 GiB
-    sd = S.SD(W)
+    cache = hit = key = None
+    if board is not None and not a.profile and not a.no_cache:
+        from opentpu.target import arch_hash
+        cache = RG.PlanCache("sd15")
+        key = cache.key("txt2img", 1, arch_hash(cfg), info.get("build_id"), cfg.DRAM_BYTES,
+                        a.size, a.steps, a.guidance,
+                        RG.files_id(U / "text_encoder/model.fp16.safetensors", *unet,
+                                    U / "vae/diffusion_pytorch_model.fp16.safetensors"),
+                        RG.source_hash(__file__))
+        t0 = time.time()
+        hit = cache.load(key)
+        if hit is not None:
+            print(f"plan cache hit ({key}): image, programs and chain slots in "
+                  f"{time.time() - t0:.0f} s, no build or compile", flush=True)
     t0 = time.time()
-    img_t, seed_t, _ = S.build_txt2img(g, sd, ids_c, ids_u, h, w, a.steps, a.guidance)
-    print(f"{len(g.ops)} ops ({a.steps} steps x 2 UNet), built in {time.time() - t0:.0f} s; "
-          f"activations {g.top / 2**20:.0f} MiB, weights {(g.ctop - g.cbase) / 2**20:.0f} MiB",
-          flush=True)
-    img = g.image()
-    g.put(img, seed_t, np.array([a.seed], np.uint32).view(np.float32))
-    g.consts.clear()                                    # (in the image now)
-    ops, g.ops = g.ops, []
+    if hit is None:
+        g = S.SDGraph(cfg, 3 << 29)                     # constants from 1.5 GiB
+        sd = S.SD(W)
+        img_t, seed_t, _ = S.build_txt2img(g, sd, ids_c, ids_u, h, w, a.steps, a.guidance)
+        print(f"{len(g.ops)} ops ({a.steps} steps x 2 UNet), built in {time.time() - t0:.0f} s; "
+              f"activations {g.top / 2**20:.0f} MiB, weights {(g.ctop - g.cbase) / 2**20:.0f} MiB",
+              flush=True)
+        img = g.image()
+        g.consts.clear()                                # (in the image now)
+        ops, g.ops = g.ops, []
+    else:
+        img = RG.dense_image(hit["img"])
+        img_t, seed_t = hit["out"], hit["seed"]
+    RG.Graph.put(None, img, seed_t, np.array([a.seed], np.uint32).view(np.float32))
     t0 = time.time()
     if board is None:
-        n, cache = 0, {}
+        n, cache_isa = 0, {}
         for i in range(0, len(ops), 64):                # compiled and run a chunk at a time
-            img, k = RG.run_isa(cfg, S.compile_cached(g, ops[i:i + 64], cache), img)
+            img, k = RG.run_isa(cfg, S.compile_cached(g, ops[i:i + 64], cache_isa), img)
             n += k
         st = {"instructions": n}
         out = g.read(img, S._dt(img_t))
     else:
-        from opentpu import isa as I
-        words, cache, asm, named = [], {}, {}, []
-        for i in range(0, len(ops), 256):               # (assembled words only, one array per
-            for n, p in S.compile_cached(g, ops[i:i + 256], cache):   # distinct program: ~90k
-                if id(p) not in asm:                    # ops, a few thousand distinct)
-                    asm[id(p)] = np.asarray(I.assemble(p), np.uint32)
-                words.append(asm[id(p)])
-                if a.profile:
-                    named.append((n, p))
-        print(f"{len(words)} programs compiled in {time.time() - t0:.0f} s", flush=True)
-        t0 = time.time()
-        board.write(0, img)
-        t_w = time.time() - t0
         at = -(-(len(img) + (1 << 20)) // 4096) * 4096
         if a.profile:                                   # each program on its own: its cycles
+            from opentpu import isa as I
+            named, asm = [], {}
+            for n_, p in S.compile_cached(g, ops, {}):
+                if id(p) not in asm:
+                    asm[id(p)] = np.asarray(I.assemble(p), np.uint32)
+                named.append((n_, p))
+            words = [asm[id(p)] for _, p in named]
+            print(f"{len(words)} programs compiled in {time.time() - t0:.0f} s", flush=True)
+            t0 = time.time()
+            board.write(0, img)
+            t_w = time.time() - t0
             rows = RG.profile_board(board, named, at, words=words)
             print(RG.profile_table(rows, top=30), flush=True)
             st = {"programs": len(rows), "cycles": sum(c for _, c in rows), "profiled": True}
         else:
-            plan = RG.ChainPlan(board, None, at, words=words)
+            # the two prompts' token rows (clip.tok: the only programs a prompt changes) run on
+            # their own before the chain; the rest is the plan, cached between invocations
+            if hit is None:
+                tok = [i for i, op in enumerate(ops) if op[0].startswith("clip.tok")]
+                tok_args = [{k: v for k, v in ops[i][2].items() if k != "moves"} for i in tok]
+                rest = [op for i, op in enumerate(ops) if i not in set(tok)]
+                words = RG.compile_words(cfg, rest)
+                print(f"{len(words) + len(tok)} programs compiled in {time.time() - t0:.0f} s",
+                      flush=True)
+                plan = RG.ChainPlan(board, None, at, words=words)
+                if cache is not None:
+                    t1 = time.time()
+                    ok = cache.save(key, {"img": RG.sparse_image(img), "parts": plan.parts,
+                                          "at": at, "stats": plan.stats, "tok": tok_args,
+                                          "out": img_t, "seed": seed_t})
+                    print(f"plan cache {'saved' if ok else 'NOT saved (disk)'} ({key}) in "
+                          f"{time.time() - t1:.0f} s", flush=True)
+            else:
+                tok_args = hit["tok"]
+                plan = RG.ChainPlan.from_parts(hit["parts"], hit["at"], hit["stats"])
+            tg = RG.Graph(cfg)
+            for args, ids in zip(tok_args, (ids_c, ids_u)):
+                tg.op("clip.tok", RG.copies_k, moves=tuple((int(i), t, 0)
+                                                           for t, i in enumerate(ids)), **args)
+            tok_plan = RG.ChainPlan(board, None, at, words=RG.compile_words(cfg, tg.ops))
+            t0 = time.time()
+            board.write(0, img)
+            t_w = time.time() - t0
+            st0 = tok_plan.run(board, timeout=60.0)
             st = {**plan.stats, **plan.run(board, timeout=3600.0)}
+            st["cycles"] += st0["cycles"]
+            st["programs"] += len(tg.ops)
         st["write_s"] = round(t_w, 1)
         t_ = img_t
         raw = board.read(t_.addr, 4 * t_.H * t_.W * t_.C).view(np.float32)

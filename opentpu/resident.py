@@ -62,21 +62,28 @@ def dense_k(x, w, b, y, M: int, K: int, act: str = "none", view_rows: int = 0,
     Kp = -(-K // D) * D
     N = y.shape[1]
     KC = min(ol.act_blocks(), QACT_KB_MAX) * D
-    R = max(1, min(ol.current().cfg.act_rows,
-                   (ol.tmem_contiguous() - 2048) // (Kp + min(N, NC) + 1)))
+    ar = ol.current().cfg.act_rows
+    room = ol.tmem_contiguous() - 2048
+    # two input and two output tiles when TMEM has room for R rows of each: the next block's
+    # loads overlap this block's quantize / MMs, its bias fill this block's store (the
+    # sequencer runs units concurrently on disjoint TMEM; one tile each serialized them)
+    nbuf = 2 if M > ar and room // (2 * (Kp + min(N, NC)) + 1) >= ar else 1
+    R = max(1, min(ar, room // (nbuf * (Kp + min(N, NC)) + 1)))
     bias = ol.load(b)
-    xt = ol.zeros([R, Kp])
-    for m0 in range(0, M, R):
+    xts = [ol.zeros([R, Kp]) for _ in range(nbuf)]
+    yts = [ol.empty([R, min(N, NC)]) for _ in range(nbuf)] if nbuf > 1 else None
+    for bi, m0 in enumerate(range(0, M, R)):
         n = min(R, M - m0)
+        xt = xts[bi % nbuf]
         if taps:
             C = K // len(taps)
             for j, o in enumerate(taps):
                 ol.load(x[m0 + o:m0 + o + n, :], out=xt[0:n, j * C:(j + 1) * C])
         else:
             ol.load(x[m0:m0 + n, :], out=xt[0:n, 0:K])
-        for c0 in range(0, N, NC):
+        for ci, c0 in enumerate(range(0, N, NC)):
             c = min(NC, N - c0)
-            yt = ol.empty([n, c])
+            yt = yts[(bi + ci) % nbuf][0:n, 0:c] if yts else ol.empty([n, c])
             yt.set(bias[c0:c0 + c][None, :])
             for k0 in range(0, Kp, KC):
                 k1 = min(Kp, k0 + KC)
@@ -86,7 +93,8 @@ def dense_k(x, w, b, y, M: int, K: int, act: str = "none", view_rows: int = 0,
             if act != "none":
                 yt.set(E.UNARY[act](yt))
             ol.store(y[m0:m0 + n, c0:c0 + c], yt)
-            del yt
+            if not yts:
+                del yt
 
 
 @ol.jit
@@ -524,6 +532,14 @@ class ChainPlan:
                       "slots_mib": round(max(4 * len(b) for b, _, _ in self.parts) / 2**20, 1),
                       "prepare_s": round(time.perf_counter() - t0, 2)}
 
+    @classmethod
+    def from_parts(cls, parts, at: int, stats: dict):
+        """A plan prepared earlier (PlanCache): its parts as they were, nothing recomputed."""
+        p = cls.__new__(cls)
+        p.at, p.parts, p.written = at, parts, False
+        p.stats = {**stats, "prepare_s": 0.0}
+        return p
+
     def run(self, board, timeout: float = 600.0) -> dict:
         """Every segment in order: its slots written (a single segment's once), its first
         program loaded and started, one halt polled. The image's inputs are the caller's."""
@@ -576,6 +592,147 @@ def profile_table(rows, mhz: float = 133.333, top: int = 25) -> str:
         lines.append(f"{k:<40} {c / 1e6:9.2f} {100 * c / tot:5.1f}% {c / mhz / 1e3:8.1f} {n:8d}")
     lines.append(f"{'total':<40} {tot / 1e6:9.2f} {100.0:5.1f}% {tot / mhz / 1e3:8.1f} {len(rows):8d}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- host-side compile / plan cache
+_FORK: dict = {}
+
+
+def _compile_one(i: int):
+    """(a forked worker) op i of _FORK's list -> its assembled words."""
+    from . import isa as I
+    from .runtime import compile_kernel
+    cfg, ops = _FORK["cfg"], _FORK["ops"]
+    name, kernel, args = ops[i]
+    comp, _ = compile_kernel(kernel, cfg, **args)
+    prog = comp.programs[0]
+    if len(prog) > cfg.IMEM_WORDS // 8:
+        raise ol.CompileError(f"{name}: {len(prog)} instructions, IMEM holds "
+                              f"{cfg.IMEM_WORDS // 8}")
+    return np.asarray(I.assemble(prog), np.uint32)
+
+
+def compile_words(cfg, ops, workers: int | None = None) -> list:
+    """Graph.compile's programs as assembled words, identical ops (the same kernel and
+    arguments) compiled once, the distinct ones in forked worker processes (Kernels do not
+    pickle; the workers inherit the op list): Kokoro's 4802 programs and SD's 5323 distinct
+    compiled on every core. -> [uint32 words] in op order (an identical op's: the same array)."""
+    import os
+    keys = [(id(k), repr(sorted(a.items(), key=lambda kv: kv[0]))) for _, k, a in ops]
+    first: dict = {}
+    for i, k in enumerate(keys):
+        first.setdefault(k, i)
+    todo = list(first.values())
+    n = workers if workers is not None else min(os.cpu_count() or 1, 16)
+    _FORK.update(cfg=cfg, ops=ops)
+    try:
+        if n > 1 and len(todo) > 32:
+            import multiprocessing as mp
+            import concurrent.futures as CF
+            with CF.ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("fork")) as ex:
+                got = list(ex.map(_compile_one, todo, chunksize=max(1, len(todo) // (8 * n))))
+        else:
+            got = [_compile_one(i) for i in todo]
+    finally:
+        _FORK.clear()
+    by = dict(zip(first.keys(), got))
+    return [by[k] for k in keys]
+
+
+def sparse_image(img: np.ndarray, chunk: int = 1 << 20) -> tuple:
+    """An image as (size, chunk, indices of its nonzero chunks, their bytes): SD's 2.6 GB image
+    is its 1.1 GB of weights and a few tables."""
+    n = -(-len(img) // chunk)
+    pad = np.zeros(n * chunk, np.uint8)
+    pad[:len(img)] = img
+    v = pad.reshape(n, chunk)
+    nz = np.flatnonzero(v.any(axis=1))
+    return (len(img), chunk, nz, np.ascontiguousarray(v[nz]))
+
+
+def dense_image(sp: tuple) -> np.ndarray:
+    size, chunk, nz, data = sp
+    n = -(-size // chunk)
+    out = np.zeros(n * chunk, np.uint8)
+    out.reshape(n, chunk)[nz] = data
+    return out[:size]
+
+
+def source_hash(*extra) -> str:
+    """sha256 of opentpu's .py sources and of the given files: a cached plan's code version."""
+    import hashlib
+    from pathlib import Path
+    h = hashlib.sha256()
+    root = Path(__file__).resolve().parent
+    for f in sorted(root.rglob("*.py")) + [Path(e) for e in extra]:
+        h.update(str(f.relative_to(root.parent) if root.parent in f.parents else f.name).encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def files_id(*paths) -> list:
+    """(name, size, mtime) of model files: a cached plan's weights."""
+    import os
+    out = []
+    for p in paths:
+        st = os.stat(p)
+        out.append((os.path.basename(str(p)), st.st_size, st.st_mtime_ns))
+    return out
+
+
+class PlanCache:
+    """Prepared card runs kept on the host's disk between invocations (the graph's image, its
+    programs' chain slots, the addresses the caller needs): a run with the same model, code,
+    bitstream and shapes skips the graph build, the compile and the preparation. Our own
+    pickles (protocol 5), in OTPU_PLAN_CACHE (default ~/otpu-cache/plan); a save needs
+    OTPU_PLAN_CACHE_FREE_GB (default 5) free besides; the oldest beyond OTPU_PLAN_CACHE_KEEP
+    (default 6) entries go. OTPU_PLAN_CACHE=off: no cache."""
+
+    def __init__(self, kind: str):
+        import os
+        from pathlib import Path
+        d = os.environ.get("OTPU_PLAN_CACHE", str(Path.home() / "otpu-cache" / "plan"))
+        self.dir = None if d == "off" else Path(d) / kind
+        self.free = float(os.environ.get("OTPU_PLAN_CACHE_FREE_GB", "5"))
+        self.keep = int(os.environ.get("OTPU_PLAN_CACHE_KEEP", "6"))
+
+    @staticmethod
+    def key(*parts) -> str:
+        import hashlib
+        return hashlib.sha256(repr(parts).encode()).hexdigest()[:24]
+
+    def load(self, key: str):
+        import pickle
+        if self.dir is None:
+            return None
+        f = self.dir / f"{key}.pkl"
+        if not f.exists():
+            return None
+        try:
+            with open(f, "rb") as fh:
+                obj = pickle.load(fh)
+            f.touch()
+            return obj
+        except Exception:
+            return None
+
+    def save(self, key: str, obj) -> bool:
+        import os
+        import pickle
+        import shutil
+        if self.dir is None:
+            return False
+        self.dir.mkdir(parents=True, exist_ok=True)
+        blob = pickle.dumps(obj, protocol=5)
+        if shutil.disk_usage(self.dir).free - len(blob) < self.free * 2**30:
+            return False
+        tmp = self.dir / f".{key}.{os.getpid()}.tmp"
+        tmp.write_bytes(blob)
+        os.replace(tmp, self.dir / f"{key}.pkl")
+        old = sorted(self.dir.glob("*.pkl"), key=lambda p: p.stat().st_mtime)
+        for p in old[:max(0, len(old) - self.keep)]:
+            p.unlink(missing_ok=True)
+        return True
 
 
 def run_board_chained(board, progs, at: int, workers: int | None = None,

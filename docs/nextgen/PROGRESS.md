@@ -1,5 +1,24 @@
 # Nextgen implementation progress
 
+## Host plan cache for SD / Kokoro; Kokoro AdaIN + Snake + padding fused (2026-11-25)
+
+- **Plan cache (SOFTWARE VERIFIED, card run pending):** `resident.PlanCache` keeps the sparse
+  DRAM image, the chain plan and the addresses on disk (`~/otpu-cache/plan`, `OTPU_PLAN_CACHE`,
+  `off` disables; keeps the 6 newest, needs 5 GB free). Key: arch hash, build id, DRAM size,
+  shapes, weight files (size + mtime) and a hash of the opentpu sources, so a code or firmware
+  change rebuilds. SD: everything but `clip.tok` is cached; the prompt's token copies are a
+  small separate chain run before it. Kokoro: graph A keyed by ids / voice / style, graph B
+  by A's key + frames. `--no-cache` forces a rebuild. `resident.compile_words` compiles in a
+  forked pool and dedups equal programs (21.9 -> 10.7 s on 2 cores, words identical).
+- **Kokoro fusions (SOFTWARE VERIFIED vs NumPy; ISA end-to-end and card pending):**
+  `_instance_affine` does AdaIN, Snake and the next conv's zero padding in one program
+  (2 passes; variance shifted by x[0]); the separate `kokoro.snake` and padding programs are
+  gone from the resblocks. `dense_k` double-buffers its x / y tiles when TMEM allows.
+- Regression: test_resident, test_kokoro_*, test_sd_graph, test_conv 92 passed; cnngraph /
+  diffusion / torchdev / smolvla 56 passed, 1 skipped (LeRobot pin).
+- Card check: `r8_kokoro.cmd` and `r8_sd.cmd` twice each (2nd run = cache hit), then
+  `r8_media_profile.cmd`.
+
 ## Kokoro and SD card profile (r8_media_profile, 81dc3958) and the fixes it pointed to (2026-11-25)
 
 - **Kokoro phrase 1, graph B (417.0 Mcycles, PHYSICAL)**: `kokoro.dilated_conv` 221.1 (53 %,

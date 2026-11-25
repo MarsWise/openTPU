@@ -6,16 +6,21 @@ from .compiler import Tensor
 
 
 @ol.jit
-def _instance_affine(x, gamma, beta, style, y, length: int, channels: int, eps: float):
-    """AdaIN's instance norm and affine over [length, channels]: three hardware loops over blocks
-    of R rows ([R, C] tiles: one instruction a block, not a row), the statistics' partial sums
-    kept per row of the block and folded at the end; the variance from centered differences.
-    A tail of length % R rows after each loop."""
+def _instance_affine(x, gamma, beta, style, y, length: int, channels: int, eps: float,
+                     alpha=None):
+    """AdaIN's instance norm and affine over [length, channels] (and, with alpha, the Snake
+    after it: v + sin(alpha v)^2 / alpha): two hardware loops over blocks of R rows ([R, C]
+    tiles: one instruction a block, not a row). The first sums d = x - x[0] and d^2 per channel
+    (the shifted-data variance: x[0] keeps the squares' cancellation small), the partial sums
+    kept per row of the block and folded at the end; the second writes x * a + c per channel
+    (and its Snake). A tail of length % R rows after each loop."""
     C = channels
-    R = max(1, min(length, 64, (ol.tmem_contiguous() // 8) // C))
+    R = max(1, min(length, 64, (ol.tmem_contiguous() // 10) // C))
     nb, tail = length // R, length % R
     t = ol.empty([R, C])
     acc = ol.zeros([R, C])
+    acq = ol.zeros([R, C])
+    k0 = ol.load(x[0, :])
 
     def fold(a, n):                     # [n, C] partial sums -> [C]
         v = ol.zeros([C])
@@ -25,41 +30,48 @@ def _instance_affine(x, gamma, beta, style, y, length: int, channels: int, eps: 
 
     for i in ol.range(nb):
         ol.load(x[i * R:i * R + R, :], out=t)
+        t.set(t - k0[None, :])
         acc.set(acc + t)
-    total = fold(acc, R)
+        acq.set(acq + t * t)
+    s1, s2 = fold(acc, R), fold(acq, R)
     if tail:
         tt = ol.load(x[nb * R:length, :])
-        total.set(total + fold(tt, tail))
+        tt.set(tt - k0[None, :])
+        s1.set(s1 + fold(tt, tail))
+        s2.set(s2 + fold(tt * tt, tail))
         del tt
-    mean = total * (1.0 / length)
-    acc.set(acc * 0.0)
-    for i in ol.range(nb):
-        ol.load(x[i * R:i * R + R, :], out=t)
-        t.set(t - mean[None, :])
-        acc.set(acc + t * t)
-    square = fold(acc, R)
-    if tail:
-        tt = ol.load(x[nb * R:length, :])
-        tt.set(tt - mean[None, :])
-        square.set(square + fold(tt * tt, tail))
-        del tt
-    inv = ol.rsqrt(square * (1.0 / length) + eps)
+    m1 = s1 * (1.0 / length)                     # the mean of d
+    mean = m1 + k0
+    inv = ol.rsqrt(s2 * (1.0 / length) - m1 * m1 + eps)
     w, b = ol.load(gamma), ol.load(beta)
     sc = ol.load(style[0, :C]) + 1.0
     # y = ((x - mean) * inv * w + b) * sc + shift = x * a + c, a and c per channel
     a = inv * w * sc
     c = (b - mean * inv * w) * sc + ol.load(style[0, C:])
+    if alpha is not None:
+        al = ol.load(alpha)
+        ra = ol.recip(al)
+
+    def out(v):
+        v.set(v * a[None, :] + c[None, :])
+        if alpha is not None:
+            sn = ol.tfn("sin", v * al[None, :])
+            v.set(v + (sn * sn) * ra[None, :])
+
     for i in ol.range(nb):
         ol.load(x[i * R:i * R + R, :], out=t)
-        t.set(t * a[None, :] + c[None, :])
+        out(t)
         ol.store(y[i * R:i * R + R, :], t)
     if tail:
         tt = ol.load(x[nb * R:length, :])
-        tt.set(tt * a[None, :] + c[None, :])
+        out(tt)
         ol.store(y[nb * R:length, :], tt)
 
 
-def adain(g, x, style, fc_weight, fc_bias, norm_weight, norm_bias, eps=1e-5):
+def adain(g, x, style, fc_weight, fc_bias, norm_weight, norm_bias, eps=1e-5, alpha=None,
+          pad=None):
+    """AdaIN; with alpha, the Snake after it in the same program, and with pad, the output in a
+    tensor of that many zero rows each side (the next convolution's padding: no copy)."""
     """PyPI Kokoro AdaIN1d, including learned InstanceNorm affine parameters."""
     if x.L < 2 or style.L != 1 or eps <= 0 or not np.isfinite(eps):
         raise ValueError("AdaIN needs length > 1, one style row and positive finite epsilon")
@@ -68,10 +80,16 @@ def adain(g, x, style, fc_weight, fc_bias, norm_weight, norm_bias, eps=1e-5):
             np.shape(norm_weight) != (x.C,) or np.shape(norm_bias) != (x.C,)):
         raise ValueError("invalid AdaIN parameter shapes")
     projected = g.linear(style, fc_weight, fc_bias, name="kokoro.style_projection")
-    y = g.tensor(x.L, x.C, x.pad)
+    y = g.tensor(x.L, x.C, x.pad if pad is None else pad)
+    extra = {}
+    if alpha is not None:
+        al = np.asarray(alpha, np.float32).reshape(-1)
+        if len(al) != x.C or not np.isfinite(al).all() or (al == 0).any():
+            raise ValueError("Snake requires one finite nonzero coefficient per channel")
+        extra["alpha"] = g.vec(al)
     g.op("kokoro.instance_affine", _instance_affine, x=x.rows(),
          gamma=g.vec(norm_weight), beta=g.vec(norm_bias), style=projected.rows(),
-         y=y.rows(), length=x.L, channels=x.C, eps=float(eps))
+         y=y.rows(), length=x.L, channels=x.C, eps=float(eps), **extra)
     return y
 
 
@@ -110,13 +128,17 @@ def adain_resblock(g, x, style, state, dilation=(1, 3, 5)):
             prefix = f"adain{stage}.{i}."
             # (Kokoro v1.0 stores no InstanceNorm affine: its loader's strict=False keeps the
             # init, ones and zeros)
+            cp = f"convs{stage}.{i}."
+            w = fold_weight_norm(state[cp + "weight_v"], state[cp + "weight_g"])
+            pad = (w.shape[2] - 1) * dil // 2
+            # AdaIN, its Snake and the convolution's zero padding in one program (the old
+            # chain: adain, snake, a padding copy: two more passes over DRAM)
             x = adain(g, x, style, state[prefix + "fc.weight"], state[prefix + "fc.bias"],
                       state.get(prefix + "norm.weight", np.ones(x.C, np.float32)),
-                      state.get(prefix + "norm.bias", np.zeros(x.C, np.float32)))
-            x = snake(g, x, state[f"alpha{stage}.{i}"])
-            prefix = f"convs{stage}.{i}."
-            w = fold_weight_norm(state[prefix + "weight_v"], state[prefix + "weight_g"])
-            x = dilated_conv(g, x, w, state[prefix + "bias"], dil)
+                      state.get(prefix + "norm.bias", np.zeros(x.C, np.float32)),
+                      alpha=state[f"alpha{stage}.{i}"], pad=pad)
+            x = g.conv1d(x, w, state[cp + "bias"], pad=pad, name="kokoro.dilated_conv",
+                         dilation=dil)
         x = g.add(x, residual, name="kokoro.residual")
     return x
 

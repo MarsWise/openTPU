@@ -265,3 +265,38 @@ def test_bilstm(length):
 def test_weight_norm_rejects_invalid(bad):
     with pytest.raises(ValueError, match="nonzero"):
         K.fold_weight_norm(bad, np.ones((2, 1, 1)))
+
+
+@pytest.mark.parametrize("length,channels,offset", [(200, 64, 0.0), (1037, 32, 40.0)])
+def test_adain_snake_padded(length, channels, offset):
+    """AdaIN with its Snake fused and the output in a padded tensor (adain(alpha=, pad=)), the
+    shifted-data variance on inputs far from zero mean (offset 40, std 1): against torch."""
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(4)
+    module = _adain_module(9, channels).eval()
+    alpha = torch.rand(channels) * 1.5 + 0.2
+    with torch.no_grad():
+        module.norm.weight.uniform_(0.3, 1.2)
+        module.norm.bias.uniform_(-0.5, 0.5)
+        value = torch.randn(1, channels, length) + offset
+        style = torch.randn(1, 9)
+        h = module(value, style)
+        a = alpha[None, :, None]
+        ref = (h + torch.sin(a * h) ** 2 / a)[0].T.numpy()
+    weights = {k: v.detach().numpy() for k, v in module.state_dict().items()}
+    g = graph()
+    x, s = g.tensor(length, channels), g.tensor(1, 9)
+    y = K.adain(g, x, s, weights["fc.weight"], weights["fc.bias"], weights["norm.weight"],
+                weights["norm.bias"], alpha=alpha.numpy(), pad=5)
+    assert y.pad == 5
+    image = g.image()
+    g.put(image, x, value[0].T.numpy())
+    g.put(image, s, style.numpy())
+    image, _ = RG.run_isa(g.cfg, g.compile(), image)
+    got = g.read(image, y)
+    f = image.view(np.float32)
+    border = np.concatenate([f[y.addr // 4:y.addr // 4 + 5 * y.rs],
+                             f[(y.addr // 4) + (5 + length) * y.rs:][:5 * y.rs]])
+    assert not border.any()
+    assert cosine(got, ref) >= 0.999
+    assert np.linalg.norm(got - ref) / np.linalg.norm(ref) < 0.02

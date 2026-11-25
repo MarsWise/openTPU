@@ -665,3 +665,49 @@ def test_profile_board_and_table():
     line = next(l for l in t.splitlines() if l.startswith("gen.rb.c "))
     assert line.split()[1] == "0.00" and line.split()[-1] == "3"
     assert t.splitlines()[1].startswith("gen.rb.c")          # the largest family first
+
+
+def test_compile_words_matches_compile_and_dedups():
+    """compile_words: the programs Graph.compile makes, assembled, identical ops compiled once
+    (the same array), in forked workers or not."""
+    from opentpu import isa as I
+    g = RG.Graph(cfg())
+    x = g.tensor(40, 64)
+    y = g.tensor(40, 64)
+    for _ in range(3):
+        g.add(x, x, y=y)
+    g.layer_norm(x, np.ones(64, np.float32), np.zeros(64, np.float32), 1e-5)
+    want = [np.asarray(I.assemble(p), np.uint32) for _, p in g.compile()]
+    for workers in (1, 2):
+        got = RG.compile_words(g.cfg, g.ops, workers=workers)
+        assert all(np.array_equal(a, b) for a, b in zip(want, got)) and len(got) == len(want)
+    got = RG.compile_words(g.cfg, g.ops, workers=1)
+    assert got[0] is got[1] is got[2]
+
+
+def test_plan_cache_and_sparse_image(tmp_path, monkeypatch):
+    """PlanCache keeps a run's pickled plan by key, drops the oldest beyond KEEP; a sparse
+    image comes back byte for byte; ChainPlan.from_parts takes the parts as they were."""
+    monkeypatch.setenv("OTPU_PLAN_CACHE", str(tmp_path))
+    monkeypatch.setenv("OTPU_PLAN_CACHE_FREE_GB", "0")
+    monkeypatch.setenv("OTPU_PLAN_CACHE_KEEP", "2")
+    img = np.zeros(5 * (1 << 20) + 123, np.uint8)
+    img[7] = 1
+    img[3 * (1 << 20) + 5:3 * (1 << 20) + 9] = 9
+    img[-1] = 4
+    sp = RG.sparse_image(img)
+    assert list(sp[2]) == [0, 3, 5] and np.array_equal(RG.dense_image(sp), img)
+    c = RG.PlanCache("t")
+    keys = [c.key("x", i) for i in range(3)]
+    assert len(set(keys)) == 3
+    assert c.load(keys[0]) is None
+    import time
+    for i, k in enumerate(keys):
+        assert c.save(k, {"img": sp, "i": i})
+        time.sleep(0.01)
+    assert c.load(keys[0]) is None and c.load(keys[2])["i"] == 2
+    assert np.array_equal(RG.dense_image(c.load(keys[1])["img"]), img)
+    p = RG.ChainPlan.from_parts(["parts"], 4096, {"programs": 3, "prepare_s": 9.0})
+    assert p.parts == ["parts"] and p.at == 4096 and not p.written and p.stats["prepare_s"] == 0
+    monkeypatch.setenv("OTPU_PLAN_CACHE", "off")
+    assert RG.PlanCache("t").load(keys[2]) is None
