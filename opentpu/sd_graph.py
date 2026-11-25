@@ -322,7 +322,8 @@ class SD:
         gg = g.linear(n3, pw[F:], pb[F:], name=name + ".ff_g")
         y = g.tensor(t.L, F)
         g._rowwise(name + ".geglu", geglu_k, t.L, F,
-                   lambda r0, r1: dict(h=hh.rows(r0, r1), g=gg.rows(r0, r1), y=y.rows(r0, r1)))
+                   lambda r0, r1: dict(h=hh.rows(r0, r1), g=gg.rows(r0, r1), y=y.rows(r0, r1)),
+                   tiles=8)                     # h, g and the erf GELU's temporaries
         f = g.linear(y, self.w(B + "ff.net.2.weight"), self.w(B + "ff.net.2.bias"),
                      name=name + ".ff_out")
         t = g.add(t, f, name=name + ".r3")

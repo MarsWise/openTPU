@@ -111,6 +111,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", default="kokoro.wav")
     ap.add_argument("--isa", action="store_true")
+    ap.add_argument("--compile-only", action="store_true",
+                    help="graph A run (its durations shape B), graph B compiled, not run")
     ap.add_argument("--dev", default="/dev/xdma0")
     ap.add_argument("--ref", action="store_true", help="compare with the float reference")
     a = ap.parse_args()
@@ -132,9 +134,8 @@ def main() -> int:
     style = pack[len(ids) - 3].reshape(-1)              # KPipeline: the row for the phonemes
     ecc0 = None
     if a.isa:
-        from opentpu.isasim import board_config
-        cfg = board_config(MCOLS=8, TFN=True, VCMP=True, VRAND=True, TMEM_WORDS=131072,
-                           DRAM_BYTES=1 << 31)
+        from opentpu.isasim import lean_config          # the card's configuration
+        cfg = lean_config(DRAM_BYTES=1 << 31)
         run = IsaRunner(cfg)
     else:
         from opentpu.host import memcal
@@ -170,6 +171,9 @@ def main() -> int:
     pb = g.compile(g.ops[na:])
     print(f"graph B: {len(pb)} programs, compiled in {time.time() - t0:.1f} s, DRAM top "
           f"{g.top / 2**20:.0f} MiB", flush=True)
+    if a.compile_only:
+        print("RESULT: PASS (compiled; not run)", flush=True)
+        return 0
     # graph B's arena zero (its tensors' pad rows are read as zeros), then its constants
     run.write_at(a_top, np.zeros(-(-g.top // 4096) * 4096 - a_top, np.uint8))
     for at, arr in g.consts[na_consts:]:

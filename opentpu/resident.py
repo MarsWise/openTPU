@@ -255,20 +255,21 @@ class Graph:
                 G=G, eps=eps, act=act)
         return y
 
-    def _chunks(self, L: int, C: int) -> list[tuple[int, int]]:
+    def _chunks(self, L: int, C: int, tiles: int = 4) -> list[tuple[int, int]]:
         """Row ranges of an elementwise op whose tiles fit TMEM: the whole tensor when it fits
         (one program, as before), else blocks of rows of at most TMEM_WORDS / 4 words (two
         operand tiles and the allocator's spare rows). SmolVLA base's vision residuals
-        ([1024, 768] = 786432 words) exceed r8's 131072-word TMEM in one tile."""
-        cap = max(1, self.cfg.TMEM_WORDS // 4)
+        ([1024, 768] = 786432 words) exceed r8's 131072-word TMEM in one tile. tiles: TMEM's
+        share a block's tile may take (a kernel with three operands and a temporary: 6)."""
+        cap = max(1, self.cfg.TMEM_WORDS // tiles)
         if L * C <= cap:
             return [(0, L)]
         rb = max(1, cap // max(1, C))
         return [(r, min(L, r + rb)) for r in range(0, L, rb)]
 
-    def _rowwise(self, name: str, kernel, L: int, C: int, views, **kw) -> None:
+    def _rowwise(self, name: str, kernel, L: int, C: int, views, tiles: int = 4, **kw) -> None:
         """One op per row block: views(r0, r1) -> the kernel's tensor arguments."""
-        ch = self._chunks(L, C)
+        ch = self._chunks(L, C, tiles)
         for i, (r0, r1) in enumerate(ch):
             self.op(name if len(ch) == 1 else f"{name}.{i}", kernel, **views(r0, r1), **kw)
 
@@ -571,44 +572,53 @@ def group_norm2d_k(x, w, b, y, H: int, W: int, G: int, eps: float, act: str = "n
                    res=None):
     """y = act(GroupNorm(x) * w + b (+ res)): x [H*W, C] dense, y (and res) [H, W, C] views.
     Three hardware loops over the image rows: the groups' sums, their squared deviations from
-    the means, then the normalization, its affine, the residual and the activation."""
+    the means, then the normalization, its affine, the residual and the activation. A row
+    wider than an eighth of TMEM goes in equal pieces of pixels (the SD VAE's rows at 256 px:
+    256 x 256 and 128 x 512 words; TMEM's largest tile on the card is 65536 words)."""
     from .kernels import eltwise as E
     C = x.shape[1]
     cg = C // G
-    t = ol.empty([W, C])
+    Wc = W                                         # pixels a piece: W's largest divisor whose
+    while Wc * C > max(C, ol.tmem_words() // 8) and Wc > 1:  # piece fits an eighth of TMEM
+        Wc = max(d for d in range(1, Wc) if W % d == 0)
+    pieces = [(p0, Wc) for p0 in range(0, W, Wc)]
+    t = ol.empty([Wc, C])
     wv, bv = ol.load(w), ol.load(b)
     inv = 1.0 / (H * W * cg)
     sums = [ol.zeros([1]) for _ in range(G)]
     for h in ol.range(H):
-        ol.load(x[h * W:(h + 1) * W, :], out=t)
-        for g in range(G):
-            sums[g].set(sums[g] + ol.sum(ol.sum(t[:, g * cg:(g + 1) * cg], axis=1)))
+        for p0, n in pieces:
+            ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
+            for g in range(G):
+                sums[g].set(sums[g] + ol.sum(ol.sum(t[:, g * cg:(g + 1) * cg], axis=1)))
     means = [ol.zeros([1]) for _ in range(G)]
     for g in range(G):
         means[g].set(sums[g] * inv)
     sq = [ol.zeros([1]) for _ in range(G)]
-    d = ol.empty([W, cg])
+    d = ol.empty([Wc, cg])
     for h in ol.range(H):
-        ol.load(x[h * W:(h + 1) * W, :], out=t)
-        for g in range(G):
-            d.set(t[:, g * cg:(g + 1) * cg] - means[g])
-            sq[g].set(sq[g] + ol.sum(ol.sumsq(d)))
+        for p0, n in pieces:
+            ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
+            for g in range(G):
+                d.set(t[:, g * cg:(g + 1) * cg] - means[g])
+                sq[g].set(sq[g] + ol.sum(ol.sumsq(d)))
     rs = [ol.zeros([1]) for _ in range(G)]
     for g in range(G):
         rs[g].set(ol.rsqrt(sq[g] * inv + eps))
-    rt = ol.empty([W, C]) if res is not None else None
+    rt = ol.empty([Wc, C]) if res is not None else None
     for h in ol.range(H):
-        ol.load(x[h * W:(h + 1) * W, :], out=t)
-        for g in range(G):
-            sl = t[:, g * cg:(g + 1) * cg]
-            sl.set((sl - means[g]) * rs[g])
-        t.set(t * wv[None, :] + bv[None, :])
-        if res is not None:
-            ol.load(res[h, 0:W, :], out=rt)
-            t.set(t + rt)
-        if act != "none":
-            t.set(E.UNARY[act](t))
-        ol.store(y[h, 0:W, :], t)
+        for p0, n in pieces:
+            ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
+            for g in range(G):
+                sl = t[:, g * cg:(g + 1) * cg]
+                sl.set((sl - means[g]) * rs[g])
+            t.set(t * wv[None, :] + bv[None, :])
+            if res is not None:
+                ol.load(res[h, p0:p0 + n, :], out=rt)
+                t.set(t + rt)
+            if act != "none":
+                t.set(E.UNARY[act](t))
+            ol.store(y[h, p0:p0 + n, :], t)
 
 
 @ol.jit

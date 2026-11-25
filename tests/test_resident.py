@@ -603,3 +603,39 @@ def test_chain_plan_runs_again_on_new_inputs(small):
     slot_writes = sum(1 for a in writes if a == at)
     assert slot_writes == (3 * plan.stats["runs"] if small else 1)
     assert (plan.stats["runs"] > 1) == small
+
+
+@pytest.mark.parametrize("tm", [1 << 16, 4096])
+def test_group_norm2d_pieces(tm):
+    """GroupNorm over [H, W, C] with a residual and SiLU; with a 4096-word TMEM each 24-pixel
+    row goes in three pieces of 8 (the SD VAE's 256 x 256 x 256 rows on the card): against
+    PyTorch both ways."""
+    from dataclasses import replace
+    H, W, C, G = 5, 24, 64, 8
+    torch.manual_seed(3)
+    gn = torch.nn.GroupNorm(G, C, eps=1e-6)
+    with torch.no_grad():
+        gn.weight.uniform_(0.5, 1.5)
+        gn.bias.uniform_(-0.3, 0.3)
+    x = torch.randn(1, C, H, W) * 2 + 0.5
+    r = torch.randn(1, C, H, W)
+    with torch.no_grad():
+        want = (torch.nn.functional.silu(gn(x) + r))[0].permute(1, 2, 0).numpy()
+    g = RG.Graph(replace(cfg(), TMEM_WORDS=tm))
+    xt = g.tensor2(H, W, C, 0, 0)
+    rt = g.tensor2(H, W, C, 1, 0)
+    y = g.group_norm2d(xt, G, gn.weight.detach().numpy(), gn.bias.detach().numpy(), 1e-6,
+                       act="silu", res=rt)
+    progs = g.compile()
+    img = g.image()
+    fl = img.view(np.float32)
+    xa = x[0].permute(1, 2, 0).numpy()
+    fl[xt.addr // 4:xt.addr // 4 + H * W * C] = xa.reshape(-1)
+    for h in range(H):
+        o = (rt.addr // 4) + (h + 1) * rt.rs + C
+        fl[o:o + W * C] = r[0, :, h].T.reshape(-1).numpy()
+    img, _ = RG.run_isa(g.cfg, progs, img)
+    fl = img.view(np.float32)
+    got = np.stack([fl[y.addr // 4 + (h + y.border) * y.rs + y.border * C:][:W * C]
+                    for h in range(H)]).reshape(H, W, C)
+    assert rel(got, want) < 1e-4, rel(got, want)

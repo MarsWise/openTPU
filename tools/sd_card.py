@@ -107,9 +107,8 @@ def main() -> int:
     h = w = a.size // 8
     ecc0 = None
     if a.isa:
-        from opentpu.isasim import board_config
-        cfg = board_config(MCOLS=8, TFN=True, VCMP=True, VRAND=True, TMEM_WORDS=131072,
-                           DRAM_BYTES=1 << 32)
+        from opentpu.isasim import lean_config          # the card's configuration
+        cfg = lean_config(DRAM_BYTES=1 << 32)
         board = None
     else:
         from opentpu.host import memcal

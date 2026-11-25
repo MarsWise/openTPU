@@ -183,3 +183,34 @@ def test_conv2d_split_weights_are_more_accurate():
     args2 = dict(args, w=Weight(hi, fmt="int8"), wlo=Weight(lo, fmt="int8"))
     two = run(*compile_kernel(C.conv2d, cfg, **args2), "isa").outputs["y"]
     assert rel(two, want) < 0.8 * rel(one, want), (rel(two, want), rel(one, want))
+
+
+@pytest.mark.parametrize("H,W,stride,tm", [(5, 6, 1, 2048), (6, 21, 1, 4096), (7, 23, 2, 4096)])
+def test_conv2d_one_kernel_row_at_a_time(H, W, stride, tm):
+    """When KH input rows would take more than half of TMEM (SD's 2560-channel concatenations
+    at 8 x 8 on the card, the VAE's 512-channel rows at 128 x 128), conv2d loads one kernel
+    row at a time, of it only the columns a tile of output pixels reads (two tiles a row at
+    W 21): the same patches, the same MMs, so the same output bit for bit as with room for all
+    KH rows."""
+    from dataclasses import replace
+    big = Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16)
+    small = replace(big, TMEM_WORDS=tm)          # 2 * 3 * rw > tm: one row at a time
+    rng = np.random.default_rng(11 + W)
+    x, w, b, args = case(rng, H, W, 64, 16, 3, stride, 1, big.D)
+    outs = []
+    for cfg in (big, small):
+        comp, imgs = compile_kernel(C.conv2d, cfg, **args)
+        outs.append(run(comp, imgs, "isa").outputs["y"])
+    assert np.array_equal(outs[0], outs[1])
+    assert rel(outs[1], C.reference(x, w, b, stride, 1)) < 0.02
+
+
+def test_conv2d_one_kernel_row_rtl(have_verilator):
+    from dataclasses import replace
+    cfg = replace(Config(S=1, D=32, MCOLS=4, ACT_ROWS=16, ACT_BLOCKS=16), TMEM_WORDS=4096)
+    rng = np.random.default_rng(12)
+    _, _, _, args = case(rng, 3, 21, 64, 16, 3, 1, 1, cfg.D)
+    comp, imgs = compile_kernel(C.conv2d, cfg, **args)
+    ri = run(comp, [i.copy() for i in imgs], "isa")
+    rr = run(comp, [i.copy() for i in imgs], "rtl")
+    assert_same_state(ri, rr)

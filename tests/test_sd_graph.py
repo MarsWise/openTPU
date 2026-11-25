@@ -12,7 +12,7 @@ import pytest
 
 from opentpu import resident as RG
 from opentpu import sd_graph as S
-from opentpu.isasim import board_config
+from opentpu.isasim import lean_config
 
 torch = pytest.importorskip("torch")
 diffusers = pytest.importorskip("diffusers")
@@ -20,8 +20,7 @@ SD_DIR = Path(os.environ.get("OTPU_SD15_DIR", "/mnt/user-data/uploads/ai-models/
 
 
 def _cfg(dram=1 << 26):
-    return board_config(MCOLS=8, TFN=True, VCMP=True, VRAND=True, TMEM_WORDS=131072,
-                        DRAM_BYTES=dram)
+    return lean_config(DRAM_BYTES=dram)          # the card's (r5x lean) configuration
 
 
 def _cos(a, b):

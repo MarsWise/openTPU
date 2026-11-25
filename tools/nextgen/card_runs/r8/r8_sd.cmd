@@ -24,7 +24,7 @@ if exist "%~dp0sync_next.bundle" (copy /y "%~dp0sync_next.bundle" "%~dp0sync.bun
 scp %O% "%~dp0sync.bundle" "%~dp0r8_sd.sh" %H%:/tmp/ || goto fail
 ssh %O% %H% "tr -d '\r' < /tmp/r8_sd.sh > /tmp/r8_sd_exec.sh && bash -o pipefail -c 'bash /tmp/r8_sd_exec.sh 2>&1 | tee /tmp/r8_sd.log'"
 set RUNRC=%errorlevel%
-scp %O% %H%:/tmp/r8_sd.log %H%:/tmp/sd_256*.png "%~dp0" || set RUNRC=1
+scp %O% %H%:/tmp/r8_sd.log %H%:/tmp/sd_256*.png "%~dp0." || set RUNRC=1
 echo.
 echo Log: %~dp0r8_sd.log   image: %~dp0sd_256.png (reference sd_256.ref.png)
 pause

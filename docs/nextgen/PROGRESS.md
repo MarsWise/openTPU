@@ -1,5 +1,45 @@
 # Nextgen implementation progress
 
+## Card results on ed482f26; SD and Kokoro fitted to the card's TMEM (2026-11-25)
+
+- **Card runs on ed482f26-lean** (CFG_HASH add73610; host tree 16b4564a / d07a8f1d). Every run
+  had ECC 0 / 0 before and after. PHYSICAL FPGA VERIFIED:
+  - **Qwen3.5 MTP** (`r8_mtp.cmd`, greedy, 3 prompts): every MTP reply equals plain decode
+    token for token. Device decode tok/s:
+
+    | Model | int8 plain | int8 MTP | fp4 plain | fp4 MTP | MTP acceptance |
+    |---|---|---|---|---|---|
+    | Qwen3.5-0.8B | 20.1 | 26.5 / 34.1 / 28.5 | 28.0 | 39.3 / 43.6 / 38.5 | 0.48-0.90 |
+    | Qwen3.5-2B | 8.4 | 13.7 / 14.7 / 12.8 | 12.5 | 18.3 / 21.2 / 18.5 | 0.61-0.90 |
+
+    Wall decode is lower than device decode with MTP (e.g. 30.4 against 43.6 tok/s): the host's
+    work per verify step. TTFT was 23-33 s because the program cache was off in `r8_mtp.sh`
+    (r8_ttft: 0.35-0.6 s warm). `r8_mtp.sh`, `r8_llm.sh` and `r8_more_models.sh` now export
+    `OTPU_PROG_CACHE` / `OTPU_IMG_CACHE`.
+  - **LFM3 fp4** (`r8_llm.cmd lfm3-fp4`): logits cos 0.996-0.999 to fp32, next token ' Paris',
+    32 greedy tokens picked on the card, 14.1 tok/s.
+  - **Maple-Preview** (`r8_llm.cmd maple`, TQ2_0 -> tgsc, 128 experts resident, int8 head):
+    cos 0.982-0.9997 on 5 prompt rows, next token ' Paris', 16 greedy tokens on the card;
+    1.34 tok/s decode (expert offload over PCIe).
+- **Kokoro and SD failed on the card at compile time** ("TMEM exhausted"). The ISA runs used a
+  board_config without the card's PAIR / DSTEP / STREAM / SEQ_WC / 16 ACT RAM rows.
+  - New `isasim.lean_config(tgq4m=False)`: the card's exact Config (arch_hash add73610 /
+    81dc3958). `tools/sd_card.py --isa`, `tools/kokoro_card.py --isa` and the SD / Kokoro tests
+    use it.
+  - Kokoro: the generator's three-way mean (`add3_scale_k`) holds a, b, c and a temporary:
+    `Graph._rowwise(..., tiles=6)` gives it row blocks of a sixth of TMEM. Phrase 1 on the ISA
+    with the card's config: durations equal, F0 / N cos 0.99999, log-mel cos 0.9942. Phrase 2
+    (130 frames, 9906 programs) compiles (`--compile-only`).
+  - SD: conv2d loads one kernel row at a time, and of it only the columns a tile of output
+    pixels reads, when KH rows would take more than half of TMEM (the UNet's 2560-channel
+    concatenations at 8 x 8; the VAE's 512-channel rows at 128 x 128, 66561 words, more than
+    TMEM's largest tile). Output tiles are min(ACT_ROWS, OW) rows. GroupNorm 2-D takes a row in
+    pieces of at most an eighth of TMEM. Bit for bit equal to the whole-row conv
+    (`tests/test_conv.py` one_kernel_row, ISA and RTL); GroupNorm in pieces against PyTorch.
+  - All 5284 distinct programs of SD 256 px (CLIP, UNet, VAE) compile for the card's config.
+  - The `.cmd` copy-back of the WAV / PNG files failed on `"%~dp0"` (the trailing backslash
+    escaped the quote): now `"%~dp0."`.
+
 ## Stable Diffusion 1.5 on the device; the MAC estimate (2026-11-25)
 
 - **SD 1.5 text to image** (`opentpu/sd_graph.py`, `tools/sd_card.py`, `tests/test_sd_graph.py`

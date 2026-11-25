@@ -12,7 +12,7 @@ import pytest
 
 from opentpu import kokoro_graph as KG
 from opentpu import resident as RG
-from opentpu.isasim import board_config
+from opentpu.isasim import lean_config
 
 torch = pytest.importorskip("torch")
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +22,7 @@ CONFIG = Path(os.environ.get("OTPU_KOKORO_CONFIG", "/home/claude/models/kokoro_s
 
 
 def _cfg():
-    return board_config(MCOLS=8, TFN=True, VCMP=True, VRAND=True, TMEM_WORDS=131072,
-                        DRAM_BYTES=1 << 27)
+    return lean_config(DRAM_BYTES=1 << 27)       # the card's (r5x lean) configuration
 
 
 def _cos(a, b):
@@ -150,8 +149,7 @@ def test_graph_a_on_the_real_weights():
     pack = load_file(str(WDIR / "af_heart.safetensors"))["af_heart"]
     ids = KG.ids_of(cfgj["vocab"], "həlˈO wˈɜɹld")
     style = pack[len(ids) - 3].reshape(-1)
-    g = RG.Graph(board_config(MCOLS=8, TFN=True, VCMP=True, TMEM_WORDS=131072,
-                              DRAM_BYTES=1 << 30))
+    g = RG.Graph(lean_config(DRAM_BYTES=1 << 30))
     kk = KG.Kokoro(W, cfgj)
     dur = kk.build_a(g, ids, style)
     img = _run(g, [(kk.ref_s, style)])

@@ -13,6 +13,9 @@ git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature && git mer
   || { echo "SYNC FAILED (host tree: $(git log --oneline -1))"; exit 1; }
 echo "== $(date +%H:%M:%S) $(git log --oneline -1 | cut -c1-90)"
 export PYTHONPATH=$R
+# the host's program / image caches (r8_ttft: TTFT 30 s cold -> 0.35-0.6 s warm; the same programs)
+export OTPU_PROG_CACHE=$HOME/otpu-cache/prog OTPU_IMG_CACHE=$HOME/otpu-cache/img
+export OTPU_PROG_CACHE_FREE_GB=5 OTPU_IMG_CACHE_FREE_GB=5; mkdir -p "$OTPU_PROG_CACHE" "$OTPU_IMG_CACHE"
 card() { "$R/.venv/bin/python" -c "
 import sys
 from opentpu.host.board import Board, XdmaTransport

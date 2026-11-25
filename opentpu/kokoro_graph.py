@@ -511,7 +511,7 @@ class Kokoro:
             g._rowwise(f"gen.mean{i}", add3_scale_k, x.L, x.C,
                        lambda r0, r1, o=outs, y=y: dict(a=o[0].rows(r0, r1), b=o[1].rows(r0, r1),
                                                         c=o[2].rows(r0, r1), y=y.rows(r0, r1)),
-                       s=1.0 / 3)
+                       tiles=6, s=1.0 / 3)         # a, b, c and a temporary live at once
             x = y
         self.t["gen_x"] = x
         return decoder_tail(g, x, self.w(G + "conv_post.weight_v"),

@@ -13,6 +13,9 @@ git fetch -q /tmp/sync.bundle claude-head:refs/remotes/claude/feature && git mer
 echo "== $(date +%H:%M:%S) $(git log --oneline -1 | cut -c1-90)"
 P=$HOME/hfref/bin/python; "$P" -c 'import tokenizers, numpy' 2>/dev/null || P=$R/.venv/bin/python
 export PYTHONPATH=$R OTPU_MM_K0_REPORT=1
+# the host's program / image caches (r8_ttft: TTFT 30 s cold -> 0.35-0.6 s warm; the same programs)
+export OTPU_PROG_CACHE=$HOME/otpu-cache/prog OTPU_IMG_CACHE=$HOME/otpu-cache/img
+export OTPU_PROG_CACHE_FREE_GB=5 OTPU_IMG_CACHE_FREE_GB=5; mkdir -p "$OTPU_PROG_CACHE" "$OTPU_IMG_CACHE"
 "$R/.venv/bin/python" -c "
 from opentpu.host.board import Board, XdmaTransport
 from opentpu.host import memcal

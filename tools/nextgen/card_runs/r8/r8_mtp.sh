@@ -17,6 +17,9 @@ echo "== $(date +%H:%M:%S) $(git log --oneline -1 | cut -c1-90)"
 MODELS=("$@"); [ ${#MODELS[@]} = 0 ] && MODELS=(qwen35 qwen35-2b)
 HOWS=(plain mtp); [ "${FP4:-0}" = 1 ] && HOWS=(plain mtp plain4 mtp4)
 export PYTHONPATH=$R
+# the host's program / image caches (r8_ttft: TTFT 30 s cold -> 0.35-0.6 s warm; the same programs)
+export OTPU_PROG_CACHE=$HOME/otpu-cache/prog OTPU_IMG_CACHE=$HOME/otpu-cache/img
+export OTPU_PROG_CACHE_FREE_GB=5 OTPU_IMG_CACHE_FREE_GB=5; mkdir -p "$OTPU_PROG_CACHE" "$OTPU_IMG_CACHE"
 mkdir -p "$OUT"; rm -f "$OUT"/*.txt
 card() { "$R/.venv/bin/python" -c "
 import sys

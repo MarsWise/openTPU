@@ -109,20 +109,36 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
     roll = (roll and ROLL and KH > 1 and stride < KH and OH > 1 and
             len(groups) * KH * (Kp // D) + 8 <= ol.act_blocks() and
             not any(cfg.PAIR and 2 * n <= cfg.MCOLS for _, n in groups))
-    rows = None if roll else ol.empty([KH, rw])
+    # one kernel row's input at a time when KH of them would take more than half of TMEM (SD's
+    # 2560-channel concatenations at 8 x 8: 3 x 25602 words): the row loaded before its MMs,
+    # for each tile of output pixels (the same bytes once a tile; few tiles at such widths)
+    # (and of that row only the columns a tile of output pixels reads: one input row of the VAE's
+    # 512-channel convolutions at 128 x 128, 66561 words, is more than TMEM's largest tile)
+    one = not roll and 2 * KH * rw > ol.tmem_words()
+    Rt = min(R, OW)                            # an output tile's rows (no tile is longer)
+    span = min(rw, (Rt - 1) * stride * Cin + Kp)   # the input columns of a tile's patches
+    rows = None if roll else ol.empty([1, span] if one else [KH, rw])
     # two output tiles when TMEM has room: the VPU's bias fill, activation and residual and the
     # store of one tile overlap the MXU's MMs into the other (the sequencer runs units
     # concurrently on disjoint TMEM)
-    nbuf = 2 if 2 * R * Cout + (2 if roll else KH) * rw + 3 * Cout + 4096 <= ol.tmem_words() else 1
-    outs = [ol.empty([R, Cout]) for _ in range(nbuf)]
+    nbuf = 2 if 2 * Rt * Cout + (2 * rw if roll else span if one else KH * rw) + 3 * Cout + 4096 \
+        <= ol.tmem_words() else 1
+    outs = [ol.empty([Rt, Cout]) for _ in range(nbuf)]
 
     def row(oh, par=0):
-        ol.load(x[oh * stride:oh * stride + KH, :], out=rows)
+        if not one:
+            ol.load(x[oh * stride:oh * stride + KH, :], out=rows)
         for gi, (ow0, n) in enumerate(groups):
             yt = outs[(par + gi) % nbuf][0:n, :]
             yt.set(bias[None, :])
             for kh in range(KH):
-                patches = rows.windows(kh, ow0 * stride * Cin, n, stride * Cin, Kp)
+                if one:
+                    c0 = ow0 * stride * Cin
+                    c1 = min(rw, c0 + (n - 1) * stride * Cin + Kp)
+                    ol.load(x[oh * stride + kh:oh * stride + kh + 1, c0:c1],
+                            out=rows[0:1, 0:c1 - c0])
+                patches = (rows.windows(0, 0, n, stride * Cin, Kp) if one else
+                           rows.windows(kh, ow0 * stride * Cin, n, stride * Cin, Kp))
                 q = ol.quantize(patches)
                 ol.dot(q, w[:, kh * Kp:(kh + 1) * Kp], acc=yt)
                 if wlo is not None:
@@ -133,7 +149,7 @@ def conv2d(x, w, b, y, H: int, W: int, Cin: int, Cout: int, KH: int, KW: int, st
                 yt.set(yt + ol.load(_out(res, oh, ow0, n, OW), out=rbuf[0:n, :]))
             ol.store(_out(y, oh, ow0, n, OW), yt)
 
-    rbuf = ol.empty([R, Cout]) if res is not None else None
+    rbuf = ol.empty([Rt, Cout]) if res is not None else None
     # ---- rolling patches (stride < KH): each input row's patches are quantized once, into
     # a ring of KH slots of a stationary per tile of output pixels, and every output row's KH
     # MMs read their kernel rows' slots: a QACT (and an input row's LD) per output row instead

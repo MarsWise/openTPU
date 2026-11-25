@@ -131,6 +131,21 @@ def board_config(**kw) -> Config:
     return Config(**base)
 
 
+def lean_config(tgq4m: bool = False, **kw) -> Config:
+    """The Config of the card's r5x-lean bitstreams, the one device_config reads from them: r8
+    less TBIN / TBGSC / TD5 / TATAN, with PAIR, DSTEP, STREAM, SEQ_WC and 16 ACT RAM rows, a
+    131072-word TMEM (CFG_HASH add73610: ed482f26-lean; with tgq4m, GRQ QUAD of 2 rows,
+    81dc3958: 16b4564a-lean). For the ISA runs that stand in for the card (tools/sd_card.py,
+    tools/kokoro_card.py --isa): a program that fits here fits there. kw: DRAM_BYTES etc."""
+    flags = ("PAIR", "TPAIR", "TQUAD", "TFN", "TGSC", "VCMP", "VU8", "TGRQ", "VRAND", "TCQ",
+             "QST4", "LDX", "VBFLY", "VAFF", "QST6", "VCSWP", "TGQ4", "DSTEP", "STREAM", "SEQ_WC")
+    base = {k: True for k in flags}
+    base.update(MCOLS=8, LANES=8, ACT_ROWS=16, TMEM_WORDS=131072, TBIN=False, TBGSC=False,
+                TD5=False, TATAN=False, TGQ4M=tgq4m)
+    base.update(kw)
+    return board_config(**base)
+
+
 class SimError(RuntimeError):
     pass
 
