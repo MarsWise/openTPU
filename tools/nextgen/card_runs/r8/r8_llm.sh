@@ -29,9 +29,10 @@ case "$m" in
             set -- maple "$W/maple-preview-TQ2_0-head-F16.gguf" --wformat tgsc --head-format int8 \
                    --experts ${EXPERTS:-128} --new ${NEW:-16} --cos 0.95 ;;   # ternary MoE, experts streamed
   ouro)     set -- ouro "$W" --cos 0.94 ;;                       # Ouro-1.4B-Thinking, 4 passes
-  dory)     set -- dory "$W/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf" --wformat int8 \
-                   --cap 256 --cos 0.95 ;;   # looped nGPT; int8: 3649 MiB, its decode program 29968 of
-                                             # IMEM's 32768 words (fp4 MLPs: 33424, does not fit)
+  dory)     set -- dory "$W/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf" --wformat mix \
+                   --formats gateup=fp4 --cap 256 --cos 0.95 ;;   # looped nGPT. int8: 4446 MiB, more
+            # than a slice's 4096; fp4 down projections: the decode program is 33424 words, more than
+            # IMEM's 32768. fp4 gate / up, int8 down: ~0.865 of int8 (~3850 MiB), 29968 words
   granite)  set -- gguf "$W/granite-4.2-3b-Q4_K_M.gguf" --wformat mix --formats gateup=nvfp4,down=fp4 --cos 0.85 ;;
   *) echo "model: lfm3 | lfm3-fp4 | minicpm5 | granite | maple | ouro | dory"; exit 2 ;;
 esac
