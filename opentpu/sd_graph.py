@@ -427,6 +427,26 @@ def timestep_row(t: int, dim: int = 320) -> np.ndarray:
     return np.concatenate([np.cos(e), np.sin(e)]).astype(np.float32)
 
 
+def _layout(ops, lo: int = 0) -> tuple:
+    """Ops' kernels and the addresses / shapes / strides of their views at or above `lo` (the
+    arena), names left out; a view below it (an input, a constant, a kept output) by its shape
+    alone. Two evaluations with equal layouts read and write the same arena words."""
+    from .compiler import Affine
+
+    def arg(v):
+        if hasattr(v, "base") and hasattr(v, "shape"):
+            try:
+                a = Affine.of(v.base).static() + 4 * Affine.of(v.offset).static()
+            except Exception:               # (a loop-dependent address: kept whole)
+                a = None
+            shp = (tuple(v.shape), tuple(getattr(v, "strides", ())))
+            if a is not None and a < lo:
+                return ("ext",) + shp
+            return ("T", a if a is not None else repr(v.base)) + shp
+        return v if isinstance(v, (int, float, str, bool, type(None))) else repr(v)
+    return tuple((id(k), tuple(sorted((n, arg(v)) for n, v in a.items()))) for _, k, a in ops)
+
+
 def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float = 7.5):
     """The whole pipeline on one Graph: both prompts' CLIP states, the initial latent from the
     seed (VOP RAND), `steps` DDIM steps of two UNet evaluations each, the VAE decoder.
@@ -448,7 +468,7 @@ def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float
         tr = g.tensor(1, 320)
         trs.append(tr)
     arena = -(-g.top // RG.ALIGN) * RG.ALIGN
-    used = [arena]
+    used, last = [arena], None
     for s, (t, a, b) in enumerate(sched):
         g.consts.append((trs[s].addr, timestep_row(t)[None, :]))
         xin, xout = lat[s % 2], lat[(s + 1) % 2]
@@ -457,8 +477,13 @@ def build_txt2img(g, sd: SD, ids_c, ids_u, h: int, w: int, steps: int, gs: float
             at = len(g.ops)
             e = sd.unet(g, _t2(xin, h, w), trs[s], ctx, tag=f"s{s}{tag}")
             g.copy(_dt(e), keep, name=f"s{s}{tag}.keep")
-            if max(used) > arena:                       # (stale: the previous evaluation's)
+            sig = _layout(g.ops[at:], arena)
+            # (stale: the previous evaluation's). An evaluation with the previous one's layout
+            # (every op the same kernel on the same addresses: the UNet's 2 x steps) writes
+            # what it reads first, as that one did, and never a border: no zeroing
+            if max(used) > arena and sig != last:
                 zero_region(g, arena, max(used), at, f"s{s}{tag}.zero")
+            last = sig
             used.append(g.top)
         g.op(f"s{s}.ddim", cfg_ddim_k, x=xin.rows(), eu=eu_keep.rows(), ec=ec_keep.rows(),
              y=xout.rows(), gs=float(gs), a=float(a), b=float(b))

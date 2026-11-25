@@ -120,6 +120,46 @@ def test_small_unet_follows_diffusers():
     assert _cos(dev, ref) > 0.995
 
 
+def test_reused_arena_needs_no_zeroing_between_equal_layouts():
+    """build_txt2img zeroes the arena only before an evaluation whose layout differs from the
+    previous one's: a second UNet evaluation on the first one's arena (its activations left
+    there) gives the output a fresh arena gives, bit for bit, and the two layouts are equal."""
+    m = _tiny_unet()
+    W = {"unet." + k: v.detach().numpy() for k, v in m.state_dict().items()}
+    rng = np.random.default_rng(5)
+    xa, xb = (rng.normal(size=(64, 4)).astype(np.float32) for _ in range(2))
+    ctx0 = rng.normal(size=(9, 64)).astype(np.float32)
+    trow = rng.normal(size=(1, 64)).astype(np.float32)
+
+    def graph(inputs):
+        g = S.SDGraph(_cfg(1 << 28), 1 << 27)
+        sd = S.SD(W)
+        ctx, tr = g.tensor(9, 64), g.tensor(1, 64)
+        xs = [g.tensor(64, 4) for _ in inputs]
+        outs = [g.tensor(64, 4) for _ in inputs]
+        arena = -(-g.top // RG.ALIGN) * RG.ALIGN
+        sigs = []
+        for x, o in zip(xs, outs):
+            g.top = arena
+            at = len(g.ops)
+            e = _unet_levels(sd, g, S._t2(x, 8, 8), tr, ctx, levels=2)
+            g.copy(S._dt(e), o, name="keep")
+            sigs.append(S._layout(g.ops[at:], arena))
+        img = g.image()
+        for x, v in zip(xs, inputs):
+            g.put(img, x, v)
+        g.put(img, ctx, ctx0)
+        g.put(img, tr, trow)
+        img, _ = RG.run_isa(g.cfg, g.compile(), img)
+        return [g.read(img, o) for o in outs], sigs
+
+    (a1, b2), sigs = graph([xa, xb])
+    (b1,), _ = graph([xb])
+    assert sigs[0] == sigs[1]
+    assert np.array_equal(b2, b1)
+    assert not np.array_equal(a1, b1)
+
+
 def _unet_levels(sd, g, x, t_in, ctx, levels):
     """SD.unet for a UNet of `levels` down / up levels (the real one has 4)."""
     import types

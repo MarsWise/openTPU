@@ -50,10 +50,13 @@ class DT:
 
 # ---------------------------------------------------------------- kernels (fixed addresses)
 @ol.jit
-def dense_k(x, w, b, y, M: int, K: int, act: str = "none", view_rows: int = 0):
+def dense_k(x, w, b, y, M: int, K: int, act: str = "none", view_rows: int = 0,
+            taps: tuple = ()):
     """y [M, N] = act(x [M, K] @ w^T + b): x loaded into a zero [R, Kp] tile (K padded to
     whole blocks: no over-read in the quantized operand), N in tiles of NC, K in ranges that
-    fit ACT RAM."""
+    fit ACT RAM. taps (a convolution's row offsets): x is the padded input [rows, C] and an
+    output row's K = len(taps) * C columns are its rows m + taps[j], tap after tap (a dilated
+    convolution without the zero columns of its expanded kernel)."""
     from .kernels import eltwise as E
     D = ol.block_size()
     Kp = -(-K // D) * D
@@ -65,7 +68,12 @@ def dense_k(x, w, b, y, M: int, K: int, act: str = "none", view_rows: int = 0):
     xt = ol.zeros([R, Kp])
     for m0 in range(0, M, R):
         n = min(R, M - m0)
-        ol.load(x[m0:m0 + n, :], out=xt[0:n, 0:K])
+        if taps:
+            C = K // len(taps)
+            for j, o in enumerate(taps):
+                ol.load(x[m0 + o:m0 + o + n, :], out=xt[0:n, j * C:(j + 1) * C])
+        else:
+            ol.load(x[m0:m0 + n, :], out=xt[0:n, 0:K])
         for c0 in range(0, N, NC):
             c = min(NC, N - c0)
             yt = ol.empty([n, c])
@@ -216,11 +224,29 @@ class Graph:
 
     def conv1d(self, x: DT, w: np.ndarray, b: np.ndarray | None, stride: int = 1,
                pad: int = 0, y: DT | None = None, ypad: int = 2, act: str = "none",
-               name: str = "conv1d") -> DT:
-        """w [Cout, Cin, k]; x's pad >= pad (its border rows are the zero padding)."""
+               name: str = "conv1d", dilation: int = 1) -> DT:
+        """w [Cout, Cin, k]; x's pad >= pad (its border rows are the zero padding). dilation > 1
+        (stride 1): each output row's k taps loaded dilation rows apart (dense_k's taps)."""
         Cout, Cin, k = w.shape
         if x.pad < pad or x.C != Cin or x.rs != Cin:
             raise ValueError(f"{name}: input pad {x.pad} < {pad}, or not a dense [L, {Cin}]")
+        if dilation > 1:
+            if stride != 1:
+                raise ValueError(f"{name}: a dilated convolution of stride 1 only")
+            Lo = x.L + 2 * pad - (k - 1) * dilation
+            y = y or self.tensor(Lo, Cout, ypad)
+            wk = np.ascontiguousarray(w.transpose(0, 2, 1).reshape(Cout, k * Cin))
+            b = np.zeros(Cout, np.float32) if b is None else b
+            wt, bt = self.weight(wk), self.vec(b)
+            base = x.addr + 4 * ((x.pad - pad) * Cin)
+            span = (k - 1) * dilation
+            taps = tuple(j * dilation for j in range(k))
+            ch = [(r, min(Lo, r + LINEAR_ROWS)) for r in range(0, Lo, LINEAR_ROWS)]
+            for i, (r0, r1) in enumerate(ch):
+                v = Tensor(base + 4 * r0 * Cin, (r1 - r0 + span, Cin), (Cin, 1))
+                self.op(name if len(ch) == 1 else f"{name}.{i}", dense_k, x=v, w=wt, b=bt,
+                        y=y.rows(r0, r1), M=r1 - r0, K=k * Cin, act=act, taps=taps)
+            return y
         Lo = (x.L + 2 * pad - k) // stride + 1
         y = y or self.tensor(Lo, Cout, ypad)
         view = Tensor(x.addr + 4 * ((x.pad - pad) * Cin), (Lo, k * Cin), (stride * Cin, 1))
@@ -604,10 +630,12 @@ class T2:
 def group_norm2d_k(x, w, b, y, H: int, W: int, G: int, eps: float, act: str = "none",
                    res=None):
     """y = act(GroupNorm(x) * w + b (+ res)): x [H*W, C] dense, y (and res) [H, W, C] views.
-    Three hardware loops over the image rows: the groups' sums, their squared deviations from
-    the means, then the normalization, its affine, the residual and the activation. A row
-    wider than an eighth of TMEM goes in equal pieces of pixels (the SD VAE's rows at 256 px:
-    256 x 256 and 128 x 512 words; TMEM's largest tile on the card is 65536 words)."""
+    Three hardware loops over the image rows, each on whole [pixels, C] tiles (one instruction
+    a tile, not one a group): per channel sums kept per pixel row of the tile and folded once,
+    the groups' means and inverse deviations spread back over their channels, then y = x * a +
+    c per channel. A row wider than an eighth of TMEM goes in equal pieces of pixels (the SD
+    VAE's rows at 256 px: 256 x 256 and 128 x 512 words; TMEM's largest tile on the card is
+    65536 words)."""
     from .kernels import eltwise as E
     C = x.shape[1]
     cg = C // G
@@ -616,36 +644,38 @@ def group_norm2d_k(x, w, b, y, H: int, W: int, G: int, eps: float, act: str = "n
         Wc = max(d for d in range(1, Wc) if W % d == 0)
     pieces = [(p0, Wc) for p0 in range(0, W, Wc)]
     t = ol.empty([Wc, C])
-    wv, bv = ol.load(w), ol.load(b)
+    acc = ol.zeros([Wc, C])
     inv = 1.0 / (H * W * cg)
-    sums = [ol.zeros([1]) for _ in range(G)]
+
+    def per_channel_group(a):                    # [Wc, C] partial sums -> [C]: each channel
+        v = ol.zeros([C])                        # its group's sum
+        for r in range(Wc):
+            v.set(v + a[r, :])
+        for g in range(G):
+            sl = v[g * cg:(g + 1) * cg]
+            sl.set(sl * 0.0 + ol.sum(sl))
+        return v
+
     for h in ol.range(H):
         for p0, n in pieces:
             ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
-            for g in range(G):
-                sums[g].set(sums[g] + ol.sum(ol.sum(t[:, g * cg:(g + 1) * cg], axis=1)))
-    means = [ol.zeros([1]) for _ in range(G)]
-    for g in range(G):
-        means[g].set(sums[g] * inv)
-    sq = [ol.zeros([1]) for _ in range(G)]
-    d = ol.empty([Wc, cg])
+            acc.set(acc + t)
+    mean = per_channel_group(acc) * inv
+    acc.set(acc * 0.0)
     for h in ol.range(H):
         for p0, n in pieces:
             ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
-            for g in range(G):
-                d.set(t[:, g * cg:(g + 1) * cg] - means[g])
-                sq[g].set(sq[g] + ol.sum(ol.sumsq(d)))
-    rs = [ol.zeros([1]) for _ in range(G)]
-    for g in range(G):
-        rs[g].set(ol.rsqrt(sq[g] * inv + eps))
+            t.set(t - mean[None, :])
+            acc.set(acc + t * t)
+    rs = ol.rsqrt(per_channel_group(acc) * inv + eps)
+    wv, bv = ol.load(w), ol.load(b)
+    a = rs * wv                                  # y = (x - mean) * rs * w + b = x * a + c
+    c = bv - mean * a
     rt = ol.empty([Wc, C]) if res is not None else None
     for h in ol.range(H):
         for p0, n in pieces:
             ol.load(x[h * W + p0:h * W + p0 + n, :], out=t)
-            for g in range(G):
-                sl = t[:, g * cg:(g + 1) * cg]
-                sl.set((sl - means[g]) * rs[g])
-            t.set(t * wv[None, :] + bv[None, :])
+            t.set(t * a[None, :] + c[None, :])
             if res is not None:
                 ol.load(res[h, p0:p0 + n, :], out=rt)
                 t.set(t + rt)

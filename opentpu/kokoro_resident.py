@@ -7,22 +7,56 @@ from .compiler import Tensor
 
 @ol.jit
 def _instance_affine(x, gamma, beta, style, y, length: int, channels: int, eps: float):
-    # Keep only one time row in TMEM. The variance uses centered differences.
-    total = ol.zeros([channels])
-    for t in ol.range(length):
-        total.set(total + ol.load(x[t, :]))
+    """AdaIN's instance norm and affine over [length, channels]: three hardware loops over blocks
+    of R rows ([R, C] tiles: one instruction a block, not a row), the statistics' partial sums
+    kept per row of the block and folded at the end; the variance from centered differences.
+    A tail of length % R rows after each loop."""
+    C = channels
+    R = max(1, min(length, 64, (ol.tmem_contiguous() // 8) // C))
+    nb, tail = length // R, length % R
+    t = ol.empty([R, C])
+    acc = ol.zeros([R, C])
+
+    def fold(a, n):                     # [n, C] partial sums -> [C]
+        v = ol.zeros([C])
+        for r in range(n):
+            v.set(v + a[r, :])
+        return v
+
+    for i in ol.range(nb):
+        ol.load(x[i * R:i * R + R, :], out=t)
+        acc.set(acc + t)
+    total = fold(acc, R)
+    if tail:
+        tt = ol.load(x[nb * R:length, :])
+        total.set(total + fold(tt, tail))
+        del tt
     mean = total * (1.0 / length)
-    square = ol.zeros([channels])
-    for t in ol.range(length):
-        d = ol.load(x[t, :]) - mean
-        square.set(square + d * d)
+    acc.set(acc * 0.0)
+    for i in ol.range(nb):
+        ol.load(x[i * R:i * R + R, :], out=t)
+        t.set(t - mean[None, :])
+        acc.set(acc + t * t)
+    square = fold(acc, R)
+    if tail:
+        tt = ol.load(x[nb * R:length, :])
+        tt.set(tt - mean[None, :])
+        square.set(square + fold(tt * tt, tail))
+        del tt
     inv = ol.rsqrt(square * (1.0 / length) + eps)
     w, b = ol.load(gamma), ol.load(beta)
-    scale = ol.load(style[0, :channels]) + 1.0
-    shift = ol.load(style[0, channels:])
-    for t in ol.range(length):
-        v = (ol.load(x[t, :]) - mean) * inv
-        ol.store(y[t, :], (v * w + b) * scale + shift)
+    sc = ol.load(style[0, :C]) + 1.0
+    # y = ((x - mean) * inv * w + b) * sc + shift = x * a + c, a and c per channel
+    a = inv * w * sc
+    c = (b - mean * inv * w) * sc + ol.load(style[0, C:])
+    for i in ol.range(nb):
+        ol.load(x[i * R:i * R + R, :], out=t)
+        t.set(t * a[None, :] + c[None, :])
+        ol.store(y[i * R:i * R + R, :], t)
+    if tail:
+        tt = ol.load(x[nb * R:length, :])
+        tt.set(tt * a[None, :] + c[None, :])
+        ol.store(y[nb * R:length, :], tt)
 
 
 def adain(g, x, style, fc_weight, fc_bias, norm_weight, norm_bias, eps=1e-5):
@@ -60,11 +94,12 @@ def dilated_conv(g, x, weight, bias, dilation=1):
     if not isinstance(dilation, int) or dilation < 1:
         raise ValueError("dilation must be a positive integer")
     kernel = (w.shape[2] - 1) * dilation + 1
-    expanded = np.zeros((w.shape[0], w.shape[1], kernel), np.float32)
-    expanded[:, :, ::dilation] = w
     padded = g.tensor(x.L, x.C, pad=kernel // 2)
     g.copy(x, padded, name="kokoro.conv_padding")
-    return g.conv1d(padded, expanded, bias, pad=kernel // 2, name="kokoro.dilated_conv")
+    # the k taps dilation rows apart (conv1d's dilation): no zero columns of an expanded
+    # kernel, (k - 1) * dilation + 1 taps' MACs and weight bytes cut to k
+    return g.conv1d(padded, w, bias, pad=kernel // 2, name="kokoro.dilated_conv",
+                    dilation=dilation)
 
 
 def adain_resblock(g, x, style, state, dilation=(1, 3, 5)):

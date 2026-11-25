@@ -1,5 +1,31 @@
 # Nextgen implementation progress
 
+## Kokoro and SD card profile (r8_media_profile, 81dc3958) and the fixes it pointed to (2026-11-25)
+
+- **Kokoro phrase 1, graph B (417.0 Mcycles, PHYSICAL)**: `kokoro.dilated_conv` 221.1 (53 %,
+  816 programs), `kokoro.instance_affine` 107.6 (26 %, 70 programs: 1.5 Mcycles each), snake
+  30.5 (7 %), `gen.up` 18.6, padding copies 7.6, residual adds 7.6. Graph A: 3.7 Mcycles.
+  - The dilated convolutions ran an expanded kernel ((k - 1) * dilation + 1 taps, all but k of
+    them zero columns: k 11 at dilation 5 is 51 taps): 3.4-4.6x the MACs and the weight bytes
+    re-streamed every 16 rows. Now `Graph.conv1d(dilation=)` loads the k taps' input rows
+    dilation apart into one [R, k * C] tile (`dense_k(taps=)`): no zero columns.
+  - The instance norm loaded and processed one time row per loop iteration (3 passes over
+    ~18000 rows). Now [R, C] blocks (R <= 64), partial sums folded once, y = x * a + c per
+    channel.
+- **SD 1.5 256 px, 1 step (1807.6 Mcycles, PHYSICAL)**: the VAE is 1143 Mcycles of it (GroupNorm
+  `vae.ur.gn` 532 + `vae.gn_out` 59, convs 337 + 113 + ...), a UNet evaluation ~277 (convs,
+  attention 24 + 16, GroupNorm ~30, arena zeroing 17.9 = 6.5 %), CLIP ~110. In the 20-step run
+  the UNet is 90 % (11.1 of 12.3 Gcycles), ~32 % of the MXU's peak on its MACs.
+  - GroupNorm 2-D did 32 groups' sliced ops per tile row (one instruction a group). Now whole
+    [pixels, C] tiles: per channel sums folded once, the groups' statistics spread over their
+    channels, y = x * a + c per channel.
+  - The arena was zeroed before every UNet evaluation but the first. An evaluation whose ops
+    have the previous one's kernels and arena addresses (`sd_graph._layout`; inputs, constants
+    and kept outputs below the arena by shape only) writes everything it reads and no border:
+    no zeroing. A 3-step build now zeroes only before the VAE (another layout).
+- Before the card rerun: ISA / RTL tests (63 passed: SD graph, Kokoro graph / resident,
+  resident ops), Kokoro phrase 1 and SD 64 px end to end on the ISA against the references.
+
 ## 16b4564a-lean on the card: GRQ QUAD of 2 rows measured; fixes from r8_all_tests (2026-11-25)
 
 - **16b4564a-lean loaded** (CFG_HASH 81dc3958, caps2 tgq4m). DDR3 gate: every ECC counter 0 / 0
